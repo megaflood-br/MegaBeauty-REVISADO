@@ -1,0 +1,632 @@
+"use server";
+
+import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
+import { prisma } from "@/lib/db";
+import {
+  assertClientInTenant,
+  assertProfessionalInTenant,
+  assertProfessionalsInTenant,
+  requireTenant,
+} from "@/lib/tenant";
+import { calculateCommission } from "@/lib/commissions";
+import { allocatePayments, comandaTotal, itemLineTotal } from "@/lib/comandas";
+import { parseBRLToCents } from "@/lib/money";
+import { zonedDateTime } from "@/lib/dates";
+import { PAYMENT_METHODS } from "@/lib/constants";
+import { ensureFinanceCatalog } from "@/lib/finance-catalog";
+import { postLedgerEntry } from "@/lib/ledger";
+
+async function nextNumber(tenantId: string) {
+  const last = await prisma.comanda.findFirst({
+    where: { tenantId },
+    orderBy: { number: "desc" },
+    select: { number: true },
+  });
+  return (last?.number ?? 0) + 1;
+}
+
+function revalidateComandas() {
+  revalidatePath("/comandas");
+  revalidatePath("/agenda");
+  revalidatePath("/dashboard");
+  revalidatePath("/financeiro");
+  revalidatePath("/comissoes");
+  revalidatePath("/estoque");
+  revalidatePath("/cadastros");
+}
+
+export async function createComandaFromAppointment(appointmentId: string) {
+  const { session } = await requireTenant();
+  const appointment = await prisma.appointment.findFirst({
+    where: { id: appointmentId, tenantId: session.tenantId },
+    include: { items: { include: { service: true } }, comanda: true },
+  });
+  if (!appointment) return { error: "Agendamento não encontrado." };
+  if (appointment.comanda) return { ok: true as const, id: appointment.comanda.id, existing: true };
+
+  const comanda = await prisma.$transaction(async (tx) => {
+    const last = await tx.comanda.findFirst({
+      where: { tenantId: session.tenantId },
+      orderBy: { number: "desc" },
+      select: { number: true },
+    });
+    const created = await tx.comanda.create({
+      data: {
+        tenantId: session.tenantId,
+        number: (last?.number ?? 0) + 1,
+        clientId: appointment.clientId,
+        appointmentId: appointment.id,
+        professionalId: appointment.professionalId,
+        status: "OPEN",
+        items: {
+          create: appointment.items.map((item) => ({
+            type: "SERVICE",
+            serviceId: item.serviceId,
+            professionalId: item.professionalId ?? appointment.professionalId,
+            description: item.service.name,
+            quantity: 1,
+            priceCents: item.priceCents,
+            durationMin: item.durationMin,
+          })),
+        },
+      },
+    });
+    await tx.appointment.update({
+      where: { id: appointment.id },
+      data: { status: appointment.status === "PENDING" ? "CONFIRMED" : appointment.status },
+    });
+    return created;
+  });
+
+  revalidateComandas();
+  return { ok: true as const, id: comanda.id, existing: false };
+}
+
+export async function upsertComanda(formData: FormData) {
+  const { session } = await requireTenant();
+  const id = String(formData.get("id") ?? "");
+  const clientId = String(formData.get("clientId") ?? "");
+  const professionalId = String(formData.get("professionalId") ?? "") || null;
+  const notes = String(formData.get("notes") ?? "").trim() || null;
+  const discountCents = Math.max(0, parseBRLToCents(String(formData.get("discount") ?? "0")));
+  const creditCents = Math.max(0, parseBRLToCents(String(formData.get("credit") ?? "0")));
+  const cashbackCents = Math.max(0, parseBRLToCents(String(formData.get("cashback") ?? "0")));
+  const dateRaw = String(formData.get("occurredAt") ?? "");
+  const occurredAt = /^\d{4}-\d{2}-\d{2}$/.test(dateRaw) ? zonedDateTime(dateRaw, "12:00") : new Date();
+  const numberRaw = Number(formData.get("number") ?? "");
+
+  if (!clientId) return { error: "Selecione um cliente." };
+
+  const client = await prisma.client.findFirst({
+    where: { id: clientId, tenantId: session.tenantId },
+    select: { id: true, creditCents: true, cashbackCents: true },
+  });
+  if (!client) return { error: "Cliente não encontrado." };
+  if (creditCents > client.creditCents) return { error: "Crédito informado excede o saldo do cliente." };
+  if (cashbackCents > client.cashbackCents) return { error: "Cashback informado excede o saldo do cliente." };
+
+  const keys = formData.getAll("itemKey").map(String);
+  const qtys = formData.getAll("itemQty").map(String);
+  const prices = formData.getAll("itemPrice").map(String);
+  const discounts = formData.getAll("itemDiscount").map(String);
+  const discountTypes = formData.getAll("itemDiscountType").map(String);
+  const itemProfessionals = formData.getAll("itemProfessionalId").map(String);
+
+  const allProfessionalIds = [professionalId ?? "", ...itemProfessionals].filter(Boolean);
+  if (!(await assertProfessionalsInTenant(session.tenantId, allProfessionalIds))) {
+    return { error: "Profissional inválido." };
+  }
+
+  const parsedItems: {
+    type: string;
+    serviceId: string | null;
+    productId: string | null;
+    professionalId: string | null;
+    description: string;
+    quantity: number;
+    priceCents: number;
+    discountCents: number;
+    durationMin: number;
+  }[] = [];
+
+  const serviceEntityIds: string[] = [];
+  const productEntityIds: string[] = [];
+  for (const key of keys) {
+    if (!key) continue;
+    const [kind, entityId] = key.split(":");
+    if (kind === "SERVICE" && entityId) serviceEntityIds.push(entityId);
+    if (kind === "PRODUCT" && entityId) productEntityIds.push(entityId);
+  }
+
+  const [services, products] = await Promise.all([
+    serviceEntityIds.length
+      ? prisma.service.findMany({ where: { id: { in: serviceEntityIds }, tenantId: session.tenantId } })
+      : Promise.resolve([]),
+    productEntityIds.length
+      ? prisma.product.findMany({ where: { id: { in: productEntityIds }, tenantId: session.tenantId } })
+      : Promise.resolve([]),
+  ]);
+  const serviceById = new Map(services.map((s) => [s.id, s]));
+  const productById = new Map(products.map((p) => [p.id, p]));
+
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    if (!key) continue;
+    const [kind, entityId] = key.split(":");
+    const rawQty = Number(String(qtys[i] ?? "1").replace(",", "."));
+    const quantity = Number.isFinite(rawQty) && rawQty > 0 ? rawQty : 1;
+    const inputPriceCents = Math.max(0, parseBRLToCents(prices[i] ?? "0"));
+    const discountInput = discounts[i] ?? "0";
+    const discountType = discountTypes[i] === "percent" ? "percent" : "money";
+
+    if (kind === "SERVICE") {
+      const service = serviceById.get(entityId);
+      if (!service) continue;
+      const resolvedPrice = inputPriceCents || service.priceCents;
+      const gross = Math.round(quantity * resolvedPrice);
+      const discountCentsItem =
+        discountType === "percent"
+          ? Math.round(gross * (Math.min(100, Math.max(0, Number(String(discountInput).replace(",", ".")) || 0)) / 100))
+          : Math.max(0, parseBRLToCents(discountInput));
+      parsedItems.push({
+        type: "SERVICE",
+        serviceId: service.id,
+        productId: null,
+        professionalId: itemProfessionals[i] || professionalId,
+        description: service.name,
+        quantity,
+        priceCents: resolvedPrice,
+        discountCents: Math.min(gross, Math.max(0, discountCentsItem)),
+        durationMin: service.durationMin,
+      });
+    } else if (kind === "PRODUCT") {
+      const product = productById.get(entityId);
+      if (!product) continue;
+      const resolvedPrice = inputPriceCents || product.saleCents;
+      const gross = Math.round(quantity * resolvedPrice);
+      const discountCentsItem =
+        discountType === "percent"
+          ? Math.round(gross * (Math.min(100, Math.max(0, Number(String(discountInput).replace(",", ".")) || 0)) / 100))
+          : Math.max(0, parseBRLToCents(discountInput));
+      parsedItems.push({
+        type: "PRODUCT",
+        serviceId: null,
+        productId: product.id,
+        professionalId: itemProfessionals[i] || professionalId,
+        description: product.name,
+        quantity,
+        priceCents: resolvedPrice,
+        discountCents: Math.min(gross, Math.max(0, discountCentsItem)),
+        durationMin: 0,
+      });
+    }
+  }
+
+  try {
+    const result = await prisma.$transaction(async (tx) => {
+      let comandaId = id;
+      let number = Number.isFinite(numberRaw) && numberRaw > 0 ? Math.round(numberRaw) : await nextNumber(session.tenantId);
+
+      if (id) {
+        const existing = await tx.comanda.findFirst({ where: { id, tenantId: session.tenantId } });
+        if (!existing) return { error: "Comanda não encontrada." };
+        if (existing.status !== "OPEN") return { error: "Esta comanda já foi encerrada." };
+        if (number !== existing.number) {
+          const taken = await tx.comanda.findFirst({ where: { tenantId: session.tenantId, number } });
+          if (taken) return { error: "Já existe uma comanda com este número." };
+        }
+        await tx.comanda.update({
+          where: { id },
+          data: {
+            clientId,
+            professionalId,
+            notes,
+            discountCents,
+            creditCents,
+            cashbackCents,
+            occurredAt,
+            number,
+          },
+        });
+        await tx.comandaItem.deleteMany({ where: { comandaId: id } });
+      } else {
+        const taken = await tx.comanda.findFirst({ where: { tenantId: session.tenantId, number } });
+        if (taken) number = await nextNumber(session.tenantId);
+        const created = await tx.comanda.create({
+          data: {
+            tenantId: session.tenantId,
+            number,
+            clientId,
+            professionalId,
+            notes,
+            discountCents,
+            creditCents,
+            cashbackCents,
+            occurredAt,
+            status: "OPEN",
+          },
+        });
+        comandaId = created.id;
+      }
+
+      if (parsedItems.length) {
+        await tx.comandaItem.createMany({
+          data: parsedItems.map((item) => ({ comandaId, ...item })),
+        });
+      }
+
+      return { ok: true as const, id: comandaId };
+    });
+
+    if ("error" in result) return result;
+    revalidateComandas();
+    revalidatePath(`/comandas/${result.id}`);
+    return result;
+  } catch (err) {
+    if (
+      typeof err === "object" &&
+      err &&
+      "digest" in err &&
+      String((err as { digest?: string }).digest).startsWith("NEXT_REDIRECT")
+    ) {
+      throw err;
+    }
+    console.error("upsertComanda", err);
+    return { error: "Não foi possível salvar a comanda. Confira os campos e tente de novo." };
+  }
+}
+
+export async function createWalkInComanda(formData: FormData) {
+  const { session } = await requireTenant();
+  const clientId = String(formData.get("clientId") ?? "");
+  const professionalId = String(formData.get("professionalId") ?? "") || null;
+  if (!clientId) return { error: "Selecione um cliente." };
+  if (!(await assertClientInTenant(session.tenantId, clientId))) {
+    return { error: "Cliente inválido." };
+  }
+  if (professionalId && !(await assertProfessionalInTenant(session.tenantId, professionalId))) {
+    return { error: "Profissional inválido." };
+  }
+
+  const comanda = await prisma.comanda.create({
+    data: {
+      tenantId: session.tenantId,
+      number: await nextNumber(session.tenantId),
+      clientId,
+      professionalId,
+      status: "OPEN",
+    },
+  });
+  revalidateComandas();
+  redirect(`/comandas/${comanda.id}`);
+}
+
+export async function addComandaItem(formData: FormData) {
+  const { session } = await requireTenant();
+  const comandaId = String(formData.get("comandaId") ?? "");
+  const type = String(formData.get("type") ?? "SERVICE");
+  const serviceId = String(formData.get("serviceId") ?? "") || null;
+  const productId = String(formData.get("productId") ?? "") || null;
+  const professionalId = String(formData.get("professionalId") ?? "") || null;
+  const rawQty = Number(formData.get("quantity") ?? 1);
+  const quantity = Number.isFinite(rawQty) && rawQty > 0 ? rawQty : 1;
+
+  const comanda = await prisma.comanda.findFirst({
+    where: { id: comandaId, tenantId: session.tenantId, status: "OPEN" },
+  });
+  if (!comanda) return { error: "Comanda não encontrada ou já fechada." };
+  if (professionalId && !(await assertProfessionalInTenant(session.tenantId, professionalId))) {
+    return { error: "Profissional inválido." };
+  }
+
+  if (type === "SERVICE") {
+    const service = await prisma.service.findFirst({
+      where: { id: serviceId ?? "", tenantId: session.tenantId },
+    });
+    if (!service) return { error: "Selecione um serviço." };
+    await prisma.comandaItem.create({
+      data: {
+        comandaId,
+        type: "SERVICE",
+        serviceId: service.id,
+        professionalId: professionalId ?? comanda.professionalId,
+        description: service.name,
+        quantity,
+        priceCents: service.priceCents,
+        durationMin: service.durationMin,
+      },
+    });
+  } else {
+    const product = await prisma.product.findFirst({
+      where: { id: productId ?? "", tenantId: session.tenantId },
+    });
+    if (!product) return { error: "Selecione um produto." };
+    await prisma.comandaItem.create({
+      data: {
+        comandaId,
+        type: "PRODUCT",
+        productId: product.id,
+        description: product.name,
+        quantity,
+        priceCents: product.saleCents,
+      },
+    });
+  }
+
+  revalidatePath(`/comandas/${comandaId}`);
+  revalidatePath("/comandas");
+  return { ok: true };
+}
+
+export async function removeComandaItem(itemId: string) {
+  const { session } = await requireTenant();
+  const item = await prisma.comandaItem.findFirst({
+    where: { id: itemId, comanda: { tenantId: session.tenantId, status: "OPEN" } },
+  });
+  if (!item) return { error: "Item não encontrado." };
+  await prisma.comandaItem.delete({ where: { id: item.id } });
+  revalidatePath(`/comandas/${item.comandaId}`);
+  revalidatePath("/comandas");
+  return { ok: true };
+}
+
+export async function removeComandaItemForm(formData: FormData) {
+  return removeComandaItem(String(formData.get("itemId") ?? ""));
+}
+
+type ParsedPayment = {
+  method: string;
+  paymentMethodId?: string;
+  amountCents: number;
+  installments: number;
+  occurredAt: Date;
+};
+
+function parsePayments(formData: FormData): ParsedPayment[] {
+  const methods = formData.getAll("payMethod").map(String);
+  const methodIds = formData.getAll("payMethodId").map(String);
+  const amounts = formData.getAll("payAmount").map(String);
+  const installments = formData.getAll("payInstallments").map(String);
+  const dates = formData.getAll("payDate").map(String);
+  const allowed = new Set<string>(PAYMENT_METHODS);
+  const payments: ParsedPayment[] = [];
+  const count = Math.max(methods.length, methodIds.length, amounts.length);
+  for (let i = 0; i < count; i++) {
+    const method = methods[i] ?? "";
+    const paymentMethodId = methodIds[i] || undefined;
+    if (!paymentMethodId && !allowed.has(method)) continue;
+    const amountCents = parseBRLToCents(amounts[i] ?? "0");
+    if (amountCents <= 0) continue;
+    const qty = Math.max(1, Math.min(12, Math.round(Number(installments[i] ?? "1") || 1)));
+    const dateRaw = dates[i] ?? "";
+    const occurredAt = /^\d{4}-\d{2}-\d{2}$/.test(dateRaw) ? zonedDateTime(dateRaw, "12:00") : new Date();
+    payments.push({ method: method || "PIX", paymentMethodId, amountCents, installments: qty, occurredAt });
+  }
+  return payments;
+}
+
+async function finalizeOpenComanda(
+  tenantId: string,
+  comandaId: string,
+  payments: ParsedPayment[],
+  discountOverride?: number,
+) {
+  await ensureFinanceCatalog(tenantId);
+
+  try {
+    const result = await prisma.$transaction(async (tx) => {
+      const comanda = await tx.comanda.findFirst({
+        where: { id: comandaId, tenantId },
+        include: {
+          items: { include: { service: { include: { products: true } } } },
+          appointment: { include: { commissions: true, transactions: true } },
+        },
+      });
+      if (!comanda) return { error: "Comanda não encontrada." };
+      if (comanda.status !== "OPEN") return { error: "Esta comanda já foi encerrada." };
+      if (comanda.items.length === 0) return { error: "Inclua itens antes de fechar." };
+      if (!payments.length) return { error: "Adicione um pagamento." };
+
+      const discountCents = Math.max(0, discountOverride ?? comanda.discountCents);
+      const total = comandaTotal({
+        items: comanda.items,
+        discountCents,
+        creditCents: comanda.creditCents,
+        cashbackCents: comanda.cashbackCents,
+      });
+      const paidCents = payments.reduce((sum, p) => sum + p.amountCents, 0);
+      if (paidCents < total) return { error: "O total pago é menor que o valor da comanda." };
+
+      const allocated = allocatePayments(total, payments);
+      const primary = allocated.find((p) => p.appliedCents > 0) ?? allocated[0];
+
+      // Conditional update prevents concurrent double-closing race conditions
+      const locked = await tx.comanda.updateMany({
+        where: { id: comanda.id, tenantId, status: "OPEN" },
+        data: {
+          status: "CLOSED",
+          closedAt: new Date(),
+          paymentMethod: primary.method,
+          discountCents,
+        },
+      });
+      if (locked.count === 0) {
+        return { error: "Esta comanda já foi encerrada." };
+      }
+
+      if (comanda.creditCents > 0 || comanda.cashbackCents > 0) {
+        const client = await tx.client.findFirst({ where: { id: comanda.clientId, tenantId } });
+        if (!client || client.creditCents < comanda.creditCents || client.cashbackCents < comanda.cashbackCents) {
+          throw new Error("INSUFFICIENT_CLIENT_BALANCE");
+        }
+        await tx.client.update({
+          where: { id: client.id },
+          data: {
+            creditCents: { decrement: comanda.creditCents },
+            cashbackCents: { decrement: comanda.cashbackCents },
+          },
+        });
+      }
+
+      const appointmentAlreadyCharged = (comanda.appointment?.transactions.length ?? 0) > 0;
+      if (!appointmentAlreadyCharged) {
+        for (const payment of allocated) {
+          if (payment.appliedCents <= 0) continue;
+          await postLedgerEntry(
+            {
+              tenantId,
+              type: "INCOME",
+              category: "comanda",
+              amountCents: payment.appliedCents,
+              methodId: payment.paymentMethodId,
+              methodCode: payment.method,
+              description:
+                payment.installments > 1 ? `Comanda #${comanda.number} · ${payment.installments}x` : `Comanda #${comanda.number}`,
+              appointmentId: comanda.appointmentId,
+              comandaId: comanda.id,
+              occurredAt: payment.occurredAt,
+            },
+            tx,
+          );
+        }
+      }
+
+      const appointmentAlreadyCommissioned = (comanda.appointment?.commissions.length ?? 0) > 0;
+      if (!appointmentAlreadyCommissioned) {
+        for (const item of comanda.items.filter((i) => i.type === "SERVICE")) {
+          const professionalId = item.professionalId ?? comanda.professionalId;
+          if (!professionalId) continue;
+          const professional = await tx.professional.findFirst({
+            where: { id: professionalId, tenantId },
+          });
+          if (!professional || !professional.receivesCommission) continue;
+          const baseCents = itemLineTotal(item);
+          const { percent, amountCents } = calculateCommission({
+            priceCents: baseCents,
+            professionalPct: professional.commissionPct,
+            servicePct: item.service?.commissionPct,
+          });
+          if (amountCents <= 0) continue;
+          await tx.commission.create({
+            data: {
+              tenantId,
+              professionalId,
+              appointmentId: comanda.appointmentId,
+              comandaId: comanda.id,
+              amountCents,
+              percent,
+            },
+          });
+        }
+      }
+
+      for (const item of comanda.items) {
+        if (item.type === "PRODUCT" && item.productId) {
+          const product = await tx.product.findFirst({
+            where: { id: item.productId, tenantId },
+            select: { id: true },
+          });
+          if (!product) continue;
+          await tx.product.update({
+            where: { id: product.id },
+            data: { stock: { decrement: item.quantity } },
+          });
+          await tx.stockMovement.create({
+            data: {
+              tenantId,
+              productId: product.id,
+              type: "OUT",
+              quantity: item.quantity,
+              reason: `Comanda #${comanda.number}`,
+              comandaId: comanda.id,
+              appointmentId: comanda.appointmentId,
+            },
+          });
+        }
+        if (item.type === "SERVICE" && item.service) {
+          for (const usage of item.service.products) {
+            const product = await tx.product.findFirst({
+              where: { id: usage.productId, tenantId },
+              select: { id: true },
+            });
+            if (!product) continue;
+            const qty = usage.quantity * item.quantity;
+            await tx.product.update({
+              where: { id: product.id },
+              data: { stock: { decrement: qty } },
+            });
+            await tx.stockMovement.create({
+              data: {
+                tenantId,
+                productId: product.id,
+                type: "OUT",
+                quantity: qty,
+                reason: `Uso em ${item.description}`,
+                comandaId: comanda.id,
+                appointmentId: comanda.appointmentId,
+              },
+            });
+          }
+        }
+      }
+
+      if (comanda.appointmentId) {
+        await tx.appointment.update({
+          where: { id: comanda.appointmentId },
+          data: { status: "COMPLETED" },
+        });
+      }
+
+      return { ok: true as const, id: comanda.id };
+    });
+
+    if ("error" in result) return result;
+    revalidateComandas();
+    revalidatePath(`/comandas/${result.id}`);
+    return result;
+  } catch (err) {
+    if (err instanceof Error && err.message === "INSUFFICIENT_CLIENT_BALANCE") {
+      return { error: "Saldo de crédito ou cashback do cliente insuficiente." };
+    }
+    console.error("finalizeOpenComanda", err);
+    return { error: "Não foi possível fechar a comanda. Tente novamente." };
+  }
+}
+
+export async function invoiceComanda(formData: FormData) {
+  const saved = await upsertComanda(formData);
+  if (saved && "error" in saved && saved.error) return saved;
+  if (!saved || !("id" in saved) || !saved.id) return { error: "Não foi possível salvar a comanda." };
+  const { session } = await requireTenant();
+  return finalizeOpenComanda(session.tenantId, saved.id, parsePayments(formData));
+}
+
+export async function closeComanda(formData: FormData) {
+  const { session } = await requireTenant();
+  const comandaId = String(formData.get("comandaId") ?? "");
+  const paymentMethodId = String(formData.get("paymentMethodId") ?? "");
+  const method = String(formData.get("method") ?? "PIX");
+  const discountCents = Math.max(0, parseBRLToCents(String(formData.get("discount") ?? "0")));
+  const allowed = new Set<string>(PAYMENT_METHODS);
+  if (!paymentMethodId && !allowed.has(method)) return { error: "Forma de pagamento inválida." };
+
+  const comanda = await prisma.comanda.findFirst({
+    where: { id: comandaId, tenantId: session.tenantId },
+    include: { items: true },
+  });
+  if (!comanda) return { error: "Comanda não encontrada." };
+  const total = comandaTotal({
+    items: comanda.items,
+    discountCents,
+    creditCents: comanda.creditCents,
+    cashbackCents: comanda.cashbackCents,
+  });
+
+  return finalizeOpenComanda(
+    session.tenantId,
+    comandaId,
+    [{ method, paymentMethodId: paymentMethodId || undefined, amountCents: total, installments: 1, occurredAt: new Date() }],
+    discountCents,
+  );
+}
