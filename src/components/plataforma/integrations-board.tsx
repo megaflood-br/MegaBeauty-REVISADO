@@ -1,0 +1,212 @@
+import Link from "next/link";
+import { Button, Card, Field, Input } from "@/components/ui";
+import { saveAsaasIntegration, saveContoraIntegration, saveEvolutionIntegration, saveMetaIntegration, saveOpenAiIntegration } from "@/app/actions/platform-integrations";
+import { cn, formAction } from "@/lib/utils";
+import { INTEGRATION_TABS, type IntegrationTab } from "@/lib/integrations";
+
+export type PlatformIntegrationValue = {
+  openaiMasked: string;
+  contoraMasked: string;
+  evolutionUrl: string | null;
+  evolutionMasked: string;
+  publicAppUrl: string | null;
+  hasOpenAi: boolean;
+  hasContora: boolean;
+  hasEvolution: boolean;
+  hasMeta: boolean;
+  metaMasked: string;
+  metaGraphVersion: string | null;
+  hasAsaas: boolean;
+  asaasMasked: string;
+  asaasWebhookMasked: string;
+  asaasBaseUrl: string | null;
+};
+
+export function IntegrationsBoard({
+  tab,
+  value,
+}: {
+  tab: IntegrationTab;
+  value: PlatformIntegrationValue;
+}) {
+  const current = INTEGRATION_TABS.find((item) => item.id === tab) ?? INTEGRATION_TABS[0];
+
+  return (
+    <div className="max-w-2xl space-y-4">
+      <div>
+        <h1 className="font-display text-3xl">Integrações</h1>
+        <p className="mt-1 text-sm text-ink-soft">{current.description}</p>
+      </div>
+
+      <div className="flex flex-wrap gap-1 border-b border-line">
+        {INTEGRATION_TABS.map((item) => {
+          const active = item.id === tab;
+          const configured =
+            (item.id === "openai" && value.hasOpenAi) ||
+            (item.id === "contora" && value.hasContora) ||
+            (item.id === "evolution" && value.hasEvolution) ||
+            (item.id === "meta" && value.hasMeta) ||
+            (item.id === "asaas" && value.hasAsaas);
+          return (
+            <Link
+              key={item.id}
+              href={`/plataforma/integracoes?tab=${item.id}`}
+              className={cn(
+                "-mb-px inline-flex items-center gap-2 border-b-2 px-4 py-2.5 text-sm",
+                active ? "border-blue-600 font-medium text-blue-600" : "border-transparent text-ink-soft hover:text-ink",
+              )}
+            >
+              {item.label}
+              {configured ? (
+                <span className="rounded-full bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">ativo</span>
+              ) : null}
+            </Link>
+          );
+        })}
+      </div>
+
+      {tab === "contora" ? (
+        <ContoraForm masked={value.contoraMasked} />
+      ) : tab === "evolution" ? (
+        <EvolutionForm
+          evolutionUrl={value.evolutionUrl}
+          evolutionMasked={value.evolutionMasked}
+          publicAppUrl={value.publicAppUrl}
+        />
+      ) : tab === "meta" ? (
+        <MetaForm masked={value.metaMasked} graphVersion={value.metaGraphVersion} publicAppUrl={value.publicAppUrl} />
+      ) : tab === "asaas" ? (
+        <AsaasForm
+          masked={value.asaasMasked}
+          webhookMasked={value.asaasWebhookMasked}
+          baseUrl={value.asaasBaseUrl}
+        />
+      ) : (
+        <OpenAiForm masked={value.openaiMasked} />
+      )}
+    </div>
+  );
+}
+
+function OpenAiForm({ masked }: { masked: string }) {
+  return (
+    <Card>
+      <form action={formAction(saveOpenAiIntegration)} className="grid gap-3">
+        <Field label="Chave da API">
+          <Input name="openaiApiKey" type="password" placeholder={masked || "sk-..."} />
+        </Field>
+        <p className="text-xs text-ink-soft">Usada pelo assistente de todos os salões. Os salões não veem esta chave.</p>
+        <Button>Salvar OpenAI</Button>
+      </form>
+    </Card>
+  );
+}
+
+function ContoraForm({ masked }: { masked: string }) {
+  return (
+    <Card>
+      <form action={formAction(saveContoraIntegration)} className="grid gap-3">
+        <Field label="Token da API">
+          <Input name="contoraApiToken" type="password" placeholder={masked || "fct_..."} />
+        </Field>
+        <p className="text-xs text-ink-soft">
+          Uma chave da software house cobre os CNPJs. Cadastre em{" "}
+          <a href="https://fiscal.contora.com.br/register" className="text-wine" target="_blank" rel="noreferrer">
+            fiscal.contora.com.br
+          </a>
+          . Cada salão sobe o A1 em Configurações → Fiscal.
+        </p>
+        <Button>Salvar Contora</Button>
+      </form>
+    </Card>
+  );
+}
+
+function EvolutionForm({
+  evolutionUrl,
+  evolutionMasked,
+  publicAppUrl,
+}: {
+  evolutionUrl: string | null;
+  evolutionMasked: string;
+  publicAppUrl: string | null;
+}) {
+  return (
+    <Card>
+      <form action={formAction(saveEvolutionIntegration)} className="grid gap-3">
+        <Field label="URL do servidor">
+          <Input name="evolutionUrl" defaultValue={evolutionUrl ?? ""} placeholder="https://evo.seudominio.com" />
+        </Field>
+        <Field label="API key global">
+          <Input name="evolutionApiKey" type="password" placeholder={evolutionMasked || "chave da Evolution"} />
+        </Field>
+        <Field label="URL pública do MegaBeauty">
+          <Input name="publicAppUrl" defaultValue={publicAppUrl ?? ""} placeholder="https://beauty.megaflood.cloud" />
+        </Field>
+        <p className="text-xs text-ink-soft">
+          Só o endereço do site, sem /api/webhooks. O webhook da Evolution é montado sozinho. Os salões não veem estas chaves.
+        </p>
+        <Button>Salvar Evolution</Button>
+      </form>
+    </Card>
+  );
+}
+
+function MetaForm({
+  masked,
+  graphVersion,
+  publicAppUrl,
+}: {
+  masked: string;
+  graphVersion: string | null;
+  publicAppUrl: string | null;
+}) {
+  return (
+    <Card>
+      <form action={formAction(saveMetaIntegration)} className="grid gap-3">
+        <Field label="App Secret">
+          <Input name="metaAppSecret" type="password" placeholder={masked || "opcional, valida a assinatura do webhook"} />
+        </Field>
+        <Field label="Versão do Graph">
+          <Input name="metaGraphVersion" defaultValue={graphVersion ?? "v21.0"} placeholder="v21.0" />
+        </Field>
+        <p className="text-xs text-ink-soft">
+          Cada salão cola o Phone Number ID e o token em Configurações → WhatsApp. O webhook da Cloud API é{" "}
+          <span className="font-mono">/api/webhooks/meta?tenant=slug</span>
+          {publicAppUrl ? ` (${publicAppUrl})` : ""}. A Evolution continua disponível.
+        </p>
+        <Button>Salvar WhatsApp oficial</Button>
+      </form>
+    </Card>
+  );
+}
+
+function AsaasForm({
+  masked,
+  webhookMasked,
+  baseUrl,
+}: {
+  masked: string;
+  webhookMasked: string;
+  baseUrl: string | null;
+}) {
+  return (
+    <Card>
+      <form action={formAction(saveAsaasIntegration)} className="grid gap-3">
+        <Field label="API key">
+          <Input name="asaasApiKey" type="password" placeholder={masked || "$aact_..."} />
+        </Field>
+        <Field label="Token do webhook">
+          <Input name="asaasWebhookToken" type="password" placeholder={webhookMasked || "token enviado no header"} />
+        </Field>
+        <Field label="URL da API">
+          <Input name="asaasBaseUrl" defaultValue={baseUrl ?? "https://api.asaas.com/v3"} />
+        </Field>
+        <p className="text-xs text-ink-soft">
+          Webhook: <span className="font-mono">/api/webhooks/asaas</span>. Em toda fatura paga de um salão indicado, o sistema lança a comissão vitalícia do parceiro.
+        </p>
+        <Button>Salvar Asaas</Button>
+      </form>
+    </Card>
+  );
+}

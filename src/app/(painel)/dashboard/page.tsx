@@ -8,10 +8,13 @@ import {
   buildProfessionalOfTheDay,
   buildTodayOverview,
   defaultDashboardRange,
+  movementEventParts,
   previousPeriod,
   rangeBounds,
 } from "@/lib/dashboard";
 import { DashboardBoard } from "@/components/painel/dashboard-board";
+import { LowStockAlert, SalonCityHint, SupplierDealStrip } from "@/components/avisos/salon-alerts";
+import { loadSalonNotices } from "@/lib/salon-notices";
 
 function parseRange(fromRaw?: string, toRaw?: string) {
   const fallback = defaultDashboardRange();
@@ -25,7 +28,7 @@ export default async function DashboardPage({
 }: {
   searchParams: Promise<{ from?: string; to?: string }>;
 }) {
-  const { session } = await requireTenant();
+  const { session, tenant } = await requireTenant();
   const params = await searchParams;
   const { from, to } = parseRange(params.from, params.to);
   const now = new Date();
@@ -52,6 +55,7 @@ export default async function DashboardPage({
     todayOpenComandas,
     last24hAppointments,
     last24hCommissions,
+    notices,
   ] = await Promise.all([
     prisma.transaction.findMany({
       where: { tenantId: session.tenantId, type: "INCOME", occurredAt: { gte: current.start, lt: current.end } },
@@ -82,7 +86,7 @@ export default async function DashboardPage({
     }),
     prisma.comanda.findMany({
       where: { tenantId: session.tenantId, occurredAt: { gte: current.start, lt: current.end } },
-      select: { status: true, occurredAt: true },
+      select: { status: true, occurredAt: true, appointmentId: true },
     }),
     prisma.comanda.findMany({
       where: { tenantId: session.tenantId, occurredAt: { gte: prevRange.start, lt: prevRange.end } },
@@ -135,6 +139,7 @@ export default async function DashboardPage({
         professional: { select: { id: true, name: true, specialty: true, color: true } },
       },
     }),
+    loadSalonNotices(session.tenantId, tenant.city),
   ]);
 
   const worked = (status: string) => !["CANCELLED", "NO_SHOW", "PENDING"].includes(status);
@@ -159,6 +164,15 @@ export default async function DashboardPage({
   const prevClosed = prevComandas.filter((c) => c.status === "CLOSED").length;
   const todayIncomeCents = todayIncome._sum.amountCents ?? 0;
 
+  const movement = [
+    ...appointments
+      .filter((row) => !["CANCELLED", "NO_SHOW"].includes(row.status))
+      .map((row) => movementEventParts(row.startAt)),
+    ...comandas
+      .filter((row) => row.status !== "CANCELLED" && !row.appointmentId)
+      .map((row) => movementEventParts(row.occurredAt)),
+  ];
+
   const metrics = buildDashboardMetrics({
     from,
     to,
@@ -173,6 +187,9 @@ export default async function DashboardPage({
     attendances,
     prevAttendanceCount: prevAttendances.length,
     prevTicketCents: averageTicket(prevIncomeCents, prevClosed || prevAttendances.length),
+    movement,
+    openTime: tenant.openTime,
+    closeTime: tenant.closeTime,
   });
 
   const todayOverview = buildTodayOverview({
@@ -234,8 +251,13 @@ export default async function DashboardPage({
       todayOverview={todayOverview}
       last7DaysRevenue={last7DaysRevenue}
       professionalOfTheDay={professionalOfTheDay}
+      alerts={
+        <div className="space-y-4">
+          <SalonCityHint city={notices.city} />
+          <LowStockAlert items={notices.restock} always />
+          <SupplierDealStrip deals={notices.deals} always salonCity={notices.city} />
+        </div>
+      }
     />
   );
 }
-
-

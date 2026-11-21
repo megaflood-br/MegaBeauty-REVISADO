@@ -17,17 +17,93 @@ model Tenant {
   email               String?
   address             String?
   city                String?
+  logoUrl             String?
+  logoDarkUrl         String?
+  faviconUrl          String?
+  landingKicker       String  @default("")
+  landingHeadline     String  @default("")
+  landingText         String  @default("")
+  landingCta          String  @default("")
+  landingImageUrl     String?
+  landingFeatures     String  @default("[]")
+  technicalResponsible String  @default("")
+  technicalRegistry    String  @default("")
   timezone            String   @default("America/Sao_Paulo")
   plan                String   @default("profissional")
+  status              String   @default("ACTIVE")
+  isPlatform          Boolean  @default(false)
+  notes               String?
+  trialEndsAt         DateTime?
   accentColor         String   @default("#2563EB")
   openTime            String   @default("08:00")
   closeTime           String   @default("20:00")
   slotMinutes         Int      @default(15)
   openaiApiKey        String?
+  contoraApiToken     String?
+  publicAppUrl        String?
   evolutionUrl        String?
   evolutionApiKey     String?
   evolutionInstance   String?
+  evolutionStatus     String?
+  evolutionNumber     String?
+  evolutionQr         String?
+  whatsappProvider    String   @default("evolution")
+  metaPhoneNumberId   String?
+  metaAccessToken     String?
+  metaWabaId          String?
+  metaVerifyToken     String?
+  metaNumber          String?
+  metaStatus          String?
+  metaAppSecret       String?
+  metaGraphVersion    String?
   reminderHours       Int      @default(24)
+  cashbackEnabled      Boolean  @default(false)
+  cashbackEarnPct      Int      @default(5)
+  cashbackUseItemPct   Boolean  @default(true)
+  cashbackOnServices   Boolean  @default(true)
+  cashbackOnProducts   Boolean  @default(true)
+  cashbackMinSpendCents Int     @default(0)
+  cashbackMaxRedeemPct Int      @default(100)
+  cashbackExpireDays   Int      @default(0)
+  cashbackCentsPerPoint Int     @default(100)
+  fiscalEnabled         Boolean @default(false)
+  fiscalCnpj            String?
+  fiscalIe              String?
+  fiscalIm              String?
+  fiscalCrt             String  @default("1")
+  fiscalUf              String  @default("SP")
+  fiscalIbge            String?
+  fiscalIssPct          Int     @default(5)
+  fiscalServiceCode     String  @default("6.01")
+  fiscalSeries          String  @default("1")
+  fiscalNextNumber      Int     @default(1)
+  fiscalProvider           String    @default("contora")
+  fiscalProviderUrl        String?
+  fiscalProviderToken      String?
+  fiscalEnvironment        String    @default("homolog")
+  fiscalAutoIssue          Boolean   @default(false)
+  fiscalStreet             String?
+  fiscalNumber             String?
+  fiscalDistrict           String?
+  fiscalZip                String?
+  fiscalCscId              String?
+  fiscalCscToken           String?
+  fiscalContoraCompanyId   String?
+  fiscalCertificateAt      DateTime?
+  fiscalCertificateUntil   DateTime?
+  kind                String   @default("SALON")
+  partnerId             String?
+  partner               Partner? @relation("ReferredTenants", fields: [partnerId], references: [id], onDelete: SetNull)
+  asaasCustomerId       String?
+  asaasSubscriptionId   String?
+  billingStatus         String    @default("NONE")
+  asaasApiKey           String?
+  asaasWebhookToken     String?
+  asaasBaseUrl          String?
+  deliveryMinCents    Int      @default(0)
+  deliveryFeeCents    Int      @default(0)
+  supplierPayMethods  String   @default("PIX,CASH")
+  servedCities        String   @default("")
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 
@@ -48,14 +124,36 @@ model Tenant {
   clientPackages ClientPackage[]
   conversations  Conversation[]
   automations    Automation[]
+  campaignSends  CampaignSend[]
   comandas       Comanda[]
   financeAccounts    FinanceAccount[]
   paymentMethods     PaymentMethodConfig[]
   financeCategories  FinanceCategory[]
   anamnesisForms     AnamnesisForm[]
   anamneses          Anamnesis[]
+  cashbackMoves      CashbackMovement[]
+  supportTickets     SupportTicket[]
+  supportCalls       SupportCall[]
+  supportPresences   SupportPresence[]
+  professionalGoals  ProfessionalGoal[]
+  fiscalInvoices     FiscalInvoice[]
+  promotions         Promotion[]
+  catalogProducts    SupplierProduct[]
+  supplierPromos     SupplierPromotion[]
+  ordersAsSalon      SupplierOrder[] @relation("OrdersAsSalon")
+  ordersAsSupplier   SupplierOrder[] @relation("OrdersAsSupplier")
+  marketingCampaigns MarketingCampaign[]
+  marketingRecipients MarketingRecipient[]
+  salonPops          SalonPop[]
+  salonDocuments     SalonDocument[]
+  ownedPartner       Partner? @relation("PartnerTenant")
+  platformInvoices   PlatformInvoice[]
+  permissionProfiles PermissionProfile[]
+  receptionist       Receptionist?
 
   @@index([slug])
+  @@index([kind])
+  @@index([partnerId])
 }
 
 model User {
@@ -69,8 +167,35 @@ model User {
   active         Boolean   @default(true)
   professionalId String?   @unique
   professional   Professional? @relation(fields: [professionalId], references: [id])
+  permissionProfileId String?
+  permissionProfile   PermissionProfile? @relation(fields: [permissionProfileId], references: [id], onDelete: SetNull)
+  accessJson     String?
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
+
+  ticketsCreated    SupportTicket[]  @relation("TicketAuthor")
+  ticketsAssigned   SupportTicket[]  @relation("TicketAssignee")
+  supportMessages   SupportMessage[]
+  callsStarted      SupportCall[]    @relation("CallStarter")
+  callsAccepted     SupportCall[]    @relation("CallAcceptor")
+  supportPresence   SupportPresence?
+  supplierOrders    SupplierOrder[]
+  partner           Partner?
+
+  @@index([tenantId])
+  @@index([permissionProfileId])
+}
+
+model PermissionProfile {
+  id        String   @id @default(cuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name      String
+  isAdmin   Boolean  @default(false)
+  grants    String   @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  users     User[]
 
   @@index([tenantId])
 }
@@ -119,8 +244,89 @@ model Professional {
   transactions     Transaction[]
   productRequests  ProductRequest[]
   anamneses        Anamnesis[]
+  goals            ProfessionalGoal[]
+  documents        SalonDocument[]
 
   @@index([tenantId])
+}
+
+model ProfessionalGoal {
+  id             String       @id @default(cuid())
+  tenantId       String
+  tenant         Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  professionalId String
+  professional   Professional @relation(fields: [professionalId], references: [id], onDelete: Cascade)
+  metric         String
+  targetValue    Int
+  startDate      String
+  endDate        String
+  notes          String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([tenantId, professionalId, metric, startDate, endDate])
+  @@index([tenantId, startDate, endDate])
+  @@index([professionalId])
+}
+
+model FiscalInvoice {
+  id           String    @id @default(cuid())
+  tenantId     String
+  tenant       Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  comandaId    String?
+  comanda      Comanda?  @relation(fields: [comandaId], references: [id], onDelete: SetNull)
+  clientId     String?
+  client       Client?   @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  kind         String
+  status       String    @default("DRAFT")
+  number       Int?
+  series       String?
+  accessKey    String?
+  protocol     String?
+  environment  String    @default("homolog")
+  provider     String    @default("local")
+  providerRef  String?
+  amountCents  Int
+  taxCents     Int       @default(0)
+  issuedAt     DateTime?
+  cancelledAt  DateTime?
+  errorMessage String?
+  notes        String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([tenantId, issuedAt])
+  @@index([tenantId, status])
+  @@index([comandaId])
+}
+
+model Promotion {
+  id            String   @id @default(cuid())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name          String
+  startsOn      DateTime
+  endsOn        DateTime
+  weekdays      String   @default("0,1,2,3,4,5,6")
+  discountType  String   @default("PERCENT")
+  discountValue Int
+  active        Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  items         PromotionItem[]
+
+  @@index([tenantId, active, startsOn, endsOn])
+}
+
+model PromotionItem {
+  id          String     @id @default(cuid())
+  promotionId String
+  promotion   Promotion  @relation(fields: [promotionId], references: [id], onDelete: Cascade)
+  type        String
+  serviceId   String?
+  service     Service?   @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  productId   String?
+  product     Product?   @relation(fields: [productId], references: [id], onDelete: Cascade)
 }
 
 model ServiceCategory {
@@ -155,6 +361,8 @@ model Service {
   imageUrl      String?
   onlineBooking Boolean  @default(true)
   description   String?
+  fiscalCode    String?
+  issPct        Int?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
@@ -163,6 +371,8 @@ model Service {
   professionals  ProfessionalService[]
   packages       Package[]
   comandaItems   ComandaItem[]
+  promotions     PromotionItem[]
+  salonPops      SalonPop[]
 
   @@index([tenantId])
 }
@@ -229,6 +439,9 @@ model Client {
   packages       ClientPackage[]
   comandas       Comanda[]
   anamneses      Anamnesis[]
+  cashbackMoves  CashbackMovement[]
+  fiscalInvoices FiscalInvoice[]
+  marketingRecipients MarketingRecipient[]
 
   @@unique([tenantId, phone])
   @@index([tenantId, name])
@@ -299,6 +512,7 @@ model Comanda {
   transactions Transaction[]
   commissions  Commission[]
   stockMoves   StockMovement[]
+  invoices     FiscalInvoice[]
 
   @@unique([tenantId, number])
   @@index([tenantId, status])
@@ -358,6 +572,8 @@ model Product {
   notes                  String?
   requestAvailable       Boolean  @default(true)
   active                 Boolean  @default(true)
+  ncm                    String?
+  cfop                   String?
   createdAt              DateTime @default(now())
   updatedAt              DateTime @updatedAt
 
@@ -366,6 +582,7 @@ model Product {
   comandaItems ComandaItem[]
   lots         ProductLot[]
   requests     ProductRequest[]
+  promotions   PromotionItem[]
 
   @@index([tenantId])
 }
@@ -568,9 +785,11 @@ model Conversation {
   clientId      String?
   client        Client?  @relation(fields: [clientId], references: [id])
   phone         String
-  lastMessageAt DateTime @default(now())
-  unread        Int      @default(0)
-  messages      Message[]
+  lastMessageAt   DateTime  @default(now())
+  unread          Int       @default(0)
+  botPaused       Boolean   @default(false)
+  botPausedUntil  DateTime?
+  messages        Message[]
 
   @@unique([tenantId, phone])
   @@index([tenantId])
@@ -582,8 +801,24 @@ model Message {
   conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   direction      String
   body           String
+  source         String       @default("HUMAN")
   waId           String?
   createdAt      DateTime     @default(now())
+}
+
+model Receptionist {
+  id           String   @id @default(cuid())
+  tenantId     String   @unique
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  enabled      Boolean  @default(false)
+  name         String   @default("Luna")
+  avatarUrl    String?
+  style        String   @default("conversador")
+  personality  String   @default("feliz")
+  emoji        String   @default("moderado")
+  instructions String   @default("")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 }
 
 model Automation {
@@ -594,6 +829,104 @@ model Automation {
   trigger   String
   template  String
   active    Boolean @default(true)
+}
+
+model CampaignSend {
+  id        String   @id @default(cuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  trigger   String
+  clientId  String
+  sentOn    String
+  createdAt DateTime @default(now())
+
+  @@unique([tenantId, trigger, clientId, sentOn])
+  @@index([tenantId, trigger])
+}
+
+model MarketingCampaign {
+  id           String   @id @default(cuid())
+  tenantId     String
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name         String
+  body         String
+  audience     String   @default("ALL")
+  tag          String?
+  serviceId    String?
+  inactiveDays Int?
+  status       String   @default("DRAFT")
+  createdAt    DateTime @default(now())
+  sentAt       DateTime?
+  recipients   MarketingRecipient[]
+
+  @@index([tenantId, createdAt])
+}
+
+model MarketingRecipient {
+  id             String   @id @default(cuid())
+  campaignId     String
+  campaign       MarketingCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  tenantId       String
+  tenant         Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  clientId       String
+  client         Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  phone          String
+  status         String   @default("PENDING")
+  error          String?
+  sentAt         DateTime?
+  repliedAt      DateTime?
+  replyPreview   String?
+  conversationId String?
+
+  @@unique([campaignId, clientId])
+  @@index([tenantId, status])
+  @@index([tenantId, phone])
+  @@index([campaignId, status])
+}
+
+model SalonPop {
+  id          String   @id @default(cuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  serviceId   String?
+  service     Service? @relation(fields: [serviceId], references: [id], onDelete: SetNull)
+  templateKey String
+  slug        String
+  title       String
+  responsible String   @default("")
+  registry    String   @default("")
+  products    String   @default("")
+  frequency   String   @default("")
+  notes       String   @default("")
+  revision    Int      @default(1)
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([tenantId, slug])
+  @@index([tenantId, templateKey])
+}
+
+model SalonDocument {
+  id             String    @id @default(cuid())
+  tenantId       String
+  tenant         Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  professionalId String?
+  professional   Professional? @relation(fields: [professionalId], references: [id], onDelete: SetNull)
+  kind           String
+  title          String
+  number         String    @default("")
+  issuer         String    @default("")
+  issuedAt       DateTime?
+  expiresAt      DateTime?
+  fileUrl        String
+  fileName       String    @default("")
+  notes          String    @default("")
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([tenantId, kind])
+  @@index([professionalId])
 }
 
 model AnamnesisForm {
@@ -632,9 +965,321 @@ model Anamnesis {
   signedName     String?
   signedAt       DateTime?
   occurredAt     DateTime  @default(now())
+  publicToken    String?   @unique
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
   @@index([tenantId, occurredAt])
   @@index([clientId])
+}
+
+model SupportTicket {
+  id            String   @id @default(cuid())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  number        Int
+  subject       String
+  category      String   @default("ajuda")
+  priority      String   @default("NORMAL")
+  status        String   @default("OPEN")
+  createdById   String
+  createdBy     User     @relation("TicketAuthor", fields: [createdById], references: [id])
+  assignedToId  String?
+  assignedTo    User?    @relation("TicketAssignee", fields: [assignedToId], references: [id])
+  lastMessageAt DateTime @default(now())
+  unreadSalon   Int      @default(0)
+  unreadAdmin   Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  messages      SupportMessage[]
+  calls         SupportCall[]
+
+  @@unique([tenantId, number])
+  @@index([tenantId, lastMessageAt])
+  @@index([status])
+}
+
+model SupportMessage {
+  id        String        @id @default(cuid())
+  ticketId  String
+  ticket    SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  authorId  String
+  author    User          @relation(fields: [authorId], references: [id])
+  side      String
+  body      String
+  kind      String        @default("TEXT")
+  createdAt DateTime      @default(now())
+
+  @@index([ticketId, createdAt])
+}
+
+model SupportCall {
+  id           String         @id @default(cuid())
+  tenantId     String
+  tenant       Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  ticketId     String?
+  ticket       SupportTicket? @relation(fields: [ticketId], references: [id], onDelete: SetNull)
+  startedById  String
+  startedBy    User           @relation("CallStarter", fields: [startedById], references: [id])
+  acceptedById String?
+  acceptedBy   User?          @relation("CallAcceptor", fields: [acceptedById], references: [id])
+  status       String         @default("RINGING")
+  startedAt    DateTime       @default(now())
+  answeredAt   DateTime?
+  endedAt      DateTime?
+
+  @@index([tenantId, status])
+  @@index([status])
+}
+
+model SupportPresence {
+  userId     String   @id
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tenantId   String
+  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  side       String
+  lastSeenAt DateTime @default(now())
+
+  @@index([tenantId])
+  @@index([side, lastSeenAt])
+}
+
+model PlatformPlan {
+  id          String   @id @default(cuid())
+  name        String
+  slug        String   @unique
+  description String?
+  priceCents  Int      @default(0)
+  interval    String   @default("monthly")
+  trialDays   Int      @default(14)
+  features    String   @default("[]")
+  active      Boolean  @default(true)
+  highlighted Boolean  @default(false)
+  isDefault   Boolean  @default(false)
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([active, sortOrder])
+}
+
+model CashbackMovement {
+  id            String   @id @default(cuid())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  clientId      String
+  client        Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  type          String
+  amountCents   Int
+  points        Int
+  reason        String?
+  comandaId     String?
+  createdById   String?
+  createdByName String?
+  expiresAt     DateTime?
+  createdAt     DateTime @default(now())
+
+  @@index([tenantId, clientId, createdAt])
+}
+
+model SupplierProduct {
+  id          String   @id @default(cuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name        String
+  brand       String?
+  sku         String?
+  category    String?
+  unit        String   @default("un")
+  priceCents  Int      @default(0)
+  minQty      Float    @default(1)
+  stock       Float?
+  description String?
+  imageUrl    String?
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  orderItems  SupplierOrderItem[]
+  promoItems  SupplierPromotionItem[]
+
+  @@index([tenantId, active])
+}
+
+model SupplierPromotion {
+  id            String   @id @default(cuid())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name          String
+  note          String?
+  startsOn      DateTime
+  endsOn        DateTime
+  weekdays      String   @default("0,1,2,3,4,5,6")
+  dealType      String   @default("PERCENT")
+  discountValue Int      @default(0)
+  buyQty        Int      @default(0)
+  payQty        Int      @default(0)
+  active        Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  items         SupplierPromotionItem[]
+
+  @@index([tenantId, active, startsOn, endsOn])
+}
+
+model SupplierPromotionItem {
+  id           String             @id @default(cuid())
+  promotionId  String
+  promotion    SupplierPromotion  @relation(fields: [promotionId], references: [id], onDelete: Cascade)
+  productId    String
+  product      SupplierProduct    @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId])
+}
+
+model SupplierOrder {
+  id               String   @id @default(cuid())
+  salonTenantId    String
+  salonTenant      Tenant   @relation("OrdersAsSalon", fields: [salonTenantId], references: [id], onDelete: Cascade)
+  supplierTenantId String
+  supplierTenant   Tenant   @relation("OrdersAsSupplier", fields: [supplierTenantId], references: [id], onDelete: Cascade)
+  createdById      String
+  createdBy        User     @relation(fields: [createdById], references: [id])
+  status           String   @default("SUBMITTED")
+  fulfillment      String   @default("PICKUP")
+  paymentMethod    String   @default("PIX")
+  paymentWhen      String   @default("ON_FULFILLMENT")
+  notes            String?
+  subtotalCents    Int      @default(0)
+  deliveryFeeCents Int      @default(0)
+  totalCents       Int      @default(0)
+  pickupCode       String?
+  salonAddress     String?
+  salonPhone       String?
+  pickupAddress    String?
+  fiscalInvoiceId  String?
+  receivedAt       DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  items            SupplierOrderItem[]
+
+  @@unique([pickupCode])
+  @@index([salonTenantId, createdAt])
+  @@index([supplierTenantId, status])
+}
+
+model SupplierOrderItem {
+  id        String           @id @default(cuid())
+  orderId   String
+  order     SupplierOrder    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId String?
+  product   SupplierProduct? @relation(fields: [productId], references: [id], onDelete: SetNull)
+  name      String
+  brand     String?
+  sku       String?
+  unit      String           @default("un")
+  quantity  Float
+  unitCents Int
+  lineCents Int
+}
+
+model Partner {
+  id            String   @id @default(cuid())
+  tenantId      String   @unique
+  tenant        Tenant   @relation("PartnerTenant", fields: [tenantId], references: [id], onDelete: Cascade)
+  userId        String   @unique
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  slug          String   @unique
+  commissionBps Int      @default(2000)
+  holdDays      Int      @default(30)
+  pixKey        String?
+  pixKeyType    String?
+  bankName      String?
+  bankAgency    String?
+  bankAccount   String?
+  status        String   @default("PENDING")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  brand         PartnerBrand?
+  referred      Tenant[] @relation("ReferredTenants")
+  commissions   PartnerCommission[]
+  payouts       PartnerPayout[]
+
+  @@index([status])
+}
+
+model PartnerBrand {
+  id         String  @id @default(cuid())
+  partnerId  String  @unique
+  partner    Partner @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  name       String
+  logoUrl    String?
+  logoDarkUrl String?
+  faviconUrl String?
+  primary    String  @default("#ff0447")
+  secondary  String  @default("#0f172a")
+  customHost String? @unique
+  landingKicker   String  @default("")
+  landingHeadline String  @default("")
+  landingText     String  @default("")
+  landingCta      String  @default("")
+  landingImageUrl String?
+  landingFeatures String  @default("[]")
+}
+
+model PlatformInvoice {
+  id             String    @id @default(cuid())
+  tenantId       String
+  tenant         Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  partnerId      String?
+  asaasPaymentId String?   @unique
+  asaasEventId   String?   @unique
+  amountCents    Int
+  status         String    @default("PENDING")
+  paidAt         DateTime?
+  rawPayload     String    @default("{}")
+  createdAt      DateTime  @default(now())
+  commissions    PartnerCommission[]
+
+  @@index([tenantId, createdAt])
+  @@index([partnerId, status])
+}
+
+model PartnerCommission {
+  id              String    @id @default(cuid())
+  partnerId       String
+  partner         Partner   @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  tenantId        String
+  invoiceId       String?
+  invoice         PlatformInvoice? @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+  payoutId        String?
+  payout          PartnerPayout? @relation(fields: [payoutId], references: [id], onDelete: SetNull)
+  type            String    @default("SALE")
+  saleCents       Int
+  commissionBps   Int
+  commissionCents Int
+  status          String    @default("PENDING")
+  availableAt     DateTime?
+  paidAt          DateTime?
+  note            String?
+  createdAt       DateTime  @default(now())
+
+  @@index([partnerId, status, createdAt])
+  @@index([tenantId])
+  @@index([invoiceId])
+}
+
+model PartnerPayout {
+  id          String    @id @default(cuid())
+  partnerId   String
+  partner     Partner   @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  amountCents Int
+  status      String    @default("REQUESTED")
+  receiptUrl  String?
+  paidAt      DateTime?
+  paidById    String?
+  note        String?
+  createdAt   DateTime  @default(now())
+  lines       PartnerCommission[]
+
+  @@index([partnerId, createdAt])
 }

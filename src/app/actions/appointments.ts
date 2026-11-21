@@ -3,12 +3,16 @@
 import { revalidatePath } from "next/cache";
 import { addMinutes } from "date-fns";
 import { prisma } from "@/lib/db";
-import { assertClientInTenant, assertProfessionalsInTenant, requireTenant } from "@/lib/tenant";
+import { requireTenant } from "@/lib/tenant";
+import { canAccess, canViewAllAgenda } from "@/lib/permissions";
 import { hasConflict } from "@/lib/appointments";
 import { calculateCommission } from "@/lib/commissions";
+import { nextStock } from "@/lib/stock";
 import { atTime, calendarDate, formatTime } from "@/lib/dates";
-import { ensureFinanceCatalog } from "@/lib/finance-catalog";
 import { postLedgerEntry } from "@/lib/ledger";
+import { applyCatalogPrice } from "@/lib/promotions";
+import { loadPromoRules } from "@/lib/promo-load";
+import { appointmentCampaignVars, safeDispatch } from "@/lib/dispatch-whatsapp-campaign";
 
 export type AppointmentItemInput = {
   serviceId: string;
@@ -17,40 +21,15 @@ export type AppointmentItemInput = {
   durationMin: number;
 };
 
-async function loadBusy(tenantId: string, professionalId: string, excludeId?: string) {
-  const [appointments, items] = await Promise.all([
-    prisma.appointment.findMany({
-      where: {
-        tenantId,
-        professionalId,
-        status: { notIn: ["CANCELLED"] },
-        ...(excludeId ? { id: { not: excludeId } } : {}),
-      },
-      select: { id: true, startAt: true, endAt: true },
-    }),
-    prisma.appointmentItem.findMany({
-      where: {
-        professionalId,
-        appointment: {
-          tenantId,
-          status: { notIn: ["CANCELLED"] },
-          ...(excludeId ? { id: { not: excludeId } } : {}),
-        },
-      },
-      select: { appointmentId: true, startAt: true, durationMin: true },
-    }),
-  ]);
-
-  return [
-    ...appointments.map((b) => ({ id: b.id, start: b.startAt, end: b.endAt })),
-    ...items
-      .filter((item): item is { appointmentId: string; startAt: Date; durationMin: number } => Boolean(item.startAt))
-      .map((item) => ({
-        id: item.appointmentId,
-        start: item.startAt,
-        end: addMinutes(item.startAt, item.durationMin || 15),
-      })),
-  ];
+async function loadBusy(professionalId: string, excludeId?: string) {
+  return prisma.appointment.findMany({
+    where: {
+      professionalId,
+      status: { notIn: ["CANCELLED"] },
+      ...(excludeId ? { id: { not: excludeId } } : {}),
+    },
+    select: { id: true, startAt: true, endAt: true },
+  });
 }
 
 function itemWindow(date: string, item: AppointmentItemInput) {
@@ -63,10 +42,10 @@ export async function createAppointment(formData: FormData) {
   const clientId = String(formData.get("clientId") ?? "");
   const serviceId = String(formData.get("serviceId") ?? "");
   const startAt = new Date(String(formData.get("startAt") ?? ""));
-  if (Number.isNaN(startAt.getTime())) return { error: "Data/horário inválido." };
   const notes = String(formData.get("notes") ?? "") || undefined;
   const time = formatTime(startAt);
   const date = calendarDate(startAt);
+
   return saveAppointment({
     clientId,
     date,
@@ -84,33 +63,36 @@ export async function saveAppointment(payload: {
   notes?: string;
   items: AppointmentItemInput[];
 }) {
-  const { session } = await requireTenant();
+  const { session, access } = await requireTenant();
   const items = payload.items.filter((item) => item.serviceId && item.professionalId && item.time);
   if (!payload.clientId) return { error: "Selecione um cliente." };
   if (items.length === 0) return { error: "Inclua pelo menos um serviço." };
+  if (!canAccess(access, "agenda", payload.id ? "edit" : "create")) {
+    return { error: "Sem permissão para alterar a agenda." };
+  }
+  if (!canViewAllAgenda(access) && access.professionalId) {
+    if (items.some((item) => item.professionalId !== access.professionalId)) {
+      return { error: "Você só pode agendar na sua própria agenda." };
+    }
+  }
 
-  const [clientValid, professionalsValid, services] = await Promise.all([
-    assertClientInTenant(session.tenantId, payload.clientId),
-    assertProfessionalsInTenant(session.tenantId, items.map((i) => i.professionalId)),
-    prisma.service.findMany({
-      where: { tenantId: session.tenantId, id: { in: items.map((i) => i.serviceId) } },
-    }),
-  ]);
-  if (!clientValid) return { error: "Cliente inválido." };
-  if (!professionalsValid) return { error: "Profissional inválido." };
-
+  const services = await prisma.service.findMany({
+    where: { tenantId: session.tenantId, id: { in: items.map((i) => i.serviceId) } },
+  });
   const byId = new Map(services.map((s) => [s.id, s]));
+
   const resolved = items.map((item) => {
     const service = byId.get(item.serviceId);
     const durationMin = item.durationMin || service?.durationMin || 30;
     const { start, end } = itemWindow(payload.date, { ...item, durationMin });
     return { ...item, durationMin, start, end, service };
   });
+
   if (resolved.some((item) => !item.service)) return { error: "Serviço inválido." };
 
   for (const item of resolved) {
-    const busy = await loadBusy(session.tenantId, item.professionalId, payload.id);
-    if (hasConflict({ id: payload.id, start: item.start, end: item.end }, busy)) {
+    const busy = await loadBusy(item.professionalId, payload.id);
+    if (hasConflict({ id: payload.id, start: item.start, end: item.end }, busy.map((b) => ({ id: b.id, start: b.startAt, end: b.endAt })))) {
       return { error: "Este horário conflita com outro agendamento do profissional." };
     }
   }
@@ -130,163 +112,152 @@ export async function saveAppointment(payload: {
     source: "balcao",
   };
 
-  const result = await prisma.$transaction(async (tx) => {
-    let id = payload.id;
-    if (id) {
-      const existing = await tx.appointment.findFirst({ where: { id, tenantId: session.tenantId } });
-      if (!existing) return { error: "Agendamento não encontrado." };
-      await tx.appointment.update({ where: { id }, data });
-      await tx.appointmentItem.deleteMany({ where: { appointmentId: id } });
-    } else {
-      const created = await tx.appointment.create({ data });
-      id = created.id;
-    }
+  let id = payload.id;
+  if (id) {
+    const existing = await prisma.appointment.findFirst({ where: { id, tenantId: session.tenantId } });
+    if (!existing) return { error: "Agendamento não encontrado." };
+    await prisma.appointment.update({ where: { id }, data });
+    await prisma.appointmentItem.deleteMany({ where: { appointmentId: id } });
+  } else {
+    const created = await prisma.appointment.create({ data });
+    id = created.id;
+  }
 
-    await tx.appointmentItem.createMany({
-      data: resolved.map((item) => ({
-        appointmentId: id!,
-        serviceId: item.serviceId,
-        professionalId: item.professionalId,
-        startAt: item.start,
-        durationMin: item.durationMin,
-        priceCents: item.service!.priceCents,
-      })),
-    });
-
-    return { ok: true as const, id: id! };
+  const promos = await loadPromoRules(session.tenantId);
+  await prisma.appointmentItem.createMany({
+    data: resolved.map((item) => ({
+      appointmentId: id!,
+      serviceId: item.serviceId,
+      professionalId: item.professionalId,
+      startAt: item.start,
+      durationMin: item.durationMin,
+      priceCents: applyCatalogPrice(promos, payload.date, "SERVICE", item.serviceId, item.service!.priceCents).priceCents,
+    })),
   });
 
-  if ("error" in result) return { error: result.error };
   revalidatePath("/agenda");
   revalidatePath("/dashboard");
-  return { ok: true as const, id: result.id };
+
+  const appointment = await prisma.appointment.findFirst({
+    where: { id, tenantId: session.tenantId },
+    include: {
+      client: { select: { id: true, name: true, phone: true } },
+      professional: { select: { name: true } },
+      items: { include: { service: { select: { name: true } } } },
+    },
+  });
+  if (appointment?.client) {
+    safeDispatch({
+      tenantId: session.tenantId,
+      trigger: "INFORMED",
+      client: appointment.client,
+      sentOn: appointment.id,
+      vars: appointmentCampaignVars(appointment),
+    });
+  }
+
+  return { ok: true as const, id };
 }
 
 export async function deleteAppointment(appointmentId: string) {
-  const { session } = await requireTenant();
-  const result = await prisma.$transaction(async (tx) => {
-    const appointment = await tx.appointment.findFirst({
-      where: { id: appointmentId, tenantId: session.tenantId },
-      include: { comanda: true },
-    });
-    if (!appointment) return { error: "Agendamento não encontrado." };
-    if (appointment.comanda?.status === "CLOSED") {
-      return { error: "Não é possível excluir: a comanda já foi fechada." };
-    }
-    if (appointment.comanda) {
-      await tx.comanda.delete({ where: { id: appointment.comanda.id } });
-    }
-    await tx.appointment.delete({ where: { id: appointment.id } });
-    return { ok: true as const };
+  const { session, access } = await requireTenant();
+  if (!canAccess(access, "agenda", "remove")) return { error: "Sem permissão para excluir agendamentos." };
+  const appointment = await prisma.appointment.findFirst({
+    where: { id: appointmentId, tenantId: session.tenantId },
+    include: { comanda: true },
   });
-
-  if ("error" in result) return result;
+  if (!appointment) return { error: "Agendamento não encontrado." };
+  if (appointment.comanda?.status === "CLOSED") {
+    return { error: "Não é possível excluir: a comanda já foi fechada." };
+  }
+  if (!canViewAllAgenda(access) && access.professionalId && appointment.professionalId !== access.professionalId) {
+    return { error: "Você só pode alterar a sua própria agenda." };
+  }
+  if (appointment.comanda) {
+    await prisma.comanda.delete({ where: { id: appointment.comanda.id } });
+  }
+  await prisma.appointment.delete({ where: { id: appointment.id } });
   revalidatePath("/agenda");
   revalidatePath("/comandas");
-  return result;
+  return { ok: true };
 }
 
 export async function updateAppointmentStatus(appointmentId: string, status: string) {
-  const { session } = await requireTenant();
-  if (status === "COMPLETED") {
-    await ensureFinanceCatalog(session.tenantId);
+  const { session, access } = await requireTenant();
+  if (!canAccess(access, "agenda", "edit")) return { error: "Sem permissão para alterar a agenda." };
+  const appointment = await prisma.appointment.findFirst({
+    where: { id: appointmentId, tenantId: session.tenantId },
+    include: {
+      items: { include: { service: { include: { products: true } } } },
+      professional: true,
+      commissions: true,
+      comanda: true,
+    },
+  });
+  if (!appointment) return { error: "Agendamento não encontrado." };
+  if (!canViewAllAgenda(access) && access.professionalId && appointment.professionalId !== access.professionalId) {
+    return { error: "Você só pode alterar a sua própria agenda." };
   }
 
-  const result = await prisma.$transaction(async (tx) => {
-    const appointment = await tx.appointment.findFirst({
-      where: { id: appointmentId, tenantId: session.tenantId },
-      include: {
-        items: { include: { service: { include: { products: true } } } },
-        professional: true,
-        commissions: true,
-        transactions: true,
-        comanda: true,
-      },
-    });
-    if (!appointment) return { error: "Agendamento não encontrado." };
-
-    const previousStatus = appointment.status;
-    await tx.appointment.update({
-      where: { id: appointment.id },
-      data: { status },
-    });
-
-    const shouldSettleDirectly =
-      status === "COMPLETED" &&
-      previousStatus !== "COMPLETED" &&
-      appointment.commissions.length === 0 &&
-      appointment.transactions.length === 0 &&
-      !appointment.comanda;
-
-    if (shouldSettleDirectly) {
-      const priceCents = appointment.items.reduce((sum, item) => sum + item.priceCents, 0);
-      if (appointment.professional.receivesCommission && priceCents > 0) {
-        const { percent, amountCents } = calculateCommission({
-          priceCents,
-          professionalPct: appointment.professional.commissionPct,
-          servicePct: appointment.items[0]?.service.commissionPct,
-        });
-        if (amountCents > 0) {
-          await tx.commission.create({
-            data: {
-              tenantId: session.tenantId,
-              professionalId: appointment.professionalId,
-              appointmentId: appointment.id,
-              amountCents,
-              percent,
-            },
-          });
-        }
-      }
-
-      if (priceCents > 0) {
-        await postLedgerEntry(
-          {
-            tenantId: session.tenantId,
-            type: "INCOME",
-            category: "servico",
-            amountCents: priceCents,
-            methodCode: "PIX",
-            description: appointment.items.map((item) => item.service.name).join(", "),
-            appointmentId: appointment.id,
-          },
-          tx,
-        );
-      }
-
-      for (const item of appointment.items) {
-        for (const usage of item.service.products) {
-          const product = await tx.product.findFirst({
-            where: { id: usage.productId, tenantId: session.tenantId },
-            select: { id: true },
-          });
-          if (!product) continue;
-          await tx.product.update({
-            where: { id: product.id },
-            data: { stock: { decrement: usage.quantity } },
-          });
-          await tx.stockMovement.create({
-            data: {
-              tenantId: session.tenantId,
-              productId: product.id,
-              type: "OUT",
-              quantity: usage.quantity,
-              reason: `Uso em ${item.service.name}`,
-              appointmentId: appointment.id,
-            },
-          });
-        }
-      }
-    }
-
-    return { ok: true as const };
+  await prisma.appointment.update({
+    where: { id: appointment.id },
+    data: { status },
   });
 
-  if ("error" in result) return result;
+  if (status === "COMPLETED" && appointment.commissions.length === 0 && appointment.comanda?.status !== "CLOSED") {
+    const priceCents = appointment.items.reduce((sum, item) => sum + item.priceCents, 0);
+    const { percent, amountCents } = calculateCommission({
+      priceCents,
+      professionalPct: appointment.professional.commissionPct,
+      servicePct: appointment.items[0]?.service.commissionPct,
+    });
+
+    await prisma.commission.create({
+      data: {
+        tenantId: session.tenantId,
+        professionalId: appointment.professionalId,
+        appointmentId: appointment.id,
+        amountCents,
+        percent,
+      },
+    });
+
+    await postLedgerEntry({
+      tenantId: session.tenantId,
+      type: "INCOME",
+      category: "servico",
+      amountCents: priceCents,
+      methodCode: "PIX",
+      description: appointment.items.map((item) => item.service.name).join(", "),
+      appointmentId: appointment.id,
+    });
+
+    for (const item of appointment.items) {
+      for (const usage of item.service.products) {
+        const product = await prisma.product.findFirst({
+          where: { id: usage.productId, tenantId: session.tenantId },
+        });
+        if (!product) continue;
+        const stock = nextStock(product.stock, "OUT", usage.quantity);
+        await prisma.product.update({ where: { id: product.id }, data: { stock } });
+        await prisma.stockMovement.create({
+          data: {
+            tenantId: session.tenantId,
+            productId: product.id,
+            type: "OUT",
+            quantity: usage.quantity,
+            reason: `Uso em ${item.service.name}`,
+            appointmentId: appointment.id,
+          },
+        });
+      }
+    }
+  }
+
   revalidatePath("/agenda");
   revalidatePath("/dashboard");
   revalidatePath("/comissoes");
   revalidatePath("/estoque");
   revalidatePath("/financeiro");
-  return result;
+  return { ok: true };
 }

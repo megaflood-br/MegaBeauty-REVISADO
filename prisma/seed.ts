@@ -1,10 +1,13 @@
 import { PrismaClient } from "@prisma/client";
 import bcrypt from "bcryptjs";
 import { addDays, addMinutes } from "date-fns";
-import { calendarDate, zonedDateTime } from "../src/lib/dates";
+import { calendarDate, calendarMonth, monthStartEnd, zonedDateTime } from "../src/lib/dates";
+import { buildAccessKey, taxCentsForKind } from "../src/lib/fiscal";
+import { comandaTotal } from "../src/lib/comandas";
 import { ensureFinanceCatalog } from "../src/lib/finance-catalog";
 import { ensureAnamnesisForms, serializeAnswers } from "../src/lib/anamnesis";
 import { postLedgerEntry } from "../src/lib/ledger";
+import { ensurePlatformPlans } from "../src/lib/plans";
 
 const prisma = new PrismaClient();
 
@@ -13,6 +16,22 @@ function at(day: Date, hour: number, minute = 0) {
 }
 
 async function main() {
+  await prisma.salonDocument.deleteMany();
+  await prisma.salonPop.deleteMany();
+  await prisma.marketingRecipient.deleteMany();
+  await prisma.marketingCampaign.deleteMany();
+  await prisma.supplierPromotionItem.deleteMany();
+  await prisma.supplierPromotion.deleteMany();
+  await prisma.promotionItem.deleteMany();
+  await prisma.promotion.deleteMany();
+  await prisma.fiscalInvoice.deleteMany();
+  await prisma.professionalGoal.deleteMany();
+  await prisma.cashbackMovement.deleteMany();
+  await prisma.platformPlan.deleteMany();
+  await prisma.supportMessage.deleteMany();
+  await prisma.supportCall.deleteMany();
+  await prisma.supportTicket.deleteMany();
+  await prisma.supportPresence.deleteMany();
   await prisma.anamnesis.deleteMany();
   await prisma.anamnesisForm.deleteMany();
   await prisma.comandaItem.deleteMany();
@@ -43,8 +62,35 @@ async function main() {
   await prisma.client.deleteMany();
   await prisma.tenant.deleteMany();
 
+  await ensurePlatformPlans();
+
   const passwordHash = await bcrypt.hash("demo1234", 10);
+  const adminHash = await bcrypt.hash("admin1234", 10);
   const today = zonedDateTime(calendarDate(), "12:00");
+
+  const hq = await prisma.tenant.create({
+    data: {
+      name: "MegaBeauty Plataforma",
+      slug: "megabeauty",
+      email: "nathan.k@example.net",
+      city: "São Paulo, SP",
+      plan: "premium",
+      status: "ACTIVE",
+      isPlatform: true,
+      kind: "PLATFORM",
+      accentColor: "#ff0447",
+      logoUrl: "/branding/logo.png",
+    },
+  });
+  const admin = await prisma.user.create({
+    data: {
+      tenantId: hq.id,
+      email: "nathan.k@example.net",
+      passwordHash: adminHash,
+      name: "Admin MegaBeauty",
+      role: "SUPER_ADMIN",
+    },
+  });
 
   const aurora = await prisma.tenant.create({
     data: {
@@ -57,13 +103,61 @@ async function main() {
       address: "Rua Harmonia, 240",
       city: "São Paulo, SP",
       plan: "profissional",
+      status: "ACTIVE",
       accentColor: "#2563EB",
       openTime: "08:00",
       closeTime: "20:00",
+      fiscalEnabled: true,
+      fiscalCnpj: "12345678000195",
+      fiscalIm: "123456",
+      fiscalUf: "SP",
+      fiscalIbge: "3550308",
+      fiscalIssPct: 5,
+      fiscalServiceCode: "6.01",
+      fiscalSeries: "1",
+      fiscalNextNumber: 3,
+      fiscalProvider: "contora",
+      fiscalEnvironment: "homolog",
+      fiscalStreet: "Rua Harmonia",
+      fiscalNumber: "240",
+      fiscalDistrict: "Vila Madalena",
+      fiscalZip: "05435000",
+      cashbackEnabled: true,
+      cashbackEarnPct: 5,
+      cashbackUseItemPct: true,
+      cashbackOnServices: true,
+      cashbackOnProducts: true,
+      cashbackMaxRedeemPct: 50,
+      cashbackCentsPerPoint: 100,
     },
   });
   await ensureFinanceCatalog(aurora.id);
   await ensureAnamnesisForms(aurora.id);
+
+  const luna = await prisma.tenant.create({
+    data: {
+      name: "Espaço Luna",
+      slug: "espaco-luna",
+      phone: "11955550000",
+      email: "walt.e@example.net",
+      city: "Campinas, SP",
+      plan: "essencial",
+      status: "TRIAL",
+      trialEndsAt: addDays(today, 10),
+      notes: "Conta de demonstração em trial.",
+    },
+  });
+  const lunaOwner = await prisma.user.create({
+    data: {
+      tenantId: luna.id,
+      email: "walt.e@example.net",
+      passwordHash,
+      name: "Luna Ribeiro",
+      role: "OWNER",
+    },
+  });
+  await ensureFinanceCatalog(luna.id);
+  await ensureAnamnesisForms(luna.id);
 
   const camila = await prisma.professional.create({
     data: {
@@ -118,7 +212,7 @@ async function main() {
     },
   });
 
-  await prisma.user.create({
+  const ana = await prisma.user.create({
     data: {
       tenantId: aurora.id,
       email: "iris.p@example.org",
@@ -146,6 +240,111 @@ async function main() {
       professionalId: camila.id,
     },
   });
+
+  const supply = await prisma.tenant.create({
+    data: {
+      name: "Beauty Supply SP",
+      slug: "beauty-supply-sp",
+      phone: "1133334444",
+      email: "oscar.d@example.net",
+      city: "São Paulo, SP",
+      address: "Rua dos Fornecedores, 120",
+      plan: "fornecedor",
+      status: "ACTIVE",
+      kind: "SUPPLIER",
+      deliveryMinCents: 15000,
+      deliveryFeeCents: 1500,
+      supplierPayMethods: "PIX,CASH,TRANSFER",
+      servedCities: JSON.stringify(["Atibaia/SP", "Campinas/SP", "São Paulo/SP"]),
+    },
+  });
+  const supplyUser = await prisma.user.create({
+    data: {
+      tenantId: supply.id,
+      email: "oscar.d@example.net",
+      passwordHash,
+      name: "Paulo Distribuidor",
+      role: "SUPPLIER",
+    },
+  });
+  const mask = await prisma.supplierProduct.create({
+    data: {
+      tenantId: supply.id,
+      name: "Máscara hidratação 500ml",
+      brand: "Lumina",
+      sku: "LUM-500",
+      category: "Tratamento",
+      unit: "un",
+      priceCents: 8900,
+      minQty: 1,
+      stock: 40,
+      description: "Máscara profissional para cabelos danificados.",
+    },
+  });
+  await prisma.supplierPromotion.create({
+    data: {
+      tenantId: supply.id,
+      name: "Só hoje",
+      note: "Reposição com desconto",
+      startsOn: zonedDateTime(calendarDate(today), "12:00"),
+      endsOn: zonedDateTime(calendarDate(today), "12:00"),
+      weekdays: "0,1,2,3,4,5,6",
+      dealType: "BUNDLE",
+      buyQty: 5,
+      payQty: 3,
+      active: true,
+      items: { create: { productId: mask.id } },
+    },
+  });
+  await prisma.supplierProduct.createMany({
+    data: [
+      {
+        tenantId: supply.id,
+        name: "Ox 20 volumes 900ml",
+        brand: "Lumina",
+        sku: "LUM-OX20",
+        category: "Coloração",
+        unit: "un",
+        priceCents: 3200,
+        minQty: 3,
+        stock: 80,
+      },
+      {
+        tenantId: supply.id,
+        name: "Luva de procedimento (100 un)",
+        brand: "MedCare",
+        sku: "MC-LUV",
+        category: "Descartáveis",
+        unit: "un",
+        priceCents: 2490,
+        minQty: 1,
+        stock: null,
+      },
+    ],
+  });
+  await prisma.supplierOrder.create({
+    data: {
+      salonTenantId: aurora.id,
+      supplierTenantId: supply.id,
+      createdById: ana.id,
+      status: "SUBMITTED",
+      notes: "Reposição da semana.",
+      totalCents: 8900,
+      items: {
+        create: {
+          productId: mask.id,
+          name: mask.name,
+          brand: mask.brand,
+          sku: mask.sku,
+          unit: mask.unit,
+          quantity: 1,
+          unitCents: mask.priceCents,
+          lineCents: mask.priceCents,
+        },
+      },
+    },
+  });
+  void supplyUser;
 
   const cats = await prisma.serviceCategory.createManyAndReturn({
     data: [
@@ -383,6 +582,21 @@ async function main() {
   }
 
   const [juliana, pedro, fernanda, carla, thiago, beatriz, amanda, lucas, patricia, renata] = clients;
+  await prisma.client.update({
+    where: { id: juliana.id },
+    data: { cashbackCents: 4500 },
+  });
+  await prisma.cashbackMovement.create({
+    data: {
+      tenantId: aurora.id,
+      clientId: juliana.id,
+      type: "MANUAL",
+      amountCents: 4500,
+      points: 45,
+      reason: "Saldo inicial de demonstração",
+      createdByName: "Admin MegaBeauty",
+    },
+  });
 
   const forms = await prisma.anamnesisForm.findMany({ where: { tenantId: aurora.id } });
   const formBySlug = Object.fromEntries(forms.map((form) => [form.slug, form]));
@@ -821,7 +1035,8 @@ async function main() {
         tenantId: aurora.id,
         name: "Lembrete 24h",
         trigger: "REMINDER",
-        template: "Oi {{nome}}, lembrando do seu horário amanhã às {{hora}} no {{salao}}. Te esperamos!",
+        template:
+          "{Oi|Olá|Oi oi} {{nome}}! {Passando para lembrar|Só lembrando} do seu horário amanhã às {{hora}} no {{salao}}. Pode me responder com 1 para confirmar?",
       },
       {
         tenantId: aurora.id,
@@ -837,7 +1052,7 @@ async function main() {
       name: "Barbearia Norte",
       slug: "barbearia-norte",
       city: "Campinas, SP",
-      plan: "starter",
+      plan: "essencial",
     },
   });
   await ensureFinanceCatalog(norte.id);
@@ -859,7 +1074,165 @@ async function main() {
     },
   });
 
-  console.log("Seed ok. Login: iris.p@example.org / demo1234");
+  const auroraTicket = await prisma.supportTicket.create({
+    data: {
+      tenantId: aurora.id,
+      number: 1,
+      subject: "Dúvida sobre comissões da semana",
+      category: "financeiro",
+      priority: "HIGH",
+      status: "OPEN",
+      createdById: ana.id,
+      lastMessageAt: addMinutes(today, -40),
+      unreadAdmin: 1,
+    },
+  });
+  await prisma.supportMessage.createMany({
+    data: [
+      {
+        ticketId: auroraTicket.id,
+        authorId: ana.id,
+        side: "SALON",
+        body: "As comissões da Camila ficaram diferentes do que combinamos. Podem conferir?",
+        createdAt: addMinutes(today, -40),
+      },
+    ],
+  });
+
+  const lunaTicket = await prisma.supportTicket.create({
+    data: {
+      tenantId: luna.id,
+      number: 1,
+      subject: "Como conectar o WhatsApp?",
+      category: "onboarding",
+      priority: "NORMAL",
+      status: "PENDING",
+      createdById: lunaOwner.id,
+      assignedToId: admin.id,
+      lastMessageAt: addMinutes(today, -120),
+      unreadSalon: 1,
+    },
+  });
+  await prisma.supportMessage.createMany({
+    data: [
+      {
+        ticketId: lunaTicket.id,
+        authorId: lunaOwner.id,
+        side: "SALON",
+        body: "Estou no trial e não sei por onde começar a Evolution API.",
+        createdAt: addMinutes(today, -150),
+      },
+      {
+        ticketId: lunaTicket.id,
+        authorId: admin.id,
+        side: "PLATFORM",
+        body: "Luna, entre em Configurações > WhatsApp e cole a URL, a API key e o nome da instância. Qualquer coisa me chama ao vivo.",
+        createdAt: addMinutes(today, -120),
+      },
+    ],
+  });
+
+  const resolved = await prisma.supportTicket.create({
+    data: {
+      tenantId: aurora.id,
+      number: 2,
+      subject: "Ajuste no horário de abertura",
+      category: "ajuda",
+      priority: "LOW",
+      status: "RESOLVED",
+      createdById: ana.id,
+      assignedToId: admin.id,
+      lastMessageAt: addMinutes(today, -400),
+    },
+  });
+  await prisma.supportMessage.createMany({
+    data: [
+      {
+        ticketId: resolved.id,
+        authorId: ana.id,
+        side: "SALON",
+        body: "Conseguimos mudar o horário de abertura para 8h?",
+        createdAt: addMinutes(today, -420),
+      },
+      {
+        ticketId: resolved.id,
+        authorId: admin.id,
+        side: "PLATFORM",
+        body: "Sim — em Configurações, campo de abertura. Já deixei o caminho.",
+        createdAt: addMinutes(today, -400),
+      },
+    ],
+  });
+
+  const month = monthStartEnd(calendarMonth(today));
+  await prisma.professionalGoal.createMany({
+    data: [
+      { tenantId: aurora.id, professionalId: camila.id, metric: "REVENUE", targetValue: 200000, startDate: month.from, endDate: month.to, notes: "Coloração e hidratação" },
+      { tenantId: aurora.id, professionalId: camila.id, metric: "SERVICES", targetValue: 14, startDate: month.from, endDate: month.to },
+      { tenantId: aurora.id, professionalId: rafaela.id, metric: "REVENUE", targetValue: 180000, startDate: month.from, endDate: month.to },
+      { tenantId: aurora.id, professionalId: bruno.id, metric: "REVENUE", targetValue: 200000, startDate: month.from, endDate: month.to, notes: "Barba e corte masculino" },
+      { tenantId: aurora.id, professionalId: leticia.id, metric: "REVENUE", targetValue: 150000, startDate: month.from, endDate: month.to },
+      { tenantId: aurora.id, professionalId: leticia.id, metric: "CLIENTS", targetValue: 8, startDate: month.from, endDate: month.to },
+    ],
+  });
+
+  const closedComanda = await prisma.comanda.findFirst({
+    where: { tenantId: aurora.id, status: "CLOSED" },
+    include: { items: true, client: true },
+    orderBy: { occurredAt: "desc" },
+  });
+  if (closedComanda) {
+    const amountCents = comandaTotal({
+      items: closedComanda.items,
+      discountCents: closedComanda.discountCents,
+      creditCents: closedComanda.creditCents,
+      cashbackCents: closedComanda.cashbackCents,
+    });
+    await prisma.fiscalInvoice.create({
+      data: {
+        tenantId: aurora.id,
+        comandaId: closedComanda.id,
+        clientId: closedComanda.clientId,
+        kind: "NFSE",
+        status: "AUTHORIZED",
+        number: 1,
+        series: "1",
+        accessKey: buildAccessKey({
+          uf: "SP",
+          issuedAt: closedComanda.closedAt ?? today,
+          cnpj: "12345678000195",
+          kind: "NFSE",
+          series: "1",
+          number: 1,
+        }),
+        protocol: "LOCAL1",
+        environment: "homolog",
+        provider: "local",
+        amountCents,
+        taxCents: taxCentsForKind("NFSE", amountCents, 5),
+        issuedAt: closedComanda.closedAt ?? today,
+        notes: `Comanda #${closedComanda.number}`,
+      },
+    });
+  }
+
+  await prisma.promotion.create({
+    data: {
+      tenantId: aurora.id,
+      name: "Fim de semana do corte",
+      startsOn: zonedDateTime(calendarMonth(today) + "-01", "12:00"),
+      endsOn: zonedDateTime(month.to, "23:59"),
+      weekdays: "0,6",
+      discountType: "PERCENT",
+      discountValue: 20,
+      active: true,
+      items: { create: [{ type: "SERVICE", serviceId: corteMasc.id }] },
+    },
+  });
+
+  console.log(
+    "Seed ok. Salão: iris.p@example.org / demo1234 · Fornecedor: oscar.d@example.net / demo1234 · Plataforma: nathan.k@example.net / admin1234",
+  );
 }
 
 main()

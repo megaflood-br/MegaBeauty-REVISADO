@@ -5,18 +5,24 @@ import { requireTenant } from "@/lib/tenant";
 import { Badge, Button, Card, Field, Input, Select } from "@/components/ui";
 import { SearchSelect } from "@/components/search-select";
 import { addComandaItem, closeComanda, removeComandaItemForm } from "@/app/actions/comandas";
-import { formAction } from "@/lib/utils";
+import { ConfirmDeleteButton } from "@/components/confirm-delete-button";
+import { emitComandaInvoice } from "@/app/actions/fiscal";
+import { displayPhoneBR, formAction } from "@/lib/utils";
 import { formatBRL } from "@/lib/money";
 import { comandaSubtotal, comandaTotal, itemLineTotal } from "@/lib/comandas";
 import { COMANDA_STATUS_COLOR, COMANDA_STATUS_LABEL, type ComandaStatus } from "@/lib/constants";
 import { loadFinanceCatalog } from "@/lib/finance-catalog";
+import { calendarDate } from "@/lib/dates";
+import { decorateCatalogItem } from "@/lib/promotions";
+import { loadPromoRules } from "@/lib/promo-load";
 import { financeMethodLabel } from "@/lib/finance";
+import { canAccess, shouldHidePhones } from "@/lib/permissions";
 import { Trash2 } from "lucide-react";
 
 export default async function ComandaPage({ params }: { params: Promise<{ id: string }> }) {
-  const { session } = await requireTenant();
+  const { session, access } = await requireTenant();
   const { id } = await params;
-  const [comanda, services, products, professionals, catalog] = await Promise.all([
+  const [comanda, services, products, professionals, catalog, promos] = await Promise.all([
     prisma.comanda.findFirst({
       where: { id, tenantId: session.tenantId },
       include: { client: true, professional: true, appointment: true, items: { include: { professional: true } } },
@@ -25,10 +31,17 @@ export default async function ComandaPage({ params }: { params: Promise<{ id: st
     prisma.product.findMany({ where: { tenantId: session.tenantId, active: true }, orderBy: { name: "asc" } }),
     prisma.professional.findMany({ where: { tenantId: session.tenantId, active: true }, orderBy: { name: "asc" } }),
     loadFinanceCatalog(session.tenantId),
+    loadPromoRules(session.tenantId),
   ]);
   if (!comanda) notFound();
+  const onDate = calendarDate(comanda.occurredAt);
+  const pricedServices = services.map((service) => decorateCatalogItem(promos, onDate, "SERVICE", service));
+  const pricedProducts = products.map((product) =>
+    decorateCatalogItem(promos, onDate, "PRODUCT", { id: product.id, name: product.name, priceCents: product.saleCents }),
+  );
 
   const open = comanda.status === "OPEN";
+  const canEdit = canAccess(access, "comandas", "edit");
   const subtotal = comandaSubtotal(comanda.items);
   const total = comandaTotal({
     items: comanda.items,
@@ -48,9 +61,12 @@ export default async function ComandaPage({ params }: { params: Promise<{ id: st
           </p>
           <h1 className="font-display text-3xl">Comanda #{comanda.number}</h1>
           <p className="text-ink-soft">
-            {comanda.client.name} · {comanda.client.phone}
+            {comanda.client.name} · {displayPhoneBR(comanda.client.phone, shouldHidePhones(access))}
             {comanda.professional ? ` · ${comanda.professional.name}` : ""}
           </p>
+          {open && !canEdit ? (
+            <p className="mt-1 text-sm text-ink-soft">Consulta apenas. Incluir itens e fechar a comanda ficam com quem tem permissão.</p>
+          ) : null}
         </div>
         <Badge color={COMANDA_STATUS_COLOR[comanda.status as ComandaStatus]}>
           {COMANDA_STATUS_LABEL[comanda.status as ComandaStatus]}
@@ -78,13 +94,20 @@ export default async function ComandaPage({ params }: { params: Promise<{ id: st
                 <td>{item.quantity}</td>
                 <td>{formatBRL(itemLineTotal(item))}</td>
                 <td>
-                  {open ? (
-                    <form action={formAction(removeComandaItemForm)}>
-                      <input type="hidden" name="itemId" value={item.id} />
-                      <button className="p-2 text-red-600" aria-label="Remover">
-                        <Trash2 size={16} />
-                      </button>
-                    </form>
+                  {open && canEdit ? (
+                    <ConfirmDeleteButton
+                      title="Remover este item da comanda?"
+                      confirmLabel="Remover"
+                      ariaLabel="Remover"
+                      className="p-2 text-red-600"
+                      onConfirm={async () => {
+                        const form = new FormData();
+                        form.set("itemId", item.id);
+                        await removeComandaItemForm(form);
+                      }}
+                    >
+                      <Trash2 size={16} />
+                    </ConfirmDeleteButton>
                   ) : null}
                 </td>
               </tr>
@@ -93,7 +116,7 @@ export default async function ComandaPage({ params }: { params: Promise<{ id: st
         </table>
       </Card>
 
-      {open ? (
+      {open && canEdit ? (
         <div className="grid gap-4 lg:grid-cols-2">
           <Card>
             <h2 className="font-display text-xl">Adicionar serviço</h2>
@@ -105,10 +128,10 @@ export default async function ComandaPage({ params }: { params: Promise<{ id: st
                   name="serviceId"
                   required
                   placeholder="Buscar serviço..."
-                  options={services.map((s) => ({
+                  options={pricedServices.map((s) => ({
                     value: s.id,
                     label: s.name,
-                    hint: formatBRL(s.priceCents),
+                    hint: s.promoPriceCents != null ? `${formatBRL(s.promoPriceCents)} na ${s.promoName}` : formatBRL(s.priceCents),
                   }))}
                 />
               </Field>
@@ -133,10 +156,10 @@ export default async function ComandaPage({ params }: { params: Promise<{ id: st
                   name="productId"
                   required
                   placeholder="Buscar produto..."
-                  options={products.map((p) => ({
+                  options={pricedProducts.map((p) => ({
                     value: p.id,
                     label: p.name,
-                    hint: formatBRL(p.saleCents),
+                    hint: p.promoPriceCents != null ? `${formatBRL(p.promoPriceCents)} na ${p.promoName}` : formatBRL(p.priceCents),
                   }))}
                 />
               </Field>
@@ -158,7 +181,7 @@ export default async function ComandaPage({ params }: { params: Promise<{ id: st
             {comanda.cashbackCents ? <div>Cashback {formatBRL(comanda.cashbackCents)}</div> : null}
             <div className="font-display text-3xl">{formatBRL(total)}</div>
           </div>
-          {open ? (
+          {open && canEdit ? (
             <form action={formAction(closeComanda)} className="flex flex-wrap items-end gap-3">
               <input type="hidden" name="comandaId" value={comanda.id} />
               <Field label="Desconto">
@@ -177,11 +200,25 @@ export default async function ComandaPage({ params }: { params: Promise<{ id: st
               </Field>
               <Button variant="success">Fechar comanda</Button>
             </form>
-          ) : (
-            <p className="text-sm text-ink-soft">
-              Paga via {financeMethodLabel(comanda.paymentMethod ?? "", catalog.methods.find((m) => m.code === comanda.paymentMethod)?.name)}
-            </p>
-          )}
+          ) : null}
+          {!open ? (
+            <div className="flex flex-wrap items-center gap-3">
+              <p className="text-sm text-ink-soft">
+                Paga via {financeMethodLabel(comanda.paymentMethod ?? "", catalog.methods.find((m) => m.code === comanda.paymentMethod)?.name)}
+              </p>
+              {canEdit ? (
+                <form action={formAction(emitComandaInvoice)}>
+                  <input type="hidden" name="comandaId" value={comanda.id} />
+                  <Button type="submit" variant="outline">
+                    Emitir nota
+                  </Button>
+                </form>
+              ) : null}
+              <Link href="/notas" className="text-sm font-medium text-wine">
+                Ver notas
+              </Link>
+            </div>
+          ) : null}
         </div>
       </Card>
     </div>

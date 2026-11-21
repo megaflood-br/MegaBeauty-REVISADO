@@ -1,20 +1,12 @@
 import { prisma } from "@/lib/db";
 import { requireTenant } from "@/lib/tenant";
-import { canSeeFinance, isOwner } from "@/lib/auth";
 import { Card } from "@/components/ui";
 import { TransactionDrawer } from "@/components/finance/transaction-drawer";
 import { AccountBalances } from "@/components/finance/account-balances";
 import { FinanceTransactions } from "@/components/finance/finance-transactions";
 import { formatBRL } from "@/lib/money";
 import { calendarDate, formatShortDate } from "@/lib/dates";
-import {
-  financeAccountLabel,
-  financeCategoryLabel,
-  financeMethodLabel,
-  financeOrigin,
-  financeSubtitle,
-  financeTitular,
-} from "@/lib/finance";
+import { financeAccountLabel, financeCategoryLabel, financeMethodLabel, financeOrigin, financeSubtitle, financeTitular } from "@/lib/finance";
 import { loadFinanceCatalog } from "@/lib/finance-catalog";
 import { summarizeAccountBalances } from "@/lib/ledger";
 import { cn } from "@/lib/utils";
@@ -22,22 +14,9 @@ import type { TransactionListRow } from "@/components/finance/types";
 
 export default async function FinanceiroPage() {
   const { session } = await requireTenant();
-  if (!canSeeFinance(session.role)) {
-    return (
-      <div className="space-y-2">
-        <h1 className="font-display text-3xl">Financeiro</h1>
-        <p className="text-ink-soft">Somente proprietários e gerentes têm acesso ao financeiro.</p>
-      </div>
-    );
-  }
-
-  const owner = isOwner(session.role);
-  const [txs, groupedLedger, professionals, catalog] = await Promise.all([
+  const [txs, ledgerRows, professionals, catalog] = await Promise.all([
     prisma.transaction.findMany({
-      where: {
-        tenantId: session.tenantId,
-        ...(owner ? {} : { OR: [{ financeAccount: null }, { financeAccount: { adminOnly: false } }] }),
-      },
+      where: { tenantId: session.tenantId },
       include: {
         professional: true,
         comanda: { include: { client: true } },
@@ -49,10 +28,16 @@ export default async function FinanceiroPage() {
       orderBy: { occurredAt: "desc" },
       take: 80,
     }),
-    prisma.transaction.groupBy({
-      by: ["accountId", "type", "settled"],
-      where: { tenantId: session.tenantId, organizational: false, accountId: { not: null } },
-      _sum: { netCents: true, amountCents: true, feeCents: true },
+    prisma.transaction.findMany({
+      where: { tenantId: session.tenantId, organizational: false },
+      select: {
+        accountId: true,
+        type: true,
+        settled: true,
+        netCents: true,
+        amountCents: true,
+        feeCents: true,
+      },
     }),
     prisma.professional.findMany({
       where: { tenantId: session.tenantId, active: true },
@@ -61,22 +46,10 @@ export default async function FinanceiroPage() {
     }),
     loadFinanceCatalog(session.tenantId),
   ]);
-
-  const visibleAccounts = owner ? catalog.accounts : catalog.accounts.filter((a) => !a.adminOnly);
-  const ledgerRows = groupedLedger.map((row) => ({
-    accountId: row.accountId,
-    type: row.type,
-    settled: row.settled,
-    netCents: row._sum.netCents ?? 0,
-    amountCents: row._sum.amountCents ?? 0,
-    feeCents: row._sum.feeCents ?? 0,
-  }));
-
   const balances = summarizeAccountBalances({
-    accounts: visibleAccounts,
+    accounts: catalog.accounts,
     methods: catalog.methods,
     transactions: ledgerRows,
-    includeAdminOnly: owner,
   });
   const income = balances.reduce((sum, row) => sum + row.incomeCents, 0);
   const expense = balances.reduce((sum, row) => sum + row.expenseCents, 0);
@@ -131,7 +104,7 @@ export default async function FinanceiroPage() {
             type="INCOME"
             professionals={professionals}
             suppliers={suppliers}
-            accounts={visibleAccounts}
+            accounts={catalog.accounts}
             methods={catalog.methods}
             categories={catalog.categories}
           />
@@ -139,13 +112,13 @@ export default async function FinanceiroPage() {
             type="EXPENSE"
             professionals={professionals}
             suppliers={suppliers}
-            accounts={visibleAccounts}
+            accounts={catalog.accounts}
             methods={catalog.methods}
             categories={catalog.categories}
           />
         </div>
       </div>
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
         <Card>
           <div className="text-xs text-ink-soft">Entradas</div>
           <div className="font-display text-2xl text-emerald-700">{formatBRL(income)}</div>
@@ -166,7 +139,7 @@ export default async function FinanceiroPage() {
         rows={rows}
         professionals={professionals}
         suppliers={suppliers}
-        accounts={visibleAccounts}
+        accounts={catalog.accounts}
         methods={catalog.methods}
         categories={catalog.categories}
       />

@@ -2,12 +2,8 @@
 
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/db";
-import {
-  assertProductCategoryInTenant,
-  assertProfessionalInTenant,
-  assertServicesInTenant,
-  requireTenant,
-} from "@/lib/tenant";
+import { requireTenant } from "@/lib/tenant";
+import { nextStock } from "@/lib/stock";
 import { parseBRLToCents } from "@/lib/money";
 import { zonedDateTime } from "@/lib/dates";
 
@@ -20,7 +16,7 @@ function toNullableInt(raw: FormDataEntryValue | null) {
     .trim();
   if (!text) return null;
   const value = Number(text);
-  return Number.isFinite(value) ? Math.min(100, Math.max(0, Math.round(value))) : null;
+  return Number.isFinite(value) ? Math.round(value) : null;
 }
 
 function toNumber(raw: FormDataEntryValue | null, fallback = 0) {
@@ -38,15 +34,16 @@ export async function upsertProduct(formData: FormData) {
   const categoryId = String(formData.get("categoryId") ?? "") || null;
   const unit = ["ml", "g"].includes(String(formData.get("unit") ?? "")) ? String(formData.get("unit")) : "un";
   const unitEquals = Math.max(toNumber(formData.get("unitEquals"), 1), 0.01);
-  const costCents = Math.max(0, parseBRLToCents(String(formData.get("cost") ?? "0")));
-  const saleCents = Math.max(0, parseBRLToCents(String(formData.get("sale") ?? "0")));
-  const professionalPriceCents = Math.max(0, parseBRLToCents(String(formData.get("professionalPrice") ?? "0")));
-  const extraCostCents = Math.max(0, parseBRLToCents(String(formData.get("extraCost") ?? "0")));
+  const costCents = parseBRLToCents(String(formData.get("cost") ?? "0"));
+  const saleCents = parseBRLToCents(String(formData.get("sale") ?? "0"));
+  const professionalPriceCents = parseBRLToCents(String(formData.get("professionalPrice") ?? "0"));
+  const extraCostCents = parseBRLToCents(String(formData.get("extraCost") ?? "0"));
   const commissionPct = toNullableInt(formData.get("commissionPct"));
   const cashbackPct = toNullableInt(formData.get("cashbackPct"));
   const returnRaw = Number(formData.get("returnAfterDays") ?? "");
   const returnAfterDays = Number.isFinite(returnRaw) && returnRaw > 0 ? returnRaw : null;
-  const minStock = Math.max(toNumber(formData.get("minStock"), 0), 0);
+  const minStockRaw = toNumber(formData.get("minStock"), 2);
+  const minStock = minStockRaw > 0 ? minStockRaw : 2;
   const initialStock = Math.max(toNumber(formData.get("stock"), 0), 0);
   const imageUrl = String(formData.get("imageUrl") ?? "").trim() || null;
   const notes = String(formData.get("notes") ?? "").trim() || null;
@@ -54,11 +51,14 @@ export async function upsertProduct(formData: FormData) {
   const active = String(formData.get("active") ?? "") !== "0";
 
   if (!name) return { error: "Nome do produto é obrigatório." };
+  if (!categoryId) return { error: "Selecione ou cadastre uma categoria." };
+  const category = await prisma.productCategory.findFirst({
+    where: { id: categoryId, tenantId: session.tenantId },
+    select: { id: true },
+  });
+  if (!category) return { error: "Categoria inválida. Cadastre uma categoria no Estoque." };
   if (imageUrl && imageUrl.length > 400_000) {
     return { error: "Imagem muito grande. Use uma foto menor." };
-  }
-  if (categoryId && !(await assertProductCategoryInTenant(session.tenantId, categoryId))) {
-    return { error: "Categoria inválida." };
   }
 
   const serviceIds = formData.getAll("linkedServiceId").map(String);
@@ -66,13 +66,9 @@ export async function upsertProduct(formData: FormData) {
   const services = serviceIds
     .map((serviceId, index) => ({
       serviceId,
-      quantity: Math.max(0.01, Number(serviceQtys[index] ?? 1) || 1),
+      quantity: Number(serviceQtys[index] ?? 1) || 1,
     }))
     .filter((row) => row.serviceId);
-
-  if (!(await assertServicesInTenant(session.tenantId, services.map((s) => s.serviceId)))) {
-    return { error: "Um ou mais serviços vinculados são inválidos." };
-  }
 
   const data = {
     name,
@@ -94,44 +90,42 @@ export async function upsertProduct(formData: FormData) {
     notes,
     requestAvailable,
     active,
+    ncm: String(formData.get("ncm") ?? "").replace(/\D/g, "") || null,
+    cfop: String(formData.get("cfop") ?? "").replace(/\D/g, "") || null,
   };
 
   try {
-    const result = await prisma.$transaction(async (tx) => {
-      if (id) {
-        const existing = await tx.product.findFirst({ where: { id, tenantId: session.tenantId } });
-        if (!existing) return { error: "Produto não encontrado." };
-        await tx.product.update({ where: { id }, data });
-        await tx.serviceProduct.deleteMany({ where: { productId: id } });
-        if (services.length) {
-          await tx.serviceProduct.createMany({
-            data: services.map((row) => ({ productId: id, serviceId: row.serviceId, quantity: row.quantity })),
-          });
-        }
-      } else {
-        const created = await tx.product.create({
-          data: { tenantId: session.tenantId, stock: initialStock, ...data },
+    if (id) {
+      const existing = await prisma.product.findFirst({ where: { id, tenantId: session.tenantId } });
+      if (!existing) return { error: "Produto não encontrado." };
+      await prisma.product.update({ where: { id }, data });
+      await prisma.serviceProduct.deleteMany({ where: { productId: id } });
+      if (services.length) {
+        await prisma.serviceProduct.createMany({
+          data: services.map((row) => ({ productId: id, serviceId: row.serviceId, quantity: row.quantity })),
         });
-        if (initialStock > 0) {
-          await tx.stockMovement.create({
-            data: {
-              tenantId: session.tenantId,
-              productId: created.id,
-              type: "IN",
-              quantity: initialStock,
-              reason: "Estoque inicial",
-            },
-          });
-        }
-        if (services.length) {
-          await tx.serviceProduct.createMany({
-            data: services.map((row) => ({ productId: created.id, serviceId: row.serviceId, quantity: row.quantity })),
-          });
-        }
       }
-      return { ok: true as const };
-    });
-    if ("error" in result) return result;
+    } else {
+      const created = await prisma.product.create({
+        data: { tenantId: session.tenantId, stock: initialStock, ...data },
+      });
+      if (initialStock > 0) {
+        await prisma.stockMovement.create({
+          data: {
+            tenantId: session.tenantId,
+            productId: created.id,
+            type: "IN",
+            quantity: initialStock,
+            reason: "Estoque inicial",
+          },
+        });
+      }
+      if (services.length) {
+        await prisma.serviceProduct.createMany({
+          data: services.map((row) => ({ productId: created.id, serviceId: row.serviceId, quantity: row.quantity })),
+        });
+      }
+    }
   } catch (err) {
     console.error("upsertProduct", err);
     return { error: "Não foi possível salvar o produto. Confira os campos e tente de novo." };
@@ -144,43 +138,30 @@ export async function upsertProduct(formData: FormData) {
 export async function moveStock(formData: FormData) {
   const { session } = await requireTenant();
   const productId = String(formData.get("productId") ?? "");
-  const rawType = String(formData.get("type") ?? "IN");
-  const type = rawType === "OUT" || rawType === "ADJUST" ? rawType : "IN";
+  const type = String(formData.get("type") ?? "IN") as "IN" | "OUT" | "ADJUST";
   const quantity = toNumber(formData.get("quantity"), 0);
   const reason = String(formData.get("reason") ?? "") || null;
 
   if (quantity <= 0) return { error: "Informe uma quantidade." };
 
-  const result = await prisma.$transaction(async (tx) => {
-    const product = await tx.product.findFirst({
-      where: { id: productId, tenantId: session.tenantId },
-      select: { id: true },
-    });
-    if (!product) return { error: "Produto não encontrado." };
-
-    const stockUpdate =
-      type === "IN"
-        ? { stock: { increment: quantity } }
-        : type === "OUT"
-          ? { stock: { decrement: quantity } }
-          : { stock: quantity };
-
-    await tx.product.update({ where: { id: product.id }, data: stockUpdate });
-    await tx.stockMovement.create({
-      data: {
-        tenantId: session.tenantId,
-        productId: product.id,
-        type,
-        quantity,
-        reason,
-      },
-    });
-    return { ok: true as const };
+  const product = await prisma.product.findFirst({
+    where: { id: productId, tenantId: session.tenantId },
   });
+  if (!product) return { error: "Produto não encontrado." };
 
-  if ("error" in result) return result;
+  const stock = nextStock(product.stock, type, quantity);
+  await prisma.product.update({ where: { id: product.id }, data: { stock } });
+  await prisma.stockMovement.create({
+    data: {
+      tenantId: session.tenantId,
+      productId: product.id,
+      type,
+      quantity,
+      reason,
+    },
+  });
   revalidatePath("/estoque");
-  return result;
+  return { ok: true };
 }
 
 export async function createProductLot(formData: FormData) {
@@ -195,41 +176,33 @@ export async function createProductLot(formData: FormData) {
   if (quantity <= 0) return { error: "Informe a quantidade." };
   if (!/^\d{4}-\d{2}-\d{2}$/.test(expires)) return { error: "Informe a validade." };
 
-  const result = await prisma.$transaction(async (tx) => {
-    const product = await tx.product.findFirst({
-      where: { id: productId, tenantId: session.tenantId },
-      select: { id: true },
-    });
-    if (!product) return { error: "Produto não encontrado." };
+  const product = await prisma.product.findFirst({ where: { id: productId, tenantId: session.tenantId } });
+  if (!product) return { error: "Produto não encontrado." };
 
-    await tx.productLot.create({
-      data: {
-        tenantId: session.tenantId,
-        productId,
-        code,
-        quantity,
-        expiresAt: zonedDateTime(expires, "12:00"),
-      },
-    });
-    await tx.product.update({
-      where: { id: productId },
-      data: { stock: { increment: quantity } },
-    });
-    await tx.stockMovement.create({
-      data: {
-        tenantId: session.tenantId,
-        productId,
-        type: "IN",
-        quantity,
-        reason: `Lote ${code}`,
-      },
-    });
-    return { ok: true as const };
+  await prisma.productLot.create({
+    data: {
+      tenantId: session.tenantId,
+      productId,
+      code,
+      quantity,
+      expiresAt: zonedDateTime(expires, "12:00"),
+    },
   });
-
-  if ("error" in result) return result;
+  await prisma.product.update({
+    where: { id: productId },
+    data: { stock: product.stock + quantity },
+  });
+  await prisma.stockMovement.create({
+    data: {
+      tenantId: session.tenantId,
+      productId,
+      type: "IN",
+      quantity,
+      reason: `Lote ${code}`,
+    },
+  });
   revalidatePath("/estoque");
-  return result;
+  return { ok: true };
 }
 
 export async function createProductRequest(formData: FormData) {
@@ -241,9 +214,6 @@ export async function createProductRequest(formData: FormData) {
 
   if (!productId) return { error: "Selecione o produto." };
   if (quantity <= 0) return { error: "Informe a quantidade." };
-  if (professionalId && !(await assertProfessionalInTenant(session.tenantId, professionalId))) {
-    return { error: "Profissional inválido." };
-  }
 
   const product = await prisma.product.findFirst({ where: { id: productId, tenantId: session.tenantId } });
   if (!product) return { error: "Produto não encontrado." };
@@ -264,45 +234,90 @@ export async function createProductRequest(formData: FormData) {
 
 export async function reviewProductRequest(id: string, status: "APPROVED" | "REJECTED") {
   const { session } = await requireTenant();
+  const request = await prisma.productRequest.findFirst({
+    where: { id, tenantId: session.tenantId },
+    include: { product: true },
+  });
+  if (!request) return { error: "Solicitação não encontrada." };
+  if (request.status !== "PENDING") return { error: "Esta solicitação já foi respondida." };
 
-  const result = await prisma.$transaction(async (tx) => {
-    const request = await tx.productRequest.findFirst({
-      where: { id, tenantId: session.tenantId },
-      include: { product: true },
-    });
-    if (!request) return { error: "Solicitação não encontrada." };
-    if (request.status !== "PENDING") return { error: "Esta solicitação já foi respondida." };
-
-    if (status === "APPROVED" && request.product.stock < request.quantity) {
+  if (status === "APPROVED") {
+    if (request.product.stock < request.quantity) {
       return { error: "Estoque insuficiente para aprovar a solicitação." };
     }
-
-    const locked = await tx.productRequest.updateMany({
-      where: { id, tenantId: session.tenantId, status: "PENDING" },
-      data: { status },
+    await prisma.product.update({
+      where: { id: request.productId },
+      data: { stock: request.product.stock - request.quantity },
     });
-    if (locked.count === 0) return { error: "Esta solicitação já foi respondida." };
+    await prisma.stockMovement.create({
+      data: {
+        tenantId: session.tenantId,
+        productId: request.productId,
+        type: "OUT",
+        quantity: request.quantity,
+        reason: "Solicitação aprovada",
+      },
+    });
+  }
 
-    if (status === "APPROVED") {
-      await tx.product.update({
-        where: { id: request.productId },
-        data: { stock: { decrement: request.quantity } },
-      });
-      await tx.stockMovement.create({
-        data: {
-          tenantId: session.tenantId,
-          productId: request.productId,
-          type: "OUT",
-          quantity: request.quantity,
-          reason: "Solicitação aprovada",
-        },
-      });
-    }
-
-    return { ok: true as const };
-  });
-
-  if ("error" in result) return result;
+  await prisma.productRequest.update({ where: { id }, data: { status } });
   revalidatePath("/estoque");
-  return result;
+  return { ok: true };
+}
+
+function foldName(value: string) {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
+export async function saveProductCategory(formData: FormData) {
+  const { session } = await requireTenant();
+  const id = String(formData.get("id") ?? "");
+  const name = String(formData.get("name") ?? "").trim();
+  if (!name) return { error: "Informe o nome da categoria." };
+
+  const others = await prisma.productCategory.findMany({
+    where: { tenantId: session.tenantId, ...(id ? { id: { not: id } } : {}) },
+    select: { name: true },
+  });
+  if (others.some((row) => foldName(row.name) === foldName(name))) {
+    return { error: "Já existe uma categoria com este nome." };
+  }
+
+  if (id) {
+    const existing = await prisma.productCategory.findFirst({ where: { id, tenantId: session.tenantId } });
+    if (!existing) return { error: "Categoria não encontrada." };
+    await prisma.productCategory.update({ where: { id }, data: { name } });
+    revalidatePath("/estoque");
+    return { ok: true, id, name };
+  }
+
+  const last = await prisma.productCategory.findFirst({
+    where: { tenantId: session.tenantId },
+    orderBy: { sortOrder: "desc" },
+  });
+  const created = await prisma.productCategory.create({
+    data: { tenantId: session.tenantId, name, sortOrder: (last?.sortOrder ?? -1) + 1 },
+  });
+  revalidatePath("/estoque");
+  return { ok: true, id: created.id, name: created.name };
+}
+
+export async function deleteProductCategory(formData: FormData) {
+  const { session } = await requireTenant();
+  const id = String(formData.get("id") ?? "");
+  const category = await prisma.productCategory.findFirst({
+    where: { id, tenantId: session.tenantId },
+    include: { _count: { select: { products: true } } },
+  });
+  if (!category) return { error: "Categoria não encontrada." };
+  if (category._count.products) {
+    return { error: "Esta categoria está em uso. Troque os produtos antes de excluir." };
+  }
+  await prisma.productCategory.delete({ where: { id } });
+  revalidatePath("/estoque");
+  return { ok: true };
 }

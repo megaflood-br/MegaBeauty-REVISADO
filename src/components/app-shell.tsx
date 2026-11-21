@@ -1,93 +1,142 @@
 "use client";
 
-import Link from "next/link";
-import { usePathname } from "next/navigation";
 import {
   CalendarDays,
   ClipboardList,
+  Headphones,
   LayoutDashboard,
   Users,
+  UserCog,
   Scissors,
   Boxes,
+  Truck,
   Percent,
   Wallet,
   Receipt,
   Landmark,
-  MessageCircle,
   Sparkles,
   Settings,
-  LogOut,
+  Target,
+  FileText,
+  Tag,
+  Bell,
+  Megaphone,
+  FolderOpen,
+  MessageCircle,
+  Bot,
+  Shield,
 } from "lucide-react";
-import { logoutAction } from "@/app/actions/auth";
-import { cn } from "@/lib/utils";
+import Link from "next/link";
+import { stopImpersonation } from "@/app/actions/platform";
+import { SupportCallOverlay } from "@/components/suporte/call-overlay";
+import { SupportLiveProvider, useSupportLive } from "@/components/suporte/live-context";
+import { ConfirmProvider } from "@/components/confirm-dialog";
+import { SidebarLayout, type SidebarNavItem } from "@/components/sidebar-layout";
 
-const NAV = [
+const NAV: SidebarNavItem[] = [
   { href: "/dashboard", label: "Painel", icon: LayoutDashboard },
+  { href: "/ia", label: "Assistente IA", icon: Sparkles },
+  { href: "/atendimento", label: "Atendimento", icon: MessageCircle },
+  { href: "/recepcionista", label: "Recepcionista", icon: Bot },
   { href: "/agenda", label: "Agenda", icon: CalendarDays },
+  { href: "/comandas", label: "Comandas", icon: Receipt },
   { href: "/clientes", label: "Clientes", icon: Users },
   { href: "/anamneses", label: "Anamnese", icon: ClipboardList },
-  { href: "/servicos", label: "Serviços", icon: Scissors },
+  { href: "/documentacao", label: "Documentação", icon: FolderOpen },
   { href: "/equipe", label: "Equipe", icon: Users },
-  { href: "/estoque", label: "Estoque", icon: Boxes },
-  { href: "/comandas", label: "Comandas", icon: Receipt },
+  { href: "/usuarios", label: "Usuários", icon: UserCog },
+  { href: "/permissoes", label: "Permissões", icon: Shield },
+  { href: "/metas", label: "Metas", icon: Target },
   { href: "/comissoes", label: "Comissões", icon: Percent },
   { href: "/financeiro", label: "Financeiro", icon: Wallet },
+  { href: "/notas", label: "Notas fiscais", icon: FileText },
+  { href: "/estoque", label: "Estoque", icon: Boxes },
+  { href: "/servicos", label: "Serviços", icon: Scissors },
+  { href: "/promocoes", label: "Promoções", icon: Tag },
+  { href: "/fornecedores", label: "Fornecedores", icon: Truck },
+  { href: "/marketing", label: "Marketing", icon: Megaphone },
   { href: "/cadastros", label: "Cadastros", icon: Landmark },
-  { href: "/whatsapp", label: "WhatsApp", icon: MessageCircle },
-  { href: "/ia", label: "Assistente IA", icon: Sparkles },
+  { href: "/suporte", label: "Suporte", icon: Headphones },
   { href: "/configuracoes", label: "Configurações", icon: Settings },
 ];
+
+function NoticeBell({ count }: { count: number }) {
+  return (
+    <Link
+      href="/avisos"
+      className="relative shrink-0 rounded-lg p-1.5 text-current hover:bg-black/10"
+      aria-label={count ? `${count} avisos` : "Avisos"}
+    >
+      <Bell size={18} />
+      {count > 0 ? (
+        <span className="absolute -top-0.5 -right-0.5 min-w-4 rounded-full bg-amber-400 px-1 text-center text-[10px] font-semibold leading-4 text-amber-950">
+          {count > 9 ? "9+" : count}
+        </span>
+      ) : null}
+    </Link>
+  );
+}
+
+function NavBadges({ href }: { href: string }) {
+  const { state } = useSupportLive();
+  if (href !== "/suporte") return null;
+  const ringing = state?.ringingCalls.filter((call) => call.startedById !== state.me.id).length ?? 0;
+  const unread = state?.unread ?? 0;
+  if (!ringing && !unread) return null;
+  return (
+    <span className="ml-auto rounded-full bg-white/20 px-1.5 text-[10px] font-semibold">
+      {ringing ? "ao vivo" : unread}
+    </span>
+  );
+}
 
 export function AppShell({
   children,
   salon,
   userName,
   plan,
+  impersonatorName,
+  noticeCount = 0,
+  allowedHrefs,
 }: {
   children: React.ReactNode;
   salon: string;
   userName: string;
   plan: string;
+  impersonatorName?: string | null;
+  noticeCount?: number;
+  allowedHrefs?: string[] | null;
 }) {
-  const pathname = usePathname();
-
+  const items = allowedHrefs ? NAV.filter((item) => allowedHrefs.includes(item.href)) : NAV;
   return (
-    <div className="flex min-h-screen bg-cream">
-      <aside className="sticky top-0 flex h-screen w-64 shrink-0 flex-col border-r border-slate-800 bg-slate-950 text-white">
-        <div className="px-5 py-6">
-          <div className="text-lg font-semibold tracking-tight">
-            Mega<span className="text-blue-400">Beauty</span>
-          </div>
-          <div className="mt-1 text-xs font-medium uppercase tracking-wider text-slate-400">{plan}</div>
-          <div className="mt-4 truncate text-sm text-slate-300">{salon}</div>
-        </div>
-        <nav className="flex-1 space-y-1 overflow-y-auto px-3">
-          {NAV.map((item) => {
-            const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
-            const Icon = item.icon;
-            return (
-              <Link
-                key={item.href}
-                href={item.href}
-                className={cn(
-                  "flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition",
-                  active ? "bg-blue-600 text-white" : "text-slate-300 hover:bg-white/5 hover:text-white",
-                )}
-              >
-                <Icon size={18} />
-                {item.label}
-              </Link>
-            );
-          })}
-        </nav>
-        <form action={logoutAction} className="border-t border-white/10 p-4">
-          <div className="mb-3 text-sm text-slate-300">{userName}</div>
-          <button className="flex items-center gap-2 text-sm text-slate-400 hover:text-white">
-            <LogOut size={16} /> Sair
-          </button>
-        </form>
-      </aside>
-      <main className="min-w-0 flex-1 p-6 lg:p-8">{children}</main>
-    </div>
+    <ConfirmProvider>
+      <SupportLiveProvider>
+        <SidebarLayout
+          plan={plan}
+          title={salon}
+          userName={userName}
+          items={items}
+          badge={(href) => <NavBadges href={href} />}
+          headerAction={<NoticeBell count={noticeCount} />}
+          banner={
+            impersonatorName ? (
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-950">
+                <span>
+                  Você entrou como suporte no salão <strong>{salon}</strong> ({impersonatorName}).
+                </span>
+                <form action={stopImpersonation}>
+                  <button type="submit" className="font-medium underline">
+                    Voltar à plataforma
+                  </button>
+                </form>
+              </div>
+            ) : null
+          }
+        >
+          {children}
+        </SidebarLayout>
+        <SupportCallOverlay />
+      </SupportLiveProvider>
+    </ConfirmProvider>
   );
 }

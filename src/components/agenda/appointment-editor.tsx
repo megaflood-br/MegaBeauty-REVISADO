@@ -6,11 +6,12 @@ import { MessageCircle, Trash2, X } from "lucide-react";
 import { deleteAppointment, saveAppointment } from "@/app/actions/appointments";
 import { createComandaFromAppointment } from "@/app/actions/comandas";
 import { Button, Select } from "@/components/ui";
+import { useConfirm } from "@/components/confirm-dialog";
 import { SearchSelect } from "@/components/search-select";
 import { DURATION_OPTIONS, STATUS_COLOR, STATUS_LABEL, type AppointmentStatus } from "@/lib/constants";
 import { formatTime, minutesToLabel } from "@/lib/dates";
 import { formatBRL } from "@/lib/money";
-import { initials } from "@/lib/utils";
+import { displayPhoneBR, initials } from "@/lib/utils";
 import type { AgendaAppointment, AgendaClient, AgendaProfessional, AgendaService } from "@/components/agenda/types";
 
 type ItemRow = {
@@ -35,6 +36,10 @@ export function AppointmentEditor({
   professionals,
   services,
   slots,
+  canRemove = true,
+  canCreateComanda = true,
+  canViewComanda = true,
+  hidePhones = false,
   onClose,
 }: {
   mode: "create" | "edit";
@@ -46,9 +51,14 @@ export function AppointmentEditor({
   professionals: AgendaProfessional[];
   services: AgendaService[];
   slots: string[];
+  canRemove?: boolean;
+  canCreateComanda?: boolean;
+  canViewComanda?: boolean;
+  hidePhones?: boolean;
   onClose: () => void;
 }) {
   const router = useRouter();
+  const confirm = useConfirm();
   const [clientId, setClientId] = useState(appointment?.client.id ?? "");
   const [status, setStatus] = useState<AppointmentStatus>(appointment?.status ?? "PENDING");
   const [apptDate, setApptDate] = useState(date);
@@ -129,8 +139,8 @@ export function AppointmentEditor({
               {initials(client?.name ?? "Cliente")}
             </div>
             <div className="mt-3 font-semibold">{client?.name ?? "Selecione o cliente"}</div>
-            <div className="text-sm text-ink-soft">{client?.phone}</div>
-            {client?.phone ? (
+            <div className="text-sm text-ink-soft">{displayPhoneBR(client?.phone, hidePhones)}</div>
+            {client?.phone && !hidePhones ? (
               <a
                 href={`https://wa.me/55${client.phone.replace(/\D/g, "")}`}
                 target="_blank"
@@ -181,7 +191,7 @@ export function AppointmentEditor({
                   placeholder="Buscar cliente..."
                   value={clientId}
                   onChange={setClientId}
-                  options={clients.map((c) => ({ value: c.id, label: c.name, hint: c.phone }))}
+                  options={clients.map((c) => ({ value: c.id, label: c.name, hint: hidePhones ? undefined : c.phone }))}
                 />
               </label>
               <label className="grid gap-1 text-sm">
@@ -249,7 +259,11 @@ export function AppointmentEditor({
                     <button
                       type="button"
                       className="flex h-11 items-center justify-center text-red-600"
-                      onClick={() => setItems((rows) => (rows.length === 1 ? rows : rows.filter((r) => r.key !== row.key)))}
+                      onClick={() => {
+                        void confirm({ title: "Remover este serviço do horário?", confirmLabel: "Remover" }).then((ok) => {
+                          if (ok) setItems((rows) => (rows.length === 1 ? rows : rows.filter((r) => r.key !== row.key)));
+                        });
+                      }}
                       aria-label="Remover item"
                     >
                       <Trash2 size={16} />
@@ -280,16 +294,22 @@ export function AppointmentEditor({
             <Button type="button" variant="outline" onClick={onClose}>
               Cancelar
             </Button>
-            {mode === "edit" && appointment ? (
+            {mode === "edit" && appointment && canRemove ? (
               <Button
                 type="button"
                 variant="danger"
                 disabled={pending}
                 onClick={() => {
-                  startTransition(async () => {
-                    const result = await deleteAppointment(appointment.id);
-                    if (result?.error) setError(result.error);
-                    else onClose();
+                  void confirm({
+                    title: "Excluir este agendamento?",
+                    description: "A comanda aberta ligada a este horário também será apagada.",
+                  }).then((ok) => {
+                    if (!ok) return;
+                    startTransition(async () => {
+                      const result = await deleteAppointment(appointment.id);
+                      if (result?.error) setError(result.error);
+                      else onClose();
+                    });
                   });
                 }}
               >
@@ -299,9 +319,25 @@ export function AppointmentEditor({
             <Button type="button" disabled={pending} onClick={() => save(false)}>
               {pending ? "Salvando..." : "Salvar"}
             </Button>
-            <Button type="button" variant="success" disabled={pending} onClick={() => save(true)}>
-              {appointment?.comandaId ? "Abrir comanda" : "Criar comanda"}
-            </Button>
+            {(canCreateComanda && !appointment?.comandaId) || (canViewComanda && appointment?.comandaId) ? (
+              <Button
+                type="button"
+                variant="success"
+                disabled={pending}
+                onClick={() => {
+                  if (appointment?.comandaId) {
+                    if (!canViewComanda) return;
+                    router.push(`/comandas/${appointment.comandaId}`);
+                    onClose();
+                    return;
+                  }
+                  if (!canCreateComanda) return;
+                  save(true);
+                }}
+              >
+                {appointment?.comandaId ? "Abrir comanda" : "Criar comanda"}
+              </Button>
+            ) : null}
           </div>
         </div>
       </div>

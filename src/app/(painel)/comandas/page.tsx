@@ -4,10 +4,15 @@ import { ComandaBoard } from "@/components/comandas/comanda-board";
 import { calendarDate } from "@/lib/dates";
 import { comandaTotal } from "@/lib/comandas";
 import { loadFinanceCatalog } from "@/lib/finance-catalog";
+import { decorateCatalogItem } from "@/lib/promotions";
+import { loadPromoRules } from "@/lib/promo-load";
+import { canAccess, shouldHidePhones } from "@/lib/permissions";
+import { redactPhone } from "@/lib/utils";
 
 export default async function ComandasPage() {
-  const { session } = await requireTenant();
-  const [comandas, clients, professionals, services, products, last, catalog] = await Promise.all([
+  const { session, access } = await requireTenant();
+  const hidePhones = shouldHidePhones(access);
+  const [comandas, clients, professionals, services, products, last, catalog, promos] = await Promise.all([
     prisma.comanda.findMany({
       where: { tenantId: session.tenantId },
       include: { client: true, professional: true, items: true },
@@ -39,15 +44,24 @@ export default async function ComandasPage() {
       select: { number: true },
     }),
     loadFinanceCatalog(session.tenantId),
+    loadPromoRules(session.tenantId),
   ]);
+  const today = calendarDate();
+  const pricedServices = services.map((service) => decorateCatalogItem(promos, today, "SERVICE", service));
+  const pricedProducts = products.map((product) =>
+    decorateCatalogItem(promos, today, "PRODUCT", { id: product.id, name: product.name, priceCents: product.saleCents }),
+  );
 
   return (
     <ComandaBoard
       nextNumber={(last?.number ?? 0) + 1}
-      clients={clients}
+      canCreate={canAccess(access, "comandas", "create")}
+      canEdit={canAccess(access, "comandas", "edit")}
+      hidePhones={hidePhones}
+      clients={clients.map((client) => ({ ...client, phone: redactPhone(client.phone, hidePhones) }))}
       professionals={professionals}
-      services={services}
-      products={products.map((p) => ({ id: p.id, name: p.name, priceCents: p.saleCents }))}
+      services={pricedServices}
+      products={pricedProducts}
       paymentMethods={catalog.methods.filter((m) => m.active)}
       comandas={comandas.map((c) => ({
         id: c.id,

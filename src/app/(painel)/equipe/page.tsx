@@ -1,20 +1,10 @@
 import { prisma } from "@/lib/db";
 import { requireTenant } from "@/lib/tenant";
-import { canManageTeam } from "@/lib/auth";
 import { TeamBoard } from "@/components/equipe/team-board";
 import { calendarDate } from "@/lib/dates";
 
 export default async function EquipePage() {
   const { session } = await requireTenant();
-  if (!canManageTeam(session.role)) {
-    return (
-      <div className="space-y-2">
-        <h1 className="font-display text-3xl">Equipe</h1>
-        <p className="text-ink-soft">Somente proprietários e gerentes podem gerenciar a equipe.</p>
-      </div>
-    );
-  }
-
   const [professionals, services] = await Promise.all([
     prisma.professional.findMany({
       where: { tenantId: session.tenantId },

@@ -9,7 +9,28 @@ export type SessionUser = {
   email: string;
   name: string;
   role: Role;
+  impersonatorId?: string;
+  impersonatorName?: string;
 };
+
+export function isPlatformAdmin(role: Role | string) {
+  return role === "SUPER_ADMIN";
+}
+
+export function isSupplierRole(role: Role | string) {
+  return role === "SUPPLIER";
+}
+
+export function isPartnerRole(role: Role | string) {
+  return role === "PARTNER";
+}
+
+export function homePath(role: string, kind?: string | null) {
+  if (role === "SUPER_ADMIN") return "/plataforma";
+  if (kind === "SUPPLIER" || role === "SUPPLIER") return "/fornecedor";
+  if (kind === "PARTNER" || role === "PARTNER") return "/parceiro";
+  return "/dashboard";
+}
 
 function secret() {
   const value = process.env.AUTH_SECRET;
@@ -66,18 +87,10 @@ export async function clearSessionCookie() {
   jar.delete(SESSION_COOKIE);
 }
 
-export function isOwner(role: Role) {
-  return role === "OWNER";
-}
-
 export function canManageTeam(role: Role) {
   return role === "OWNER" || role === "MANAGER";
 }
 
 export function canSeeFinance(role: Role) {
-  return role === "OWNER" || role === "MANAGER";
-}
-
-export function canManageSettings(role: Role) {
   return role === "OWNER" || role === "MANAGER";
 }

@@ -67,31 +67,32 @@ export function DonutChart({
   const total = slices.reduce((sum, slice) => sum + slice.value, 0);
   const radius = 42;
   const circumference = 2 * Math.PI * radius;
-  const segments = slices.reduce<Array<{ slice: (typeof slices)[number]; length: number; offset: number }>>(
+  const segments = slices.reduce<Array<{ label: string; color: string; length: number; offset: number }>>(
     (acc, slice) => {
-    const length = total ? (slice.value / total) * circumference : 0;
-    const prev = acc.at(-1);
-    const offset = prev ? prev.offset + prev.length : 0;
-    acc.push({ slice, length, offset });
-    return acc;
-  }, []);
+      const length = total ? (slice.value / total) * circumference : 0;
+      const offset = acc.length > 0 ? acc[acc.length - 1].offset + acc[acc.length - 1].length : 0;
+      acc.push({ label: slice.label, color: slice.color, length, offset });
+      return acc;
+    },
+    [],
+  );
 
   return (
     <div className="flex flex-wrap items-center gap-6">
       <div className="relative h-44 w-44 shrink-0">
         <svg viewBox="0 0 120 120" className="h-full w-full -rotate-90">
           <circle cx="60" cy="60" r={radius} fill="none" stroke="#E2E8F0" strokeWidth="16" />
-          {segments.map(({ slice, length, offset }) => (
+          {segments.map((seg) => (
             <circle
-              key={slice.label}
+              key={seg.label}
               cx="60"
               cy="60"
               r={radius}
               fill="none"
-              stroke={slice.color}
+              stroke={seg.color}
               strokeWidth="16"
-              strokeDasharray={`${length} ${circumference - length}`}
-              strokeDashoffset={-offset}
+              strokeDasharray={`${seg.length} ${circumference - seg.length}`}
+              strokeDashoffset={-seg.offset}
               strokeLinecap="butt"
             />
           ))}

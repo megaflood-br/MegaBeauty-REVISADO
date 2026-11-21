@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
-import { getSession, type SessionUser } from "@/lib/auth";
+import { getSession, homePath, isPlatformAdmin, type SessionUser } from "@/lib/auth";
 import { prisma } from "@/lib/db";
+import { loadAccess } from "@/lib/access";
 
 export async function requireSession(): Promise<SessionUser> {
   const session = await getSession();
@@ -12,54 +13,61 @@ export function scopedTenant<T extends { tenantId: string }>(tenantId: string, d
   return { ...data, tenantId };
 }
 
+export { homePath };
+
 export async function requireTenant() {
   const session = await requireSession();
+  if (isPlatformAdmin(session.role) && !session.impersonatorId) {
+    redirect("/plataforma");
+  }
   const tenant = await prisma.tenant.findUnique({ where: { id: session.tenantId } });
   if (!tenant) redirect("/login");
+  if (tenant.kind === "SUPPLIER") redirect("/fornecedor");
+  if (tenant.kind === "PARTNER") redirect("/parceiro");
+  if (tenant.status === "SUSPENDED" && !session.impersonatorId) {
+    redirect("/login?suspended=1");
+  }
+  const access = await loadAccess(session);
+  return { session, tenant, access };
+}
+
+export async function requireSupplier() {
+  const session = await requireSession();
+  if (isPlatformAdmin(session.role) && !session.impersonatorId) {
+    redirect("/plataforma");
+  }
+  const tenant = await prisma.tenant.findUnique({ where: { id: session.tenantId } });
+  if (!tenant || tenant.kind !== "SUPPLIER") redirect("/dashboard");
+  if (tenant.status === "SUSPENDED" && !session.impersonatorId) {
+    redirect("/login?suspended=1");
+  }
   return { session, tenant };
 }
 
-export async function assertClientInTenant(tenantId: string, clientId: string) {
-  if (!clientId) return false;
-  const row = await prisma.client.findFirst({ where: { id: clientId, tenantId }, select: { id: true } });
-  return Boolean(row);
+export async function requirePartner() {
+  const session = await requireSession();
+  if (isPlatformAdmin(session.role) && !session.impersonatorId) {
+    redirect("/plataforma");
+  }
+  const tenant = await prisma.tenant.findUnique({ where: { id: session.tenantId } });
+  if (!tenant || tenant.kind !== "PARTNER") redirect("/dashboard");
+  if (tenant.status === "SUSPENDED" && !session.impersonatorId) {
+    redirect("/login?suspended=1");
+  }
+  const partner = await prisma.partner.findUnique({
+    where: { tenantId: tenant.id },
+    include: { brand: true },
+  });
+  if (!partner) redirect("/dashboard");
+  return { session, tenant, partner };
 }
 
-export async function assertProfessionalInTenant(tenantId: string, professionalId: string) {
-  if (!professionalId) return false;
-  const row = await prisma.professional.findFirst({ where: { id: professionalId, tenantId }, select: { id: true } });
-  return Boolean(row);
-}
-
-export async function assertProfessionalsInTenant(tenantId: string, ids: string[]) {
-  const unique = [...new Set(ids.filter(Boolean))];
-  if (!unique.length) return true;
-  const count = await prisma.professional.count({ where: { tenantId, id: { in: unique } } });
-  return count === unique.length;
-}
-
-export async function assertServicesInTenant(tenantId: string, ids: string[]) {
-  const unique = [...new Set(ids.filter(Boolean))];
-  if (!unique.length) return true;
-  const count = await prisma.service.count({ where: { tenantId, id: { in: unique } } });
-  return count === unique.length;
-}
-
-export async function assertProductsInTenant(tenantId: string, ids: string[]) {
-  const unique = [...new Set(ids.filter(Boolean))];
-  if (!unique.length) return true;
-  const count = await prisma.product.count({ where: { tenantId, id: { in: unique } } });
-  return count === unique.length;
-}
-
-export async function assertServiceCategoryInTenant(tenantId: string, categoryId: string) {
-  if (!categoryId) return false;
-  const row = await prisma.serviceCategory.findFirst({ where: { id: categoryId, tenantId }, select: { id: true } });
-  return Boolean(row);
-}
-
-export async function assertProductCategoryInTenant(tenantId: string, categoryId: string) {
-  if (!categoryId) return false;
-  const row = await prisma.productCategory.findFirst({ where: { id: categoryId, tenantId }, select: { id: true } });
-  return Boolean(row);
+export async function requirePlatformAdmin() {
+  const session = await requireSession();
+  if (!isPlatformAdmin(session.role) || session.impersonatorId) {
+    redirect(session.impersonatorId ? "/dashboard" : homePath(session.role));
+  }
+  const tenant = await prisma.tenant.findUnique({ where: { id: session.tenantId } });
+  if (!tenant?.isPlatform) redirect("/dashboard");
+  return { session, tenant };
 }

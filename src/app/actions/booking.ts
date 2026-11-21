@@ -3,12 +3,15 @@
 import { addMinutes } from "date-fns";
 import { prisma } from "@/lib/db";
 import { hasConflict } from "@/lib/appointments";
-import { minutesInTz, parseHHmm } from "@/lib/dates";
+import { calendarDate } from "@/lib/dates";
+import { applyCatalogPrice } from "@/lib/promotions";
+import { loadPromoRules } from "@/lib/promo-load";
+import { appointmentCampaignVars, safeDispatch } from "@/lib/dispatch-whatsapp-campaign";
 
 export async function publicBook(formData: FormData) {
-  const slug = String(formData.get("slug") ?? "").trim();
-  const professionalId = String(formData.get("professionalId") ?? "").trim();
-  const serviceId = String(formData.get("serviceId") ?? "").trim();
+  const slug = String(formData.get("slug") ?? "");
+  const professionalId = String(formData.get("professionalId") ?? "");
+  const serviceId = String(formData.get("serviceId") ?? "");
   const startAt = new Date(String(formData.get("startAt") ?? ""));
   const name = String(formData.get("name") ?? "").trim();
   const phone = String(formData.get("phone") ?? "").replace(/\D/g, "");
@@ -16,65 +19,18 @@ export async function publicBook(formData: FormData) {
   const tenant = await prisma.tenant.findUnique({ where: { slug } });
   if (!tenant) return { error: "Salão não encontrado." };
   if (!name || !phone) return { error: "Informe nome e WhatsApp." };
-  if (Number.isNaN(startAt.getTime())) return { error: "Horário inválido." };
-  if (startAt.getTime() < Date.now() - 60_000) {
-    return { error: "Escolha um horário futuro." };
-  }
 
-  const [service, professional] = await Promise.all([
-    prisma.service.findFirst({
-      where: { id: serviceId, tenantId: tenant.id, active: true, onlineBooking: true },
-    }),
-    prisma.professional.findFirst({
-      where: { id: professionalId, tenantId: tenant.id, active: true, onlineBooking: true },
-      include: { serviceLinks: { select: { serviceId: true } } },
-    }),
-  ]);
-
+  const service = await prisma.service.findFirst({
+    where: { id: serviceId, tenantId: tenant.id, active: true },
+  });
   if (!service) return { error: "Serviço indisponível." };
-  if (!professional) return { error: "Profissional indisponível." };
-  if (
-    professional.serviceLinks.length > 0 &&
-    !professional.serviceLinks.some((link) => link.serviceId === service.id)
-  ) {
-    return { error: "Este profissional não realiza o serviço selecionado." };
-  }
 
   const endAt = addMinutes(startAt, service.durationMin);
-  const startMin = minutesInTz(startAt, tenant.timezone);
-  const endMin = startMin + service.durationMin;
-  const openMin = Math.max(parseHHmm(tenant.openTime), parseHHmm(professional.workStart));
-  const closeMin = Math.min(parseHHmm(tenant.closeTime), parseHHmm(professional.workEnd));
-  if (startMin < openMin || endMin > closeMin) {
-    return { error: "Horário fora do expediente disponível." };
-  }
-
-  const [busyAppointments, busyItems] = await Promise.all([
-    prisma.appointment.findMany({
-      where: { tenantId: tenant.id, professionalId: professional.id, status: { notIn: ["CANCELLED"] } },
-      select: { id: true, startAt: true, endAt: true },
-    }),
-    prisma.appointmentItem.findMany({
-      where: {
-        professionalId: professional.id,
-        appointment: { tenantId: tenant.id, status: { notIn: ["CANCELLED"] } },
-      },
-      select: { appointmentId: true, startAt: true, durationMin: true },
-    }),
-  ]);
-
-  const busyIntervals = [
-    ...busyAppointments.map((b) => ({ id: b.id, start: b.startAt, end: b.endAt })),
-    ...busyItems
-      .filter((item): item is { appointmentId: string; startAt: Date; durationMin: number } => Boolean(item.startAt))
-      .map((item) => ({
-        id: item.appointmentId,
-        start: item.startAt,
-        end: addMinutes(item.startAt, item.durationMin || 15),
-      })),
-  ];
-
-  if (hasConflict({ start: startAt, end: endAt }, busyIntervals)) {
+  const busy = await prisma.appointment.findMany({
+    where: { professionalId, status: { notIn: ["CANCELLED"] } },
+    select: { id: true, startAt: true, endAt: true },
+  });
+  if (hasConflict({ start: startAt, end: endAt }, busy.map((b) => ({ id: b.id, start: b.startAt, end: b.endAt })))) {
     return { error: "Horário recém ocupado. Escolha outro." };
   }
 
@@ -83,11 +39,12 @@ export async function publicBook(formData: FormData) {
     update: { name },
     create: { tenantId: tenant.id, name, phone, source: "online" },
   });
+  const isNew = Date.now() - client.createdAt.getTime() < 8000;
 
-  await prisma.appointment.create({
+  const appointment = await prisma.appointment.create({
     data: {
       tenantId: tenant.id,
-      professionalId: professional.id,
+      professionalId,
       clientId: client.id,
       startAt,
       endAt,
@@ -96,14 +53,22 @@ export async function publicBook(formData: FormData) {
       items: {
         create: {
           serviceId: service.id,
-          professionalId: professional.id,
-          startAt,
-          priceCents: service.priceCents,
+          priceCents: applyCatalogPrice(await loadPromoRules(tenant.id), calendarDate(startAt), "SERVICE", service.id, service.priceCents).priceCents,
           durationMin: service.durationMin,
         },
       },
     },
+    include: {
+      professional: { select: { name: true } },
+      items: { include: { service: { select: { name: true } } } },
+    },
   });
+
+  const vars = appointmentCampaignVars(appointment);
+  const clientRef = { id: client.id, name: client.name, phone: client.phone };
+  if (isNew) safeDispatch({ tenantId: tenant.id, trigger: "WELCOME", client: clientRef, sentOn: client.id });
+  safeDispatch({ tenantId: tenant.id, trigger: "INFORMED", client: clientRef, sentOn: appointment.id, vars });
+  safeDispatch({ tenantId: tenant.id, trigger: "PIN", client: clientRef, sentOn: appointment.id, vars });
 
   return { ok: true };
 }

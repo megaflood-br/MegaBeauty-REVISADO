@@ -2,10 +2,11 @@
 
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { AlertTriangle, Trash2, X } from "lucide-react";
+import { AlertTriangle, Eye, Trash2, X } from "lucide-react";
 import { Button, Field, Input, Textarea } from "@/components/ui";
 import { SearchSelect } from "@/components/search-select";
 import { deleteAnamnesis, saveAnamnesis } from "@/app/actions/anamnesis";
+import { useConfirm } from "@/components/confirm-dialog";
 import {
   ANAMNESIS_AREA_LABEL,
   collectAlerts,
@@ -14,11 +15,10 @@ import {
   serializeAnswers,
   type AnamnesisAnswer,
   type AnamnesisAnswers,
-  type AnamnesisQuestion,
 } from "@/lib/anamnesis";
 import { calendarDate } from "@/lib/dates";
-import { cn } from "@/lib/utils";
 import type { AnamnesisFormRow, AnamnesisRow } from "@/components/anamneses/types";
+import { QuestionField } from "@/components/anamneses/question-field";
 
 export function AnamnesisDrawer({
   open,
@@ -27,6 +27,8 @@ export function AnamnesisDrawer({
   clients,
   professionals,
   lockedClientId,
+  hidePhones = false,
+  onView,
   onClose,
 }: {
   open: boolean;
@@ -35,9 +37,12 @@ export function AnamnesisDrawer({
   clients: { id: string; name: string; phone?: string }[];
   professionals: { id: string; name: string }[];
   lockedClientId?: string;
+  hidePhones?: boolean;
+  onView?: () => void;
   onClose: () => void;
 }) {
   const router = useRouter();
+  const confirm = useConfirm();
   const activeForms = forms.filter((form) => form.active || form.id === record?.formId);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
@@ -104,7 +109,7 @@ export function AnamnesisDrawer({
 
   async function remove() {
     if (!record?.id) return;
-    if (!confirm("Excluir esta anamnese?")) return;
+    if (!(await confirm({ title: "Excluir esta anamnese?", description: "As respostas preenchidas serão apagadas." }))) return;
     setPending(true);
     const fd = new FormData();
     fd.set("id", record.id);
@@ -143,7 +148,7 @@ export function AnamnesisDrawer({
               </div>
             ) : (
               <SearchSelect
-                options={clients.map((c) => ({ value: c.id, label: c.name, hint: c.phone }))}
+                options={clients.map((c) => ({ value: c.id, label: c.name, hint: hidePhones ? undefined : c.phone }))}
                 value={clientId}
                 onChange={setClientId}
                 placeholder="Buscar cliente"
@@ -232,6 +237,12 @@ export function AnamnesisDrawer({
             <span />
           )}
           <div className="flex gap-2">
+            {record && onView ? (
+              <Button type="button" variant="outline" disabled={pending} onClick={onView}>
+                <Eye size={16} />
+                Visualizar
+              </Button>
+            ) : null}
             <Button type="button" variant="outline" disabled={pending} onClick={() => submit(false)}>
               {pending ? "Salvando..." : "Salvar rascunho"}
             </Button>
@@ -241,78 +252,6 @@ export function AnamnesisDrawer({
           </div>
         </footer>
       </aside>
-    </div>
-  );
-}
-
-function QuestionField({
-  question,
-  answer,
-  onChange,
-}: {
-  question: AnamnesisQuestion;
-  answer?: AnamnesisAnswer;
-  onChange: (patch: Partial<AnamnesisAnswer>) => void;
-}) {
-  const value = answer?.value ?? "";
-  return (
-    <div className="rounded-xl border border-line p-3">
-      <div className="text-sm font-medium">
-        {question.label}
-        {question.required ? <span className="text-red-500"> *</span> : null}
-      </div>
-      {question.hint ? <p className="mt-0.5 text-xs text-ink-soft">{question.hint}</p> : null}
-
-      {question.type === "yes_no" ? (
-        <div className="mt-2 flex gap-2">
-          {["yes", "no"].map((opt) => (
-            <button
-              key={opt}
-              type="button"
-              onClick={() => onChange({ value: opt, detail: opt === "yes" ? answer?.detail : "" })}
-              className={cn(
-                "rounded-full border px-3 py-1.5 text-sm",
-                value === opt ? "border-blue-600 bg-blue-50 font-medium text-blue-700" : "border-line text-ink-soft hover:bg-sand",
-              )}
-            >
-              {opt === "yes" ? "Sim" : "Não"}
-            </button>
-          ))}
-        </div>
-      ) : question.type === "choice" ? (
-        <div className="mt-2 flex flex-wrap gap-2">
-          {(question.options ?? []).map((opt) => (
-            <button
-              key={opt}
-              type="button"
-              onClick={() => onChange({ value: opt })}
-              className={cn(
-                "rounded-full border px-3 py-1.5 text-sm",
-                value === opt ? "border-blue-600 bg-blue-50 font-medium text-blue-700" : "border-line text-ink-soft hover:bg-sand",
-              )}
-            >
-              {opt}
-            </button>
-          ))}
-        </div>
-      ) : (
-        <div className="mt-2">
-          {question.type === "long_text" ? (
-            <Textarea value={value} onChange={(e) => onChange({ value: e.target.value })} />
-          ) : (
-            <Input value={value} onChange={(e) => onChange({ value: e.target.value })} />
-          )}
-        </div>
-      )}
-
-      {question.withDetail && value === "yes" ? (
-        <Input
-          className="mt-2"
-          placeholder="Qual? Detalhe aqui"
-          value={answer?.detail ?? ""}
-          onChange={(e) => onChange({ detail: e.target.value })}
-        />
-      ) : null}
     </div>
   );
 }

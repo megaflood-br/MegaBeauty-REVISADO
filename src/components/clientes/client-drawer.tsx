@@ -5,8 +5,10 @@ import { useRouter } from "next/navigation";
 import { ChevronDown, ImageIcon, Info, User, X } from "lucide-react";
 import { Button, Field, Input, Select, Textarea } from "@/components/ui";
 import { SearchSelect } from "@/components/search-select";
-import { upsertClient } from "@/app/actions/clients";
-import { cn, initials } from "@/lib/utils";
+import { deleteClients, upsertClient } from "@/app/actions/clients";
+import { useConfirm } from "@/components/confirm-dialog";
+import { clientDeleteCopy } from "@/lib/client-delete";
+import { cn, HIDDEN_PHONE_LABEL, initials } from "@/lib/utils";
 import type { ClientFormValue } from "@/components/clientes/types";
 
 const TABS = [
@@ -31,15 +33,18 @@ export function ClientDrawer({
   client,
   clients,
   tags,
+  hidePhones = false,
   onClose,
 }: {
   open: boolean;
   client: ClientFormValue | null;
   clients: { id: string; name: string }[];
   tags: string[];
+  hidePhones?: boolean;
   onClose: () => void;
 }) {
   const router = useRouter();
+  const confirm = useConfirm();
   const fileRef = useRef<HTMLInputElement>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
@@ -63,6 +68,27 @@ export function ClientDrawer({
     formData.set("blockAccess", blockAccess ? "1" : "0");
     try {
       const result = await upsertClient(formData);
+      if (result && "error" in result && result.error) {
+        setError(result.error);
+        return;
+      }
+      onClose();
+      router.refresh();
+    } finally {
+      setPending(false);
+    }
+  }
+
+  async function remove() {
+    if (!client?.id) return;
+    const copy = clientDeleteCopy(1, "one");
+    if (!(await confirm(copy))) return;
+    setPending(true);
+    setError(null);
+    const form = new FormData();
+    form.set("ids", client.id);
+    try {
+      const result = await deleteClients(form);
       if (result && "error" in result && result.error) {
         setError(result.error);
         return;
@@ -177,17 +203,25 @@ export function ClientDrawer({
                   </div>
                 </Field>
                 <div className="grid gap-3 md:grid-cols-2">
-                  <Field label="Celular" required>
-                    <div className="relative">
-                      <span className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-sm text-ink-soft">🇧🇷 +55</span>
-                      <Input className="pl-[4.75rem]" name="phone" required placeholder="(11) 99999-0000" defaultValue={client?.phone ?? ""} />
-                    </div>
+                  <Field label="Celular" required={!hidePhones || !client}>
+                    {hidePhones && client ? (
+                      <Input value={HIDDEN_PHONE_LABEL} disabled />
+                    ) : (
+                      <div className="relative">
+                        <span className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-sm text-ink-soft">🇧🇷 +55</span>
+                        <Input className="pl-[4.75rem]" name="phone" required placeholder="(11) 99999-0000" defaultValue={client?.phone ?? ""} />
+                      </div>
+                    )}
                   </Field>
                   <Field label="Telefone">
-                    <div className="relative">
-                      <span className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-sm text-ink-soft">🇧🇷 +55</span>
-                      <Input className="pl-[4.75rem]" name="landline" placeholder="(11) 3000-0000" defaultValue={client?.landline ?? ""} />
-                    </div>
+                    {hidePhones && client ? (
+                      <Input value={HIDDEN_PHONE_LABEL} disabled />
+                    ) : (
+                      <div className="relative">
+                        <span className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-sm text-ink-soft">🇧🇷 +55</span>
+                        <Input className="pl-[4.75rem]" name="landline" placeholder="(11) 3000-0000" defaultValue={client?.landline ?? ""} />
+                      </div>
+                    )}
                   </Field>
                 </div>
                 <Field label="E-mail">
@@ -310,6 +344,11 @@ export function ClientDrawer({
             </aside>
           </div>
           <div className="flex justify-end gap-2 border-t border-line px-5 py-4">
+            {client ? (
+              <Button type="button" variant="danger" className="mr-auto" disabled={pending} onClick={() => void remove()}>
+                Excluir
+              </Button>
+            ) : null}
             <Button type="button" variant="ghost" onClick={onClose}>
               Cancelar
             </Button>

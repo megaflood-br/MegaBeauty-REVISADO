@@ -2,8 +2,9 @@
 
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/db";
-import { assertProfessionalInTenant, assertServicesInTenant, requireTenant } from "@/lib/tenant";
-import { canManageTeam, hashPassword } from "@/lib/auth";
+import { requireTenant } from "@/lib/tenant";
+import { hashPassword } from "@/lib/auth";
+import { canAccess, canManageCommissions } from "@/lib/permissions";
 import { ROLES, type Role } from "@/lib/constants";
 import { digitsOnly } from "@/lib/utils";
 import { zonedDateTime } from "@/lib/dates";
@@ -20,8 +21,8 @@ function flag(formData: FormData, key: string, fallback = true) {
 }
 
 export async function upsertProfessional(formData: FormData) {
-  const { session } = await requireTenant();
-  if (!canManageTeam(session.role)) return { error: "Sem permissão." };
+  const { session, access } = await requireTenant();
+  if (!canAccess(access, "team", "edit")) return { error: "Sem permissão." };
 
   const id = String(formData.get("id") ?? "");
   const name = String(formData.get("name") ?? "").trim();
@@ -52,21 +53,13 @@ export async function upsertProfessional(formData: FormData) {
   const receivesCommission = flag(formData, "receivesCommission");
   const isStockist = flag(formData, "isStockist", false);
   const salonPartner = flag(formData, "salonPartner", false);
-  const serviceIds = [...new Set(formData.getAll("serviceId").map(String).filter(Boolean))];
+  const serviceIds = formData.getAll("serviceId").map(String).filter(Boolean);
 
   if (!name) return { error: "Nome é obrigatório." };
   if (!phone) return { error: "Celular é obrigatório." };
   if (imageUrl && imageUrl.length > 400_000) {
     return { error: "Imagem muito grande. Use uma foto menor." };
   }
-  if (!(await assertServicesInTenant(session.tenantId, serviceIds))) {
-    return { error: "Um ou mais serviços selecionados são inválidos." };
-  }
-
-  const userEmail = String(formData.get("userEmail") ?? "").trim().toLowerCase();
-  const userRole = String(formData.get("userRole") ?? "PROFESSIONAL") as Role;
-  const userPassword = String(formData.get("userPassword") ?? "").trim();
-  if (!ROLES.includes(userRole)) return { error: "Perfil de acesso inválido." };
 
   const data = {
     name,
@@ -98,69 +91,59 @@ export async function upsertProfessional(formData: FormData) {
   };
 
   try {
-    const result = await prisma.$transaction(async (tx) => {
-      let professionalId = id;
-      if (id) {
-        const existing = await tx.professional.findFirst({ where: { id, tenantId: session.tenantId } });
-        if (!existing) return { error: "Profissional não encontrado." };
-        await tx.professional.update({ where: { id }, data });
-      } else {
-        const last = await tx.professional.aggregate({
-          where: { tenantId: session.tenantId },
-          _max: { sortOrder: true },
-        });
-        const created = await tx.professional.create({
-          data: {
-            tenantId: session.tenantId,
-            sortOrder: (last._max.sortOrder ?? 0) + 1,
-            ...data,
-          },
-        });
-        professionalId = created.id;
-      }
+    let professionalId = id;
+    if (id) {
+      const existing = await prisma.professional.findFirst({ where: { id, tenantId: session.tenantId } });
+      if (!existing) return { error: "Profissional não encontrado." };
+      await prisma.professional.update({ where: { id }, data });
+    } else {
+      const last = await prisma.professional.aggregate({
+        where: { tenantId: session.tenantId },
+        _max: { sortOrder: true },
+      });
+      const created = await prisma.professional.create({
+        data: {
+          tenantId: session.tenantId,
+          sortOrder: (last._max.sortOrder ?? 0) + 1,
+          ...data,
+        },
+      });
+      professionalId = created.id;
+    }
 
-      await tx.professionalService.deleteMany({ where: { professionalId } });
-      if (serviceIds.length) {
-        await tx.professionalService.createMany({
-          data: serviceIds.map((serviceId) => ({ professionalId, serviceId })),
-        });
-      }
+    await prisma.professionalService.deleteMany({ where: { professionalId } });
+    if (serviceIds.length) {
+      await prisma.professionalService.createMany({
+        data: serviceIds.map((serviceId) => ({ professionalId, serviceId })),
+      });
+    }
 
-      const linkedUser = await tx.user.findFirst({ where: { professionalId, tenantId: session.tenantId } });
-      if (linkedUser) {
-        await tx.user.update({
-          where: { id: linkedUser.id },
-          data: { name, role: userRole },
-        });
-      } else if (userEmail) {
-        if (userPassword.length < 6) {
-          throw new Error("WEAK_PASSWORD");
-        }
-        const existingUser = await tx.user.findUnique({ where: { email: userEmail } });
-        if (existingUser) throw new Error("DUPLICATE_EMAIL");
-        await tx.user.create({
-          data: {
-            tenantId: session.tenantId,
-            name,
-            email: userEmail,
-            role: userRole,
-            professionalId,
-            passwordHash: await hashPassword(userPassword),
-          },
-        });
-      }
+    const userEmail = String(formData.get("userEmail") ?? "").trim().toLowerCase();
+    const userRole = String(formData.get("userRole") ?? "PROFESSIONAL") as Role;
+    const userPassword = String(formData.get("userPassword") ?? "").trim();
+    if (!ROLES.includes(userRole) || userRole === "SUPER_ADMIN" || userRole === "SUPPLIER" || userRole === "PARTNER") return { error: "Perfil de acesso inválido." };
 
-      return { ok: true as const };
-    });
-
-    if ("error" in result) return result;
+    const linkedUser = await prisma.user.findFirst({ where: { professionalId } });
+    if (linkedUser) {
+      await prisma.user.update({
+        where: { id: linkedUser.id },
+        data: { name, role: userRole },
+      });
+    } else if (userEmail) {
+      const existingUser = await prisma.user.findUnique({ where: { email: userEmail } });
+      if (existingUser) return { error: "E-mail já cadastrado." };
+      await prisma.user.create({
+        data: {
+          tenantId: session.tenantId,
+          name,
+          email: userEmail,
+          role: userRole,
+          professionalId,
+          passwordHash: await hashPassword(userPassword || "demo1234"),
+        },
+      });
+    }
   } catch (err) {
-    if (err instanceof Error && err.message === "WEAK_PASSWORD") {
-      return { error: "Informe uma senha com pelo menos 6 caracteres para criar o acesso." };
-    }
-    if (err instanceof Error && err.message === "DUPLICATE_EMAIL") {
-      return { error: "E-mail já cadastrado." };
-    }
     console.error("upsertProfessional", err);
     return { error: "Não foi possível salvar o profissional. Confira os campos e tente de novo." };
   }
@@ -172,8 +155,8 @@ export async function upsertProfessional(formData: FormData) {
 }
 
 export async function updateCommissionRule(formData: FormData) {
-  const { session } = await requireTenant();
-  if (!canManageTeam(session.role)) return { error: "Sem permissão." };
+  const { session, access } = await requireTenant();
+  if (!canManageCommissions(access)) return { error: "Só o administrador pode alterar a configuração de comissões." };
   const id = String(formData.get("id") ?? "");
   const commissionPct = Math.min(100, Math.max(0, toInt(formData.get("commissionPct"), 40)));
   const receivesCommission = String(formData.get("receivesCommission") ?? "") === "1";
@@ -189,8 +172,8 @@ export async function updateCommissionRule(formData: FormData) {
 }
 
 export async function inviteTeamUser(formData: FormData) {
-  const { session } = await requireTenant();
-  if (!canManageTeam(session.role)) return { error: "Sem permissão." };
+  const { session, access } = await requireTenant();
+  if (!canAccess(access, "team", "edit")) return { error: "Sem permissão." };
 
   const name = String(formData.get("name") ?? "").trim();
   const email = String(formData.get("email") ?? "")
@@ -198,14 +181,10 @@ export async function inviteTeamUser(formData: FormData) {
     .toLowerCase();
   const role = String(formData.get("role") ?? "RECEPTIONIST") as Role;
   const professionalId = String(formData.get("professionalId") ?? "") || null;
-  const password = String(formData.get("password") ?? "").trim();
+  const password = String(formData.get("password") ?? "demo1234");
 
   if (!name || !email) return { error: "Nome e e-mail são obrigatórios." };
-  if (password.length < 6) return { error: "Informe uma senha com pelo menos 6 caracteres." };
-  if (!ROLES.includes(role)) return { error: "Perfil inválido." };
-  if (professionalId && !(await assertProfessionalInTenant(session.tenantId, professionalId))) {
-    return { error: "Profissional inválido." };
-  }
+  if (!ROLES.includes(role) || role === "SUPER_ADMIN" || role === "SUPPLIER" || role === "PARTNER") return { error: "Perfil inválido." };
   const exists = await prisma.user.findUnique({ where: { email } });
   if (exists) return { error: "E-mail já cadastrado." };
 

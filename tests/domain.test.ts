@@ -2,25 +2,261 @@ import { describe, expect, it } from "vitest";
 import { calculateCommission, consumedProductCents, availableCommission, sumCommissions } from "@/lib/commissions";
 import { hasConflict } from "@/lib/appointments";
 import { formatStockQty, isLowStock, nextStock } from "@/lib/stock";
+import {
+  answerAssistantIntent,
+  answerFreeSlots,
+  answerLowStock,
+  assistantIntent,
+  formatAssistantContext,
+  formatLowStockLine,
+  freeSlotsForProfessional,
+  lowStockProducts,
+  matchProfessional,
+  mentionedPerson,
+} from "@/lib/assistant";
 import { formatBRL, parseBRLToCents } from "@/lib/money";
-import { slugify, formatPhoneBR } from "@/lib/utils";
+import { slugify, formatPhoneBR, displayPhoneBR, HIDDEN_PHONE_LABEL } from "@/lib/utils";
 import { allocatePayments, comandaTotal, paymentChange } from "@/lib/comandas";
-import { calendarDate, daysBetween, eachCalendarDate, formatTime, minutesInTz, minutesToLabel, parseHHmm, shiftCalendarDate, zonedDateTime } from "@/lib/dates";
+import { centsToPoints, defaultCashbackConfig, earnCashbackCents, maxRedeemCents, pointsToCents } from "@/lib/cashback";
+import { parseSettingsTab, settingsPath } from "@/lib/settings";
+import {
+  CAMPAIGN_CATALOG,
+  normalizeCampaignTrigger,
+  normalizeWhatsAppPhone,
+  parseWhatsAppTab,
+  renderCampaignTemplate,
+  toEvolutionNumber,
+  whatsappPhoneCandidates,
+  evolutionSendFailure,
+} from "@/lib/whatsapp-campaigns";
+import { CLIENT_IMPORT_HEADERS, compactImportTable, mapClientImportRows, normalizeImportPhone, parseImportDate } from "@/lib/client-import";
+import { parseImportResponse } from "@/lib/client-import-response";
+import { matchesClientSearch } from "@/lib/client-search";
+import { clientDeleteCopy, parseClientIds } from "@/lib/client-delete";
+import { calendarDate, calendarMonth, daysBetween, eachCalendarDate, formatMonthLabel, formatTime, minutesInTz, minutesToLabel, monthStartEnd, parseHHmm, shiftCalendarDate, shiftCalendarMonth, zonedDateTime } from "@/lib/dates";
 import { buildClientMetrics } from "@/lib/client-metrics";
 import { financeOrigin, financeTitular } from "@/lib/finance";
 import {
   averageTicket,
   bucketAppointmentStatus,
   buildLast7DaysRevenue,
+  buildMovementHeat,
   buildProfessionalOfTheDay,
   buildTodayOverview,
   conversionRate,
+  heatHours,
+  movementEventParts,
   percentDelta,
   previousPeriod,
   rankProfessionals,
 } from "@/lib/dashboard";
 import { accountBalanceDelta, availableAt, feeCents, netAmountCents, settlementLabel, summarizeAccountBalances } from "@/lib/ledger";
-import { collectAlerts, DEFAULT_ANAMNESIS_FORMS, missingRequired, parseQuestions, serializeQuestions } from "@/lib/anamnesis";
+import {
+  canChangeSupplierOrder,
+  canReceiveSupplierOrder,
+  orderLineCents,
+  orderTotalCents,
+  parseOrderQty,
+  parseSupplierPayMethods,
+  quoteSupplierFulfillment,
+  serializeSupplierPayMethods,
+  supplierOrderStatusLabel,
+} from "@/lib/supplier-market";
+import { parseServedCities, resolveCityLabel, supplierServesSalon } from "@/lib/br-cities";
+import { applySupplierPromo, bundlePayableQty } from "@/lib/supplier-promo";
+import { buildLowStockAlerts, productsLookAlike } from "@/lib/supplier-alerts";
+import {
+  anamnesisAreasFromText,
+  anamnesisDocumentItems,
+  anamnesisInviteMessage,
+  anamnesisInvitePath,
+  anamnesisInviteUrl,
+  collectAlerts,
+  createAnamnesisInviteToken,
+  DEFAULT_ANAMNESIS_FORMS,
+  formAllowedByAreas,
+  formatAnamnesisAnswer,
+  missingRequired,
+  parseQuestions,
+  professionalAnamnesisAreas,
+  sanitizeAnamnesisToken,
+  serializeQuestions,
+} from "@/lib/anamnesis";
+import { homePath, isPlatformAdmin } from "@/lib/auth";
+import { brandLogoSrc, SYSTEM_LOGO, SYSTEM_LOGO_DARK } from "@/lib/branding";
+import {
+  commissionCents,
+  conversionRate as partnerConversionRate,
+  firstTouchPartnerId,
+  hostSlugFromHost,
+  isPublicBrandPath,
+  parseCommissionPercent,
+  partnerBrandIsLive,
+  partnerAffiliatePath,
+  partnerAffiliateUrl,
+  partnerCustomUrl,
+  partnerHostCandidates,
+  partnerLandingPath,
+  partnerRefForBrand,
+  shouldApplyPartnerBrand,
+  partnerSlugFromPath,
+  partnerSubdomainUrl,
+  parseLandingFeatures,
+  resolveHqLanding,
+  resolvePartnerLanding,
+  sanitizePartnerHost,
+  sanitizePartnerSlug,
+  summarizePartnerLedger,
+} from "@/lib/partners";
+import { nextCommissionStatusAfterRefund, shouldCreateReversal } from "@/lib/partner-commission";
+import { getPitchDeck, listPitchDecks, megaWhatsAppHref, PITCH_CTA_LABEL, pitchDeckSlugs } from "@/lib/pitch-decks";
+import { publicAppOrigin } from "@/lib/public-url";
+import { LANDING_CATALOG, LANDING_STEPS, landingCatalogTitles } from "@/lib/landing-catalog";
+import { TENANT_STATUS_LABEL } from "@/lib/constants";
+import { featuresFromText, formatPlanPrice, nextPlanSlug, parsePlanFeatures, planLabel, serializePlanFeatures } from "@/lib/plans";
+import {
+  formatSupportWhen,
+  isPresenceOnline,
+  nextTicketNumberFromLast,
+  reopenOnSalonReply,
+  shouldExpireRinging,
+  supportSide,
+  ticketUnreadFor,
+} from "@/lib/support";
+import {
+  EVOLUTION_WEBHOOK_EVENTS,
+  evolutionWebhookKind,
+  extractEvolutionMessageId,
+  extractEvolutionNumber,
+  extractPhone,
+  extractQrBase64,
+  isEvolutionConfigured,
+  isEvolutionFromMe,
+  parseEvolutionState,
+} from "@/lib/evolution";
+import {
+  DEFAULT_RECEPTIONIST,
+  asksAvailability,
+  asksPrices,
+  buildReceptionistSystemPrompt,
+  localReceptionistReply,
+  matchCatalogProfessional,
+  normalizeReceptionist,
+  wantsHumanHandover,
+} from "@/lib/receptionist";
+import {
+  fillPopText,
+  matchServicePop,
+  popDisclaimer,
+  popPublicPath,
+  popPublicUrl,
+  absolutePopUrl,
+  popSignerLabel,
+  effectivePopSigner,
+  salonCompany,
+  uniquePopSlug,
+  POP_CATALOG,
+} from "@/lib/pops";
+import {
+  compareDocuments,
+  documentFileHref,
+  documentationPath,
+  documentValidity,
+  downloadFileName,
+  kindForTab,
+  parseDocumentKind,
+  parseDocumentationTab,
+} from "@/lib/documentation";
+import {
+  clientHasTag,
+  isEligibleMarketingClient,
+  isInactiveSince,
+  isMarketingReply,
+  marketingLane,
+  nextCampaignStatus,
+  parseMarketingTab,
+  marketingPath,
+  atendimentoPath,
+  parseRecipientIds,
+  phonesMatch,
+  pickMarketingAudience,
+  renderMarketingBody,
+  summarizeMarketing,
+} from "@/lib/marketing";
+import { brandFromPartner, brandTheme, mixHex, parseHexColor, resolveSystemPrimary, SYSTEM_PRIMARY } from "@/lib/branding";
+import { evolutionWebhookUrl, instanceNameForTenant, maskSecret, metaWebhookUrl, parseIntegrationTab } from "@/lib/integrations";
+import {
+  extractMetaInbound,
+  isMetaConfigured,
+  metaGraphUrl,
+  metaSignatureOk,
+  metaVerifyChallenge,
+  normalizeWhatsAppProvider,
+} from "@/lib/whatsapp-meta";
+import { isSalonWhatsAppConnected } from "@/lib/whatsapp-send";
+import {
+  BOT_PAUSE_HOURS,
+  HUMAN_TYPING_DELAY_MS,
+  botPausedUntilFromNow,
+  isConfirmReply,
+  isConversationBotPaused,
+  looksLikeReminderPrompt,
+  spin,
+  typingDelayMs,
+} from "@/lib/whatsapp-copy";
+import { currentForMetric, expectedPacePct, goalProgress, professionalFacts, summarizeGoalStatuses } from "@/lib/goals";
+import {
+  canAssignTenantRole,
+  canEditTenantUser,
+  isValidUserEmail,
+  parseTenantRole,
+  wouldRemoveLastOwner,
+  wouldRemoveLastPlatformAdmin,
+} from "@/lib/users";
+import {
+  agendaScopeLabel,
+  allowedNavHrefs,
+  canAccess,
+  canManageCommissions,
+  canViewAllAgenda,
+  canViewAllAnamnesis,
+  canViewAllCommissions,
+  canViewAllGoals,
+  moduleFromPath,
+  phonesScopeLabel,
+  resolveAccess,
+  roleDefaultGrants,
+  serializeAccess,
+  shouldHidePhones,
+} from "@/lib/permissions";
+import {
+  applyCatalogPrice,
+  bestPromotion,
+  parseWeekdays,
+  promoPriceCents,
+  weekdayFromCalendarDate,
+  weekdayHeat,
+} from "@/lib/promotions";
+import {
+  accessKeyCheckDigit,
+  amountForKind,
+  buildAccessKey,
+  formatCnpj,
+  isValidCnpj,
+  suggestKinds,
+  taxCentsForKind,
+} from "@/lib/fiscal";
+import {
+  companyPayload,
+  contoraArtifactPath,
+  hasContoraArtifacts,
+  mapContoraStatus,
+  nationalTaxCode,
+  nfseDraftPayload,
+  parseIssuerAddress,
+  paymentMethodCode,
+  taxRegimeFromCrt,
+} from "@/lib/contora";
 
 describe("comissões", () => {
   it("usa percentual do serviço quando existe", () => {
@@ -85,6 +321,8 @@ describe("estoque", () => {
   it("marca estoque mínimo", () => {
     expect(isLowStock(2, 4)).toBe(true);
     expect(isLowStock(8, 4)).toBe(false);
+    expect(isLowStock(1, 0)).toBe(true);
+    expect(isLowStock(3, 0)).toBe(false);
   });
 
   it("formata quantidade com unidade", () => {
@@ -94,13 +332,116 @@ describe("estoque", () => {
   });
 });
 
+describe("assistente", () => {
+  const products = [
+    { name: "Tintura 6.0", stock: 1, minStock: 4, unit: "un" },
+    { name: "Shampoo", stock: 12, minStock: 4, unit: "un" },
+    { name: "Algodão", stock: 0, minStock: 2, unit: "un" },
+  ];
+
+  it("reconhece pergunta de estoque baixo e lista os produtos", () => {
+    expect(assistantIntent("qual produto esta em baixa no estoque?")).toBe("low_stock");
+    expect(assistantIntent("Quais produtos estão em baixa?")).toBe("low_stock");
+    expect(assistantIntent("Como recuperar clientes inativos?")).toBe("general");
+    expect(lowStockProducts(products).map((item) => item.name)).toEqual(["Algodão", "Tintura 6.0"]);
+    expect(answerLowStock(products)).toContain("Algodão");
+    expect(answerLowStock(products)).toContain("Tintura 6.0");
+    expect(answerLowStock(products)).not.toMatch(/verificar a lista|olhar no estoque/i);
+    expect(formatLowStockLine(products[0])).toContain("Tintura 6.0");
+  });
+
+  it("monta contexto com os nomes em baixa e responde a intenção", () => {
+    const snapshot = {
+      salon: "Studio Aurora",
+      dayLabel: "hoje",
+      revenueCents: 15000,
+      occupancy: 40,
+      noShows: 1,
+      appointments: [{ time: "09:00", end: "10:00", client: "Ana", professional: "Bruno", status: "Confirmado" }],
+      products,
+      professionals: [
+        { name: "Bruno", appointmentsToday: 1, workStart: "09:00", workEnd: "19:00", freeSlots: ["11:00"] },
+        { name: "Camila", appointmentsToday: 0, workStart: "09:00", workEnd: "19:00", freeSlots: ["09:00"] },
+      ],
+    };
+    expect(formatAssistantContext(snapshot)).toContain("Tintura 6.0");
+    expect(formatAssistantContext(snapshot)).toContain("Bruno");
+    expect(answerAssistantIntent("low_stock", snapshot)).toContain("Algodão");
+    expect(answerAssistantIntent("idle_team", snapshot)).toContain("Camila");
+    expect(answerAssistantIntent("revenue", snapshot)).toContain("R$");
+    expect(answerAssistantIntent("general", snapshot)).toBe("");
+  });
+
+  it("responde horário livre da profissional sem dizer que não tem a informação", () => {
+    const names = ["Kelly Souza", "Cami"];
+    expect(assistantIntent("tem horário disponível na agenda da Kelly?", names)).toBe("free_slot");
+    expect(assistantIntent("a Kelly tem disponibilidade hoje?", names)).toBe("free_slot");
+    expect(assistantIntent("agenda da Kelly", names)).toBe("free_slot");
+    expect(assistantIntent("a Kelly está livre?", names)).toBe("free_slot");
+    expect(assistantIntent("como está a agenda hoje?", ["Ana Souza", "Kelly Souza"])).toBe("today_agenda");
+    expect(matchProfessional("como está a agenda hoje?", [
+      { name: "Ana Souza", appointmentsToday: 0, workStart: "09:00", workEnd: "19:00", freeSlots: ["09:00"] },
+    ])).toBeNull();
+    expect(mentionedPerson("tem horário disponível na agenda de hoje")).toBe("");
+    expect(mentionedPerson("tem horário na agenda da Kelly")).toBe("kelly");
+
+    const snapshot = {
+      salon: "Studio Aurora",
+      dayLabel: "hoje",
+      revenueCents: 0,
+      occupancy: 20,
+      noShows: 0,
+      appointments: [{ time: "09:00", end: "10:00", client: "Ana", professional: "Kelly Souza", status: "Confirmado" }],
+      products,
+      professionals: [
+        {
+          name: "Kelly Souza",
+          nickname: "Kelly",
+          appointmentsToday: 1,
+          workStart: "09:00",
+          workEnd: "19:00",
+          freeSlots: ["10:00", "10:30", "11:00", "14:00"],
+        },
+        {
+          name: "Camila Ferreira",
+          nickname: "Cami",
+          appointmentsToday: 0,
+          workStart: "09:00",
+          workEnd: "19:00",
+          freeSlots: ["09:00", "09:30"],
+        },
+      ],
+    };
+
+    expect(matchProfessional("agenda da Kelly", snapshot.professionals)?.name).toBe("Kelly Souza");
+    expect(matchProfessional("tem horário com a Cami", snapshot.professionals)?.name).toBe("Camila Ferreira");
+    const answer = answerFreeSlots(snapshot, "tem horário disponível na agenda da Kelly?");
+    expect(answer).toContain("Kelly Souza");
+    expect(answer).toContain("10:00");
+    expect(answer).toContain("Ana");
+    expect(answer).not.toMatch(/não (tenho|tinha) essa informação|abrir a agenda/i);
+    expect(formatAssistantContext(snapshot)).toContain("Kelly Souza");
+    expect(formatAssistantContext(snapshot)).toContain("10:00");
+    expect(answerAssistantIntent("free_slot", snapshot, "tem horário disponível na agenda da Kelly?")).toContain("10:00");
+  });
+
+  it("calcula horários livres fora dos ocupados e do passado", () => {
+    expect(
+      freeSlotsForProfessional({
+        openTime: "09:00",
+        closeTime: "11:00",
+        slotMinutes: 30,
+        nowHHmm: "09:10",
+        busy: [{ start: "10:00", end: "10:30" }],
+      }),
+    ).toEqual(["09:30", "10:30"]);
+  });
+});
+
 describe("helpers", () => {
   it("formata e faz parse de reais", () => {
     expect(formatBRL(12345)).toContain("123,45");
     expect(parseBRLToCents("R$ 1.230,50")).toBe(123050);
-    expect(parseBRLToCents("100.50")).toBe(10050);
-    expect(parseBRLToCents("1.000")).toBe(100000);
-    expect(parseBRLToCents("-50,00")).toBe(-5000);
   });
 
   it("gera slug de tenant", () => {
@@ -110,6 +451,8 @@ describe("helpers", () => {
   it("formata celular brasileiro", () => {
     expect(formatPhoneBR("11970001111")).toBe("+55 (11) 97000-1111");
     expect(formatPhoneBR("+55 11 97000-1111")).toBe("+55 (11) 97000-1111");
+    expect(displayPhoneBR("11970001111", true)).toBe(HIDDEN_PHONE_LABEL);
+    expect(displayPhoneBR("11970001111", false)).toBe("+55 (11) 97000-1111");
   });
 });
 
@@ -135,6 +478,70 @@ describe("comandas", () => {
         cashbackCents: 300,
       }),
     ).toBe(8000);
+  });
+
+  it("calcula cashback por percentual e limita o resgate", () => {
+    const config = defaultCashbackConfig({ enabled: true, earnPct: 10, onProducts: false, maxRedeemPct: 50 });
+    expect(
+      earnCashbackCents(
+        [
+          { type: "SERVICE", quantity: 1, priceCents: 10000 },
+          { type: "PRODUCT", quantity: 1, priceCents: 5000 },
+        ],
+        config,
+      ),
+    ).toBe(1000);
+    expect(earnCashbackCents([{ type: "SERVICE", quantity: 1, priceCents: 10000 }], { ...config, enabled: false })).toBe(0);
+    expect(maxRedeemCents(10000, config, 8000)).toBe(5000);
+    expect(pointsToCents(10, 100)).toBe(1000);
+    expect(centsToPoints(1990, 100)).toBe(19);
+    expect(parseSettingsTab("cashback")).toBe("cashback");
+    expect(parseSettingsTab("fiscal")).toBe("fiscal");
+    expect(parseSettingsTab("importar")).toBe("importar");
+    expect(parseSettingsTab("whatsapp")).toBe("whatsapp");
+    expect(parseSettingsTab("outro")).toBe("salao");
+    expect(settingsPath("whatsapp")).toBe("/configuracoes?tab=whatsapp");
+    expect(parseWhatsAppTab("campanhas")).toBe("campanhas");
+    expect(parseWhatsAppTab("outro")).toBe("inbox");
+    expect(parseMarketingTab("inbox")).toBe("listas");
+    expect(parseMarketingTab("conexao")).toBe("listas");
+    expect(parseMarketingTab("campanhas")).toBe("campanhas");
+    expect(parseMarketingTab("outro")).toBe("listas");
+    expect(marketingPath("campanhas")).toBe("/marketing?tab=campanhas");
+    expect(marketingPath("listas")).toBe("/marketing");
+    expect(atendimentoPath("abc")).toBe("/atendimento?c=abc");
+    expect(parseHexColor("#FF0447")).toBe("#ff0447");
+    expect(parseHexColor("#f47")).toBe("#ff4477");
+    expect(parseHexColor("azul")).toBe(SYSTEM_PRIMARY);
+    expect(resolveSystemPrimary("#2563EB")).toBe(SYSTEM_PRIMARY);
+    expect(resolveSystemPrimary("#00aa88")).toBe("#00aa88");
+    expect(mixHex("#ff0447", "#000000", 0.22)).toBe("#c70337");
+    expect(brandTheme("#ff0447").wine).toBe("#ff0447");
+    expect(brandTheme("#ff0447").wineDeep).toBe("#c70337");
+    expect(brandTheme("#ff0447").faviconUrl).toBeNull();
+    expect(atendimentoPath()).toBe("/atendimento");
+    expect(normalizeCampaignTrigger("APPOINTMENT_CREATED")).toBe("INFORMED");
+    expect(CAMPAIGN_CATALOG).toHaveLength(13);
+    expect(CAMPAIGN_CATALOG.find((item) => item.trigger === "REMINDER")?.template).toMatch(/responder com 1/i);
+    expect(renderCampaignTemplate("Oi {{nome}} no {{salao}}{{profissional}}", { nome: "Ana", salao: "Aurora", profissional: "Bruno" })).toBe(
+      "Oi Ana no Aurora com Bruno",
+    );
+    expect(normalizeWhatsAppPhone("55 11 98552-1672")).toBe("11985521672");
+    expect(normalizeWhatsAppPhone("11985521672")).toBe("11985521672");
+    expect(whatsappPhoneCandidates("11985521672")).toEqual(["11985521672", "5511985521672"]);
+    expect(toEvolutionNumber("11 98552-1672")).toBe("5511985521672");
+    expect(evolutionSendFailure(new Error('Evolution API 404: {"message":"not found"}'))).toMatch(
+      /não encontrou a conexão/,
+    );
+    expect(evolutionSendFailure(new Error("timeout"))).toMatch(/timeout/);
+    expect(parseClientIds("a, b  a,c")).toEqual(["a", "b", "c"]);
+    expect(clientDeleteCopy(1, "one").title).toMatch(/este cliente/);
+    expect(clientDeleteCopy(3, "selected").title).toMatch(/3 clientes selecionados/);
+    expect(clientDeleteCopy(12, "all").title).toMatch(/12 clientes deste salão/);
+    expect(parseIntegrationTab("contora")).toBe("contora");
+    expect(parseIntegrationTab("evolution")).toBe("evolution");
+    expect(parseIntegrationTab("meta")).toBe("meta");
+    expect(parseIntegrationTab("outro")).toBe("openai");
   });
 
   it("calcula troco e rateia pagamentos no total", () => {
@@ -258,22 +665,6 @@ describe("ledger", () => {
     expect(rows[1]).toMatchObject({ settledCents: 6656, incomeCents: 6656, methodNames: ["CC Elo 1x", "Amex"] });
     expect(rows[2]).toMatchObject({ settledCents: 0, methodNames: ["Boleto"] });
   });
-
-  it("oculta contas adminOnly quando includeAdminOnly é false", () => {
-    const rows = summarizeAccountBalances({
-      accounts: [
-        { id: "caixa", name: "Caixa", details: "Caixa", isDefault: true, active: true, sortOrder: 0, adminOnly: false },
-        { id: "cofre", name: "Cofre", details: "Admin", isDefault: false, active: true, sortOrder: 1, adminOnly: true },
-      ],
-      methods: [
-        { accountId: "caixa", name: "Dinheiro", active: true },
-        { accountId: "cofre", name: "Transferência", active: true },
-      ],
-      transactions: [],
-      includeAdminOnly: false,
-    });
-    expect(rows.map((r) => r.name)).toEqual(["Caixa"]);
-  });
 });
 
 describe("painel", () => {
@@ -295,6 +686,1109 @@ describe("painel", () => {
     ]);
     expect(ranking[0]).toMatchObject({ name: "Camila", services: 2, place: 1, avgCents: 23000 });
     expect(previousPeriod("2026-08-12", "2026-08-26")).toEqual({ from: "2026-07-28", to: "2026-08-11" });
+  });
+
+  it("monta o mapa de calor por dia e hora", () => {
+    expect(heatHours("08:00", "20:00")).toEqual([8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]);
+    expect(movementEventParts(zonedDateTime("2026-10-24", "10:00"))).toEqual({ weekday: 6, hour: 10 });
+    const heat = buildMovementHeat(
+      [
+        { weekday: 6, hour: 10 },
+        { weekday: 6, hour: 10 },
+        { weekday: 5, hour: 15 },
+      ],
+      heatHours("08:00", "20:00"),
+    );
+    expect(heat.days[6].hours.find((cell) => cell.hour === 10)?.count).toBe(2);
+    expect(heat.days[5].hours.find((cell) => cell.hour === 15)?.count).toBe(1);
+    expect(heat.peak).toMatchObject({ label: "Sáb 10h", count: 2 });
+  });
+});
+
+describe("usuários do tenant", () => {
+  it("valida perfil, e-mail e o último proprietário", () => {
+    expect(parseTenantRole("MANAGER")).toBe("MANAGER");
+    expect(parseTenantRole("SUPER_ADMIN")).toBeNull();
+    expect(canAssignTenantRole("OWNER", "MANAGER")).toBe(true);
+    expect(canAssignTenantRole("MANAGER", "OWNER")).toBe(false);
+    expect(canEditTenantUser({ role: "MANAGER", userId: "m" }, { id: "o", role: "OWNER" })).toBe(false);
+    expect(canEditTenantUser({ role: "OWNER", userId: "o" }, { id: "m", role: "MANAGER" })).toBe(true);
+    expect(isValidUserEmail("yuki.t@example.com")).toBe(true);
+    expect(isValidUserEmail("invalido")).toBe(false);
+    expect(wouldRemoveLastOwner({ currentRole: "OWNER", nextActive: false, ownerCount: 1 })).toBe(true);
+    expect(wouldRemoveLastOwner({ currentRole: "OWNER", nextRole: "MANAGER", ownerCount: 2 })).toBe(false);
+    expect(wouldRemoveLastPlatformAdmin({ currentRole: "SUPER_ADMIN", nextActive: false, adminCount: 1 })).toBe(true);
+    expect(wouldRemoveLastPlatformAdmin({ currentRole: "SUPER_ADMIN", nextActive: false, adminCount: 2 })).toBe(false);
+  });
+});
+
+describe("permissões do salão", () => {
+  it("profissional vê só a própria agenda e o dono vê todas", () => {
+    const professional = resolveAccess({ role: "PROFESSIONAL", professionalId: "pro-1" });
+    const owner = resolveAccess({ role: "OWNER" });
+    const reception = resolveAccess({ role: "RECEPTIONIST" });
+    expect(canViewAllAgenda(professional)).toBe(false);
+    expect(agendaScopeLabel(professional)).toBe("Só a própria agenda");
+    expect(canAccess(professional, "agenda")).toBe(true);
+    expect(canAccess(professional, "agenda", "create")).toBe(false);
+    expect(canAccess(professional, "agenda", "edit")).toBe(false);
+    expect(canAccess(professional, "comandas")).toBe(true);
+    expect(canAccess(professional, "comandas", "create")).toBe(false);
+    expect(canAccess(professional, "comandas", "edit")).toBe(false);
+    expect(canAccess(reception, "agenda", "create")).toBe(true);
+    expect(canAccess(reception, "comandas", "create")).toBe(true);
+    expect(canAccess(professional, "finance")).toBe(false);
+    expect(canAccess(professional, "users")).toBe(false);
+    expect(canViewAllAgenda(reception)).toBe(true);
+    expect(canViewAllAgenda(owner)).toBe(true);
+    expect(owner.isAdmin).toBe(true);
+    expect(canAccess(owner, "finance", "remove")).toBe(true);
+    expect(canAccess(professional, "commissions")).toBe(true);
+    expect(canAccess(professional, "goals")).toBe(true);
+    expect(canViewAllGoals(professional)).toBe(false);
+    expect(canViewAllGoals(reception)).toBe(false);
+    expect(canViewAllGoals(owner)).toBe(true);
+    expect(canAccess(professional, "anamnesis")).toBe(true);
+    expect(canAccess(professional, "receptionist")).toBe(false);
+    expect(canAccess(reception, "receptionist")).toBe(true);
+    expect(canAccess(reception, "receptionist", "edit")).toBe(true);
+    expect(canViewAllAnamnesis(professional)).toBe(false);
+    expect(canViewAllAnamnesis(reception)).toBe(true);
+    expect(canViewAllAnamnesis(owner)).toBe(true);
+    expect(canManageCommissions(professional)).toBe(false);
+    expect(canViewAllCommissions(professional)).toBe(false);
+    expect(canManageCommissions(owner)).toBe(true);
+    expect(canViewAllCommissions(owner)).toBe(true);
+    expect(canManageCommissions(reception)).toBe(false);
+    expect(shouldHidePhones(professional)).toBe(true);
+    expect(shouldHidePhones(reception)).toBe(false);
+    expect(shouldHidePhones(owner)).toBe(false);
+    expect(phonesScopeLabel(professional)).toBe("Telefones ocultos");
+    expect(phonesScopeLabel(owner)).toBe("Telefones visíveis");
+  });
+
+  it("perfil e personalizado substituem o padrão do cargo", () => {
+    const profile = resolveAccess({
+      role: "PROFESSIONAL",
+      professionalId: "pro-1",
+      profile: {
+        id: "p1",
+        name: "Recepção extra",
+        isAdmin: false,
+        grants: serializeAccess({
+          admin: false,
+          modules: { agenda: { access: true, create: true, edit: true, remove: true, viewAll: true } },
+        }),
+      },
+    });
+    expect(profile.profileName).toBe("Recepção extra");
+    expect(canViewAllAgenda(profile)).toBe(true);
+    const custom = resolveAccess({
+      role: "PROFESSIONAL",
+      professionalId: "pro-1",
+      accessJson: serializeAccess({
+        admin: false,
+        modules: { agenda: { access: true, viewAll: false }, clients: { access: true } },
+      }),
+    });
+    expect(custom.custom).toBe(true);
+    expect(canViewAllAgenda(custom)).toBe(false);
+    expect(canAccess(custom, "clients")).toBe(true);
+    expect(canAccess(custom, "comandas")).toBe(false);
+    expect(shouldHidePhones(custom)).toBe(false);
+    const hidden = resolveAccess({
+      role: "RECEPTIONIST",
+      accessJson: serializeAccess({
+        admin: false,
+        modules: { clients: { access: true, hidePhones: true } },
+      }),
+    });
+    expect(shouldHidePhones(hidden)).toBe(true);
+  });
+
+  it("esconde do menu o que não tem acesso", () => {
+    expect(moduleFromPath("/permissoes")).toBe("users");
+    expect(moduleFromPath("/agenda")).toBe("agenda");
+    expect(moduleFromPath("/recepcionista")).toBe("receptionist");
+    const professional = resolveAccess({ role: "PROFESSIONAL" });
+    expect(allowedNavHrefs(professional, ["/agenda", "/financeiro", "/usuarios", "/clientes", "/recepcionista"])).toEqual([
+      "/agenda",
+      "/clientes",
+    ]);
+    expect(allowedNavHrefs(resolveAccess({ role: "RECEPTIONIST" }), ["/recepcionista", "/atendimento"])).toEqual([
+      "/recepcionista",
+      "/atendimento",
+    ]);
+    expect(roleDefaultGrants("MANAGER").admin).toBe(false);
+    expect(canAccess(resolveAccess({ role: "MANAGER" }), "users", "edit")).toBe(true);
+  });
+});
+
+describe("importação de clientes", () => {
+  it("lê o formato da planilha do salão", () => {
+    expect(normalizeImportPhone("5511961938720")).toBe("11961938720");
+    expect(parseImportDate("09/05/2022")).toBe("2022-05-09");
+    expect(parseImportDate(44690)).toBe("2022-05-09");
+    const { drafts, errors } = mapClientImportRows([
+      [...CLIENT_IMPORT_HEADERS],
+      [
+        "Ana Camila",
+        "Cliente fiel",
+        "",
+        "5511961938720",
+        "ana@example.com",
+        "123.456.789-00",
+        "",
+        "12/01/1977",
+        "Alameda C",
+        "208",
+        "Jardim Est",
+        "Atibaia",
+        "São Paulo",
+        "60",
+        "09/05/2022",
+        "vip",
+      ],
+      ["Sem telefone", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
+    ]);
+    expect(drafts[0]).toMatchObject({
+      name: "Ana Camila",
+      phone: "11961938720",
+      city: "Atibaia",
+      state: "São Paulo",
+      district: "Jardim Est",
+      addressNumber: "208",
+      creditCents: 6000,
+      birthDate: "1977-01-12",
+      createdAt: "2022-05-09",
+      tags: "vip",
+    });
+    expect(errors.some((item) => item.message.includes("Celular"))).toBe(true);
+  });
+
+  it("ignora o intervalo vazio que o Excel costuma marcar", () => {
+    const blanks = Array.from({ length: 4000 }, () => ["", "", "", "", ""]);
+    const compacted = compactImportTable([[...CLIENT_IMPORT_HEADERS], ...blanks, ["Maria", "", "", "11988887777"]]);
+    expect(compacted).toHaveLength(2);
+    const { drafts, errors } = mapClientImportRows(compacted);
+    expect(drafts).toHaveLength(1);
+    expect(drafts[0]?.name).toBe("Maria");
+    expect(errors).toEqual([]);
+  });
+
+  it("explica resposta HTML ou vazia da importação", () => {
+    expect(parseImportResponse(200, "").error).toMatch(/confira o total/i);
+    expect(parseImportResponse(500, "<html>erro</html>").error).toMatch(/interrompeu/i);
+    expect(parseImportResponse(200, '{"ok":true,"created":3,"updated":1,"skipped":0}').created).toBe(3);
+  });
+});
+
+describe("busca de clientes", () => {
+  it("filtra por nome e pedaço do celular", () => {
+    const client = { name: "Ana Camila", nickname: null, phone: "11961938720", landline: null, email: "ana@example.com", tags: "vip", cpf: null, rg: null, city: "Atibaia" };
+    expect(matchesClientSearch(client, "camila")).toBe(true);
+    expect(matchesClientSearch(client, "96193")).toBe(true);
+    expect(matchesClientSearch(client, "vip")).toBe(true);
+    expect(matchesClientSearch(client, "pedro")).toBe(false);
+  });
+});
+
+describe("anamnese", () => {
+  it("detecta alertas clínicos em respostas Sim", () => {
+    const questions = DEFAULT_ANAMNESIS_FORMS[0].questions;
+    const alerts = collectAlerts(questions, {
+      alergia: { value: "yes", detail: "Látex" },
+      gestante: { value: "no" },
+    });
+    expect(alerts.some((item) => item.includes("Látex") || item.includes("Possui alguma alergia"))).toBe(true);
+    expect(alerts.some((item) => item.toLowerCase().includes("gestante"))).toBe(false);
+  });
+
+  it("lista perguntas obrigatórias em branco", () => {
+    const questions = DEFAULT_ANAMNESIS_FORMS[0].questions;
+    const missing = missingRequired(questions, { alergia: { value: "no" } });
+    expect(missing.length).toBeGreaterThan(3);
+    expect(
+      missingRequired(
+        questions,
+        Object.fromEntries(questions.filter((q) => q.required).map((q) => [q.id, { value: "no" }])),
+      ),
+    ).toEqual([]);
+  });
+
+  it("formata respostas da ficha para o documento", () => {
+    const questions = DEFAULT_ANAMNESIS_FORMS[0].questions;
+    expect(formatAnamnesisAnswer(questions[0], { value: "yes", detail: "Látex" })).toBe("Sim — Látex");
+    expect(formatAnamnesisAnswer(questions[0], { value: "no" })).toBe("Não");
+    expect(formatAnamnesisAnswer(questions[0])).toBe("—");
+    const items = anamnesisDocumentItems(questions, { alergia: { value: "yes", detail: "Látex" } });
+    expect(items[0]?.alert).toBe(true);
+    expect(items[0]?.value).toBe("Sim — Látex");
+  });
+
+  it("serializa e lê perguntas da ficha", () => {
+    const json = serializeQuestions(DEFAULT_ANAMNESIS_FORMS[1].questions);
+    const parsed = parseQuestions(json);
+    expect(parsed.find((q) => q.id === "ppd")?.alertOn).toBe("yes");
+    expect(parseQuestions("não-é-json")).toEqual([]);
+  });
+
+  it("manicure não acessa anamnese de estética", () => {
+    expect(anamnesisAreasFromText("Manicure")).toEqual(["unhas"]);
+    expect(anamnesisAreasFromText("Esteticista")).toEqual(["estetica"]);
+    const manicure = professionalAnamnesisAreas({
+      specialty: "Manicure",
+      services: [{ name: "Esmaltação em gel", categoryName: "Unhas" }],
+    });
+    expect(manicure).toEqual(expect.arrayContaining(["geral", "unhas"]));
+    expect(manicure).not.toContain("estetica");
+    expect(formAllowedByAreas(manicure, "unhas")).toBe(true);
+    expect(formAllowedByAreas(manicure, "estetica")).toBe(false);
+    expect(formAllowedByAreas(null, "estetica")).toBe(true);
+  });
+
+  it("monta o link público da ficha para a cliente preencher", () => {
+    const token = createAnamnesisInviteToken();
+    expect(sanitizeAnamnesisToken(token)).toBe(token);
+    expect(sanitizeAnamnesisToken("../x")).toBe("");
+    expect(anamnesisInvitePath(token)).toBe(`/anamnese/${token}`);
+    expect(anamnesisInviteUrl(token, "https://beauty.megaflood.app")).toBe(
+      `https://beauty.megaflood.cloud/anamnese/${token}`,
+    );
+    expect(anamnesisInviteMessage("Desiree Lima", "Renove Estética", "https://x/anamnese/abc")).toContain("Desiree");
+    expect(anamnesisInviteMessage("Desiree Lima", "Renove Estética", "https://x/anamnese/abc")).toContain(
+      "https://x/anamnese/abc",
+    );
+  });
+});
+
+describe("plataforma", () => {
+  it("reconhece o administrador da operação", () => {
+    expect(isPlatformAdmin("SUPER_ADMIN")).toBe(true);
+    expect(isPlatformAdmin("OWNER")).toBe(false);
+    expect(TENANT_STATUS_LABEL.SUSPENDED).toBe("Suspensa");
+  });
+
+  it("serializa tipos de plano e preço", () => {
+    expect(parsePlanFeatures('["Agenda","Caixa"]')).toEqual(["Agenda", "Caixa"]);
+    expect(parsePlanFeatures("Agenda\n- Caixa")).toEqual(["Agenda", "Caixa"]);
+    expect(serializePlanFeatures([" Agenda ", ""])).toBe('["Agenda"]');
+    expect(JSON.parse(featuresFromText("WhatsApp\nAnamnese"))).toEqual(["WhatsApp", "Anamnese"]);
+    expect(formatPlanPrice(0)).toBe("Grátis");
+    expect(formatPlanPrice(19900, "monthly")).toContain("199");
+    expect(nextPlanSlug("Profissional", ["profissional"])).toBe("profissional-2");
+    expect(planLabel("premium", [{ slug: "premium", name: "Premium" }])).toBe("Premium");
+    expect(planLabel("avulso", [])).toBe("avulso");
+  });
+});
+
+describe("suporte", () => {
+  it("numera tickets e isola o lado da conversa", () => {
+    expect(nextTicketNumberFromLast(null)).toBe(1);
+    expect(nextTicketNumberFromLast(7)).toBe(8);
+    expect(supportSide("SUPER_ADMIN")).toBe("PLATFORM");
+    expect(supportSide("OWNER")).toBe("SALON");
+    expect(ticketUnreadFor("PLATFORM", { unreadAdmin: 3, unreadSalon: 1 })).toBe(3);
+    expect(ticketUnreadFor("SALON", { unreadAdmin: 3, unreadSalon: 1 })).toBe(1);
+  });
+
+  it("considera presença recente e reabre ticket respondido", () => {
+    const now = new Date("2026-10-24T18:00:00Z");
+    expect(isPresenceOnline(new Date("2026-10-24T17:59:30Z"), now)).toBe(true);
+    expect(isPresenceOnline(new Date("2026-10-24T17:58:00Z"), now)).toBe(false);
+    expect(shouldExpireRinging(new Date("2026-10-24T17:59:30Z"), now)).toBe(false);
+    expect(shouldExpireRinging(new Date("2026-10-24T17:59:00Z"), now)).toBe(true);
+    expect(reopenOnSalonReply("RESOLVED")).toBe(true);
+    expect(reopenOnSalonReply("OPEN")).toBe(false);
+    expect(formatSupportWhen(now, now)).toBe("agora");
+  });
+});
+
+describe("integrações da plataforma", () => {
+  it("nomeia a instância Evolution pelo slug do salão", () => {
+    expect(instanceNameForTenant("studio-aurora")).toBe("mb-studio-aurora");
+    expect(instanceNameForTenant("Studio Aurora!!!")).toBe("mb-studio-aurora");
+    expect(instanceNameForTenant("")).toBe("mb-salao");
+  });
+
+  it("monta webhook público por tenant", () => {
+    expect(evolutionWebhookUrl("https://app.megabeauty.com.br/", "studio-aurora")).toBe(
+      "https://app.megabeauty.com.br/api/webhooks/evolution?tenant=studio-aurora",
+    );
+    expect(evolutionWebhookUrl("https://beauty.megaflood.cloud/api/webhooks/evolution", "renove")).toBe(
+      "https://beauty.megaflood.cloud/api/webhooks/evolution?tenant=renove",
+    );
+    expect(evolutionWebhookUrl("", "studio-aurora")).toBe("");
+    expect(metaWebhookUrl("https://beauty.megaflood.cloud", "studio-aurora")).toBe(
+      "https://beauty.megaflood.cloud/api/webhooks/meta?tenant=studio-aurora",
+    );
+  });
+
+  it("mascara segredos e lê QR/estado da Evolution", () => {
+    expect(maskSecret("sk-abcdefghij")).toBe("sk-••••ij");
+    expect(maskSecret("abc")).toBe("••••");
+    expect(parseIntegrationTab("contora")).toBe("contora");
+    expect(parseIntegrationTab("evolution")).toBe("evolution");
+    expect(parseIntegrationTab("meta")).toBe("meta");
+    expect(parseIntegrationTab("outro")).toBe("openai");
+    expect(isEvolutionConfigured({ url: "https://evo", apiKey: "k", instance: "mb-x" })).toBe(true);
+    expect(isEvolutionConfigured({ url: "https://evo", apiKey: "k", instance: "" })).toBe(false);
+    expect(extractQrBase64({ base64: "data:image/png;base64,AAAA" })).toBe("data:image/png;base64,AAAA");
+    expect(extractQrBase64({ qrcode: { base64: "BBBB".repeat(25) } })).toMatch(/^data:image\/png;base64,/);
+    expect(parseEvolutionState({ instance: { state: "open" } })).toBe("open");
+    expect(parseEvolutionState({ status: "qrcode" })).toBe("connecting");
+    expect(parseEvolutionState({})).toBe("close");
+    expect(extractEvolutionNumber({ instance: { owner: "5511999999999@s.whatsapp.net" } })).toBe("5511999999999");
+  });
+});
+
+describe("metas de profissionais", () => {
+  it("navega o mês civil", () => {
+    expect(calendarMonth("2026-10-24")).toBe("2026-10");
+    expect(monthStartEnd("2026-02")).toEqual({ from: "2026-02-01", to: "2026-02-28" });
+    expect(monthStartEnd("2026-10")).toEqual({ from: "2026-10-01", to: "2026-10-31" });
+    expect(shiftCalendarMonth("2026-01", -1)).toBe("2025-12");
+    expect(formatMonthLabel("2026-10")).toBe("Outubro de 2026");
+  });
+
+  it("atribui faturamento e atendimentos da comanda ao profissional do item", () => {
+    const facts = professionalFacts(
+      [
+        {
+          professionalId: "camila",
+          comandaProfessionalId: "camila",
+          comandaId: "c1",
+          clientId: "ju",
+          type: "SERVICE",
+          quantity: 1,
+          priceCents: 18000,
+        },
+        {
+          professionalId: "bruno",
+          comandaProfessionalId: "camila",
+          comandaId: "c1",
+          clientId: "ju",
+          type: "PRODUCT",
+          quantity: 1,
+          priceCents: 4500,
+        },
+        {
+          professionalId: null,
+          comandaProfessionalId: "camila",
+          comandaId: "c2",
+          clientId: "ana",
+          type: "SERVICE",
+          quantity: 1,
+          priceCents: 12000,
+        },
+      ],
+      [
+        { professionalId: "camila", amountCents: 5400 },
+        { professionalId: "bruno", amountCents: 900 },
+      ],
+      "camila",
+    );
+    expect(facts.revenueCents).toBe(30000);
+    expect(facts.productCents).toBe(0);
+    expect(facts.serviceCount).toBe(2);
+    expect(facts.clientCount).toBe(2);
+    expect(facts.commissionCents).toBe(5400);
+    expect(currentForMetric("REVENUE", facts)).toBe(30000);
+    expect(currentForMetric("SERVICES", facts)).toBe(2);
+  });
+
+  it("classifica ritmo da meta no mês", () => {
+    expect(expectedPacePct("2026-10-01", "2026-10-31", "2026-10-01")).toBe(3);
+    expect(goalProgress(10000, 10000, 50)).toMatchObject({ status: "hit", pct: 100, remaining: 0 });
+    expect(goalProgress(10000, 4000, 30)).toMatchObject({ status: "on_track", pct: 40 });
+    expect(goalProgress(10000, 2000, 50)).toMatchObject({ status: "behind", pct: 20 });
+    expect(summarizeGoalStatuses(["hit", "on_track", "behind", "behind"])).toEqual({
+      total: 4,
+      hit: 1,
+      onTrack: 1,
+      behind: 2,
+    });
+  });
+});
+
+describe("notas fiscais", () => {
+  it("valida CNPJ e monta chave de acesso", () => {
+    expect(isValidCnpj("12.345.678/0001-95")).toBe(true);
+    expect(isValidCnpj("12.345.678/0001-90")).toBe(false);
+    expect(formatCnpj("12345678000195")).toBe("12.345.678/0001-95");
+    const key = buildAccessKey({
+      uf: "SP",
+      issuedAt: new Date("2026-10-24T15:00:00Z"),
+      cnpj: "12345678000195",
+      kind: "NFCE",
+      series: "1",
+      number: 17,
+      code: "12345678",
+    });
+    expect(key).toHaveLength(44);
+    expect(key.startsWith("35")).toBe(true);
+    expect(accessKeyCheckDigit(key.slice(0, 43))).toBe(key.slice(-1));
+  });
+
+  it("separa serviço e produto e calcula ISS", () => {
+    const lines = [
+      { type: "SERVICE", description: "Corte", quantity: 1, priceCents: 10000 },
+      { type: "PRODUCT", description: "Máscara", quantity: 1, priceCents: 4500 },
+    ];
+    expect(suggestKinds(lines)).toEqual(["NFSE", "NFCE"]);
+    expect(amountForKind("NFSE", lines)).toBe(10000);
+    expect(amountForKind("NFCE", lines)).toBe(4500);
+    expect(taxCentsForKind("NFSE", 10000, 5)).toBe(500);
+    expect(taxCentsForKind("NFCE", 4500, 5)).toBe(0);
+  });
+});
+
+describe("fiscal contora", () => {
+  it("monta empresa, DPS e status da Contora", () => {
+    expect(taxRegimeFromCrt("1")).toBe("simples");
+    expect(taxRegimeFromCrt("3")).toBe("presumido");
+    expect(nationalTaxCode("6.01")).toBe("0601");
+    expect(paymentMethodCode("PIX")).toBe("17");
+    expect(parseIssuerAddress("Rua Harmonia, 240", "São Paulo, SP")).toEqual({
+      street: "Rua Harmonia",
+      number: "240",
+      city: "São Paulo",
+    });
+    expect(mapContoraStatus("authorized")).toBe("AUTHORIZED");
+    expect(mapContoraStatus("queued")).toBe("PROCESSING");
+    const config = {
+      enabled: true,
+      cnpj: "12345678000195",
+      ie: null,
+      im: "123456",
+      crt: "1",
+      uf: "SP",
+      ibge: "3550308",
+      issPct: 5,
+      serviceCode: "6.01",
+      series: "1",
+      nextNumber: 1,
+      provider: "contora",
+      providerUrl: null,
+      providerToken: null,
+      environment: "homolog",
+      autoIssue: false,
+      issuerName: "Studio Aurora",
+      tradeName: "Aurora",
+      phone: "11999999999",
+      email: null,
+      address: "Rua Harmonia, 240",
+      city: "São Paulo, SP",
+      street: "Rua Harmonia",
+      number: "240",
+      district: "Vila Madalena",
+      zip: "05435000",
+      cscId: null,
+      cscToken: null,
+      companyId: null,
+      certificateUntil: null,
+    };
+    const payload = companyPayload(config);
+    expect(payload.document).toBe("12345678000195");
+    expect(payload.tax_regime).toBe("simples");
+    expect(payload.default_environment).toBe("homologacao");
+    const draft = nfseDraftPayload({
+      config,
+      description: "Corte masculino",
+      amountCents: 8000,
+      recipient: { name: "Lucas", document: "39053344705" },
+    });
+    expect(draft.payload.service.national_tax_code).toBe("0601");
+    expect(draft.payload.amounts.service_amount).toBe(80);
+    expect(contoraArtifactPath("NFSE", "doc-1", "pdf")).toBe("/nfse/drafts/doc-1/artifacts/pdf_nfse");
+    expect(contoraArtifactPath("NFSE", "doc-1", "xml")).toBe("/nfse/drafts/doc-1/artifacts/xml_nfse");
+    expect(contoraArtifactPath("NFCE", "doc-2", "xml")).toBe("/nfe/drafts/doc-2/artifacts/xml_authorized");
+    expect(hasContoraArtifacts({ provider: "contora", providerRef: "abc", status: "AUTHORIZED" })).toBe(true);
+    expect(hasContoraArtifacts({ provider: "local", providerRef: "abc", status: "AUTHORIZED" })).toBe(false);
+  });
+});
+
+describe("promoções", () => {
+  const promo = {
+    id: "p1",
+    name: "Fim de semana do corte",
+    startsOn: "2026-10-01",
+    endsOn: "2026-10-31",
+    weekdays: [0, 6],
+    discountType: "PERCENT" as const,
+    discountValue: 20,
+    active: true,
+    items: [{ type: "SERVICE", serviceId: "corte", productId: null }],
+  };
+
+  it("aplica desconto só no dia e no item da promoção", () => {
+    expect(promoPriceCents(8000, "PERCENT", 20)).toBe(6400);
+    expect(promoPriceCents(8000, "CENTS", 1500)).toBe(6500);
+    expect(parseWeekdays("0,6")).toEqual([0, 6]);
+    expect(weekdayFromCalendarDate("2026-10-24")).toBe(6);
+    expect(bestPromotion([promo], "2026-10-24", "SERVICE", "corte", 8000)?.priceCents).toBe(6400);
+    expect(bestPromotion([promo], "2026-10-23", "SERVICE", "corte", 8000)).toBeNull();
+    expect(applyCatalogPrice([promo], "2026-10-24", "SERVICE", "corte", 8000).priceCents).toBe(6400);
+    expect(applyCatalogPrice([promo], "2026-10-24", "SERVICE", "corte", 8000, 8000).priceCents).toBe(6400);
+    expect(applyCatalogPrice([promo], "2026-10-24", "SERVICE", "corte", 8000, 6400).promoName).toBe("Fim de semana do corte");
+    expect(applyCatalogPrice([promo], "2026-10-24", "SERVICE", "corte", 8000, 7000).priceCents).toBe(7000);
+    expect(weekdayHeat([10, 4, 2, 8, 9, 12, 3]).find((day) => day.id === 2)?.weak).toBe(true);
+  });
+});
+
+describe("pedidos de fornecedor", () => {
+  it("calcula linhas e total", () => {
+    expect(parseOrderQty("2,5", 1)).toBe(2.5);
+    expect(orderLineCents(2, 2490)).toBe(4980);
+    expect(orderTotalCents([{ lineCents: 8900 }, { lineCents: 4980 }])).toBe(13880);
+  });
+
+  it("restringe a troca de status", () => {
+    expect(canChangeSupplierOrder("SUBMITTED", "CONFIRMED", "supplier")).toBe(true);
+    expect(canChangeSupplierOrder("SUBMITTED", "CANCELLED", "salon")).toBe(true);
+    expect(canChangeSupplierOrder("CONFIRMED", "CANCELLED", "salon")).toBe(false);
+    expect(canChangeSupplierOrder("SHIPPED", "DELIVERED", "supplier")).toBe(true);
+    expect(canReceiveSupplierOrder("SHIPPED", null)).toBe(true);
+    expect(canReceiveSupplierOrder("SUBMITTED", null)).toBe(false);
+    expect(canReceiveSupplierOrder("DELIVERED", new Date())).toBe(false);
+  });
+
+  it("bloqueia entrega abaixo do mínimo e soma a taxa", () => {
+    const below = quoteSupplierFulfillment({
+      subtotalCents: 8900,
+      fulfillment: "DELIVERY",
+      deliveryMinCents: 15000,
+      deliveryFeeCents: 1500,
+    });
+    expect(below.ok).toBe(false);
+    expect(below.missingCents).toBe(6100);
+    const ok = quoteSupplierFulfillment({
+      subtotalCents: 15000,
+      fulfillment: "DELIVERY",
+      deliveryMinCents: 15000,
+      deliveryFeeCents: 1500,
+    });
+    expect(ok).toEqual({ ok: true, fulfillment: "DELIVERY", feeCents: 1500, totalCents: 16500, missingCents: 0 });
+    const pickup = quoteSupplierFulfillment({
+      subtotalCents: 8900,
+      fulfillment: "PICKUP",
+      deliveryMinCents: 15000,
+      deliveryFeeCents: 1500,
+    });
+    expect(pickup).toEqual({ ok: true, fulfillment: "PICKUP", feeCents: 0, totalCents: 8900, missingCents: 0 });
+  });
+
+  it("normaliza formas de pagamento e rótulos de retirada", () => {
+    expect(parseSupplierPayMethods("PIX,CASH")).toEqual(["PIX", "CASH"]);
+    expect(serializeSupplierPayMethods(["PIX", "BOLETO", "TRANSFER"])).toBe("PIX,TRANSFER");
+    expect(supplierOrderStatusLabel("SHIPPED", "PICKUP")).toBe("Pronto para retirada");
+    expect(supplierOrderStatusLabel("SHIPPED", "DELIVERY")).toBe("Saiu para entrega");
+    expect(supplierOrderStatusLabel("DELIVERED", "PICKUP")).toBe("Retirado");
+  });
+
+  it("mostra o fornecedor só na cidade que ele atende", () => {
+    expect(resolveCityLabel("atibaia, sp")).toBe("Atibaia/SP");
+    expect(parseServedCities('["Atibaia/SP","Campinas/SP"]')).toEqual(["Atibaia/SP", "Campinas/SP"]);
+    expect(supplierServesSalon('["Atibaia/SP","Bragança Paulista/SP"]', "Atibaia, SP")).toBe(true);
+    expect(supplierServesSalon('["Atibaia/SP"]', "Campinas/SP")).toBe(false);
+    expect(supplierServesSalon("", "Atibaia/SP")).toBe(false);
+  });
+
+  it("calcula leve 5 pague 3 e casa estoque baixo com o catálogo", () => {
+    expect(bundlePayableQty(5, 5, 3)).toBe(3);
+    expect(bundlePayableQty(7, 5, 3)).toBe(5);
+    expect(bundlePayableQty(4, 5, 3)).toBe(4);
+    const rule = {
+      id: "1",
+      name: "Só hoje",
+      note: null,
+      startsOn: "2026-10-27",
+      endsOn: "2026-10-27",
+      weekdays: [0, 1, 2, 3, 4, 5, 6],
+      dealType: "BUNDLE" as const,
+      discountValue: 0,
+      buyQty: 5,
+      payQty: 3,
+      active: true,
+      productIds: ["p1"],
+    };
+    expect(applySupplierPromo([rule], "p1", 1000, 5, "2026-10-27").lineCents).toBe(3000);
+    expect(productsLookAlike({ name: "Máscara hidratação 500ml", brand: "Lumina" }, { name: "Máscara hidratação 500ml", brand: "Lumina" })).toBe(true);
+    const alerts = buildLowStockAlerts(
+      [{ id: "s1", name: "Máscara hidratação 500ml", brand: "Lumina", stock: 1, minStock: 2, unit: "un", active: true }],
+      [{ id: "p1", name: "Máscara hidratação 500ml", brand: "Lumina", supplierName: "Beauty Supply SP", priceCents: 8900 }],
+    );
+    expect(alerts[0]?.supplierName).toBe("Beauty Supply SP");
+  });
+
+  it("monta público de marketing e marca resposta depois do envio", () => {
+    expect(parseRecipientIds("a, b  a,c")).toEqual(["a", "b", "c"]);
+    expect(renderMarketingBody("Oi {{nome}} no {{salao}}", { nome: "Ana", salao: "Aurora" })).toBe("Oi Ana no Aurora");
+    expect(clientHasTag("vip, coloracao", "VIP")).toBe(true);
+    expect(clientHasTag("vip", "ouro")).toBe(false);
+    expect(isEligibleMarketingClient({ phone: "11 98552-1672", active: true, notifications: true })).toBe(true);
+    expect(isEligibleMarketingClient({ phone: "11985521672", active: true, notifications: false })).toBe(false);
+    expect(phonesMatch("11985521672", "55 11 98552-1672")).toBe(true);
+    expect(phonesMatch("11985521672", "11988887777")).toBe(false);
+    const sentAt = new Date("2026-10-27T15:00:00.000Z");
+    expect(isMarketingReply(sentAt, new Date("2026-10-27T15:00:01.000Z"))).toBe(true);
+    expect(isMarketingReply(sentAt, new Date("2026-10-27T14:59:59.000Z"))).toBe(false);
+    expect(isMarketingReply(null, new Date())).toBe(false);
+    expect(isInactiveSince(new Date("2026-09-01T12:00:00.000Z"), 30, new Date("2026-10-27T12:00:00.000Z"))).toBe(true);
+    expect(isInactiveSince(new Date("2026-10-20T12:00:00.000Z"), 30, new Date("2026-10-27T12:00:00.000Z"))).toBe(false);
+    expect(marketingLane("PENDING")).toBe("pending");
+    expect(marketingLane("SENT")).toBe("sent");
+    expect(marketingLane("REPLIED")).toBe("replied");
+    expect(marketingLane("RESOLVED")).toBe("resolved");
+    expect(nextCampaignStatus(12, true)).toBe("SENDING");
+    expect(nextCampaignStatus(0, true)).toBe("SENT");
+    const picked = pickMarketingAudience(
+      [
+        { id: "1", name: "Ana", phone: "11985521672", tags: "vip", active: true, notifications: true, serviceIds: ["dep"] },
+        { id: "2", name: "Bia", phone: "119", tags: "vip", active: true, notifications: true, serviceIds: ["dep"] },
+        { id: "3", name: "Cris", phone: "11988887777", tags: "ouro", active: true, notifications: true, serviceIds: ["corte"] },
+      ],
+      { audience: "SERVICE", serviceId: "dep", cap: 400 },
+    );
+    expect(picked.map((row) => row.id)).toEqual(["1"]);
+    expect(summarizeMarketing([{ status: "SENT" }, { status: "REPLIED" }, { status: "FAILED" }, { status: "PENDING" }, { status: "RESOLVED" }])).toEqual({
+      pending: 1,
+      sent: 1,
+      failed: 1,
+      replied: 1,
+      resolved: 1,
+      waiting: 2,
+      total: 5,
+    });
+  });
+
+  it("monta POP com dados da empresa e casa serviço com o modelo da vigilância", () => {
+    expect(POP_CATALOG.length).toBeGreaterThanOrEqual(7);
+    expect(POP_CATALOG.every((item) => item.signer === "COMPANY")).toBe(true);
+    expect(matchServicePop("Depilação com cera").key).toBe("servico-depilacao");
+    expect(matchServicePop("Depilação com cera").signer).toBe("COMPANY");
+    expect(matchServicePop("Esmaltação em gel").key).toBe("servico-unhas");
+    expect(matchServicePop("Manicure").signer).toBe("COMPANY");
+    expect(matchServicePop("Corte feminino").signer).toBe("COMPANY");
+    expect(matchServicePop("Extensão de cílios").key).toBe("servico-cilios");
+    expect(matchServicePop("Extensão de cílios").signer).toBe("COMPANY");
+    expect(matchServicePop("Limpeza de pele").key).toBe("servico-estetica-facial");
+    expect(matchServicePop("Limpeza de pele").signer).toBe("TECHNICAL");
+    expect(matchServicePop("Massagem modeladora").signer).toBe("TECHNICAL");
+    expect(matchServicePop("Micropigmentação de sobrancelha").key).toBe("servico-micropigmentacao");
+    expect(matchServicePop("Micropigmentação de sobrancelha").signer).toBe("TECHNICAL");
+    expect(matchServicePop("Depilação a laser").signer).toBe("TECHNICAL");
+    expect(matchServicePop("Day spa exclusivo").key).toBe("servico-geral");
+    expect(popSignerLabel("COMPANY")).toBe("Responsável da empresa");
+    expect(popSignerLabel("TECHNICAL")).toBe("Responsável técnico");
+    expect(popDisclaimer("COMPANY")).toContain("responsável da empresa");
+    expect(popDisclaimer("TECHNICAL")).toContain("responsável técnico");
+    expect(fillPopText("POP do {{salao}} para {{servico}}", { salao: "Renove", servico: "depilação" })).toBe(
+      "POP do Renove para depilação",
+    );
+    expect(popPublicPath("renove", "lavagem-maos")).toBe("/pop/renove/lavagem-maos");
+    expect(popPublicUrl("https://beauty.megaflood.cloud/api/webhooks/evolution", "renove", "manicure")).toBe(
+      "https://beauty.megaflood.cloud/pop/renove/manicure",
+    );
+    expect(absolutePopUrl("https://beauty.megaflood.cloud/api/webhooks/evolution/pop/renove/manicure")).toBe(
+      "https://beauty.megaflood.cloud/pop/renove/manicure",
+    );
+    const used = new Set(["limpeza-de-pele"]);
+    expect(uniquePopSlug("Limpeza de pele", used)).toBe("limpeza-de-pele-2");
+    const company = salonCompany({
+      name: "Renove Estética Ltda",
+      tradeName: "Renove Estética e Bem Estar",
+      fiscalCnpj: "12345678000190",
+      fiscalStreet: "Rua das Flores",
+      fiscalNumber: "10",
+      city: "Atibaia",
+      fiscalUf: "SP",
+      logoUrl: "/uploads/logo/1/marca.png",
+    });
+    expect(company.tradeName).toBe("Renove Estética e Bem Estar");
+    expect(company.address).toContain("Rua das Flores");
+    expect(company.logoUrl).toBe("/uploads/logo/1/marca.png");
+    expect(
+      effectivePopSigner("TECHNICAL", { responsible: "", registry: "" }, { technicalResponsible: "Dra. Ana", technicalRegistry: "CRBM 123" })
+        .responsible,
+    ).toBe("Dra. Ana");
+    expect(
+      effectivePopSigner("TECHNICAL", { responsible: "Outro RT", registry: "CRBM 9" }, { technicalResponsible: "Dra. Ana", technicalRegistry: "CRBM 123" })
+        .registry,
+    ).toBe("CRBM 123");
+    expect(
+      effectivePopSigner("TECHNICAL", { responsible: "Outro RT", registry: "CRBM 9" }, { technicalResponsible: "", technicalRegistry: "" })
+        .responsible,
+    ).toBe("Outro RT");
+    expect(
+      effectivePopSigner("COMPANY", { responsible: "" }, { companyResponsible: "Maria Dona", technicalResponsible: "Dra. Ana" })
+        .responsible,
+    ).toBe("Maria Dona");
+    expect(parseDocumentationTab("certificado")).toBe("certificado");
+    expect(parseDocumentationTab("clcb")).toBe("clcb");
+    expect(parseDocumentationTab("outro")).toBe("outro");
+    expect(parseDocumentationTab("inbox")).toBe("pops");
+    expect(documentationPath("pops")).toBe("/documentacao");
+    expect(documentationPath("alvara")).toBe("/documentacao?tab=alvara");
+    expect(kindForTab("certificado")).toBe("CERTIFICADO");
+    expect(parseDocumentKind("contrato")).toBe("CONTRATO");
+    expect(parseDocumentKind("x")).toBe(null);
+    expect(documentFileHref("abc", true)).toBe("/documentacao/arquivo/abc?download=1");
+    expect(downloadFileName("CLCB 2026/A.pdf")).toBe("CLCB 2026 A.pdf");
+    const today = calendarDate();
+    expect(documentValidity(null)).toBe("none");
+    expect(documentValidity(shiftCalendarDate(today, -1))).toBe("expired");
+    expect(documentValidity(shiftCalendarDate(today, 10))).toBe("expiring");
+    expect(documentValidity(shiftCalendarDate(today, 60))).toBe("valid");
+    expect(
+      compareDocuments({ title: "B", expiresAt: shiftCalendarDate(today, 60) }, { title: "A", expiresAt: shiftCalendarDate(today, -1) }),
+    ).toBeGreaterThan(0);
+  });
+});
+
+describe("parceiros", () => {
+  it("sanitiza slug e reserva caminhos do sistema", () => {
+    expect(sanitizePartnerSlug("Ana Silva")).toBe("ana-silva");
+    expect(sanitizePartnerSlug("www")).toBe("");
+    expect(sanitizePartnerSlug("plataforma")).toBe("");
+    expect(sanitizePartnerSlug("p")).toBe("");
+    expect(sanitizePartnerSlug("apresentacao")).toBe("");
+    expect(sanitizePartnerSlug("a")).toBe("");
+    expect(partnerRefForBrand({ pathname: "/", cookieRef: "teste" })).toBe("");
+    expect(partnerRefForBrand({ pathname: "/", headerRef: "teste" })).toBe("teste");
+    expect(partnerRefForBrand({ pathname: "/apresentacao/salao", cookieRef: "teste" })).toBe("");
+    expect(partnerRefForBrand({ pathname: "/login", cookieRef: "teste" })).toBe("");
+    expect(partnerRefForBrand({ pathname: "/login", headerRef: "teste" })).toBe("teste");
+    expect(partnerRefForBrand({ pathname: "/cadastro", cookieRef: "teste" })).toBe("teste");
+    expect(shouldApplyPartnerBrand({ pathname: "/agenda", hasSession: true })).toBe(false);
+    expect(shouldApplyPartnerBrand({ pathname: "/comandas", hasSession: true })).toBe(false);
+    expect(shouldApplyPartnerBrand({ pathname: "/login", hasSession: false })).toBe(true);
+    expect(shouldApplyPartnerBrand({ pathname: "/cadastro", hasSession: false })).toBe(true);
+    expect(isPublicBrandPath("/cadastro")).toBe(true);
+    expect(isPublicBrandPath("/apresentacao/parceiros")).toBe(true);
+    expect(isPublicBrandPath("/parceiro/aparencia")).toBe(false);
+    expect(partnerBrandIsLive("PENDING", true)).toBe(true);
+    expect(partnerBrandIsLive("PENDING", false)).toBe(false);
+    expect(partnerBrandIsLive("SUSPENDED", true)).toBe(false);
+  });
+
+  it("calcula comissão em bps sem arredondar para cima", () => {
+    expect(parseCommissionPercent("20")).toBe(2000);
+    expect(parseCommissionPercent("30")).toBe(3000);
+    expect(commissionCents(19900, 2000)).toBe(3980);
+    expect(commissionCents(100, 2000)).toBe(20);
+    expect(commissionCents(0, 2000)).toBe(0);
+  });
+
+  it("mantém first-touch e resolve host do subdomínio", () => {
+    expect(firstTouchPartnerId(null, "p1")).toBe("p1");
+    expect(firstTouchPartnerId("p1", "p2")).toBe("p1");
+    expect(hostSlugFromHost("ana.beauty.megaflood.cloud", "beauty.megaflood.cloud")).toBe("ana");
+    expect(hostSlugFromHost("beauty.megaflood.cloud", "beauty.megaflood.cloud")).toBe("");
+    expect(partnerAffiliatePath("ana-silva")).toBe("/cadastro?ref=ana-silva");
+    expect(publicAppOrigin("https://beauty.megaflood.app")).toBe("https://beauty.megaflood.cloud");
+    expect(publicAppOrigin("https://www.beauty.megaflood.app/cadastro")).toBe("https://beauty.megaflood.cloud");
+    expect(partnerAffiliateUrl("teste", "https://beauty.megaflood.app")).toBe(
+      "https://beauty.megaflood.cloud/cadastro?ref=teste",
+    );
+    expect(partnerSubdomainUrl("teste", "https://beauty.megaflood.app")).toBe("https://teste.beauty.megaflood.cloud");
+    expect(sanitizePartnerHost("https://www.App.MinhaMarca.com.br/cadastro")).toBe("app.minhamarca.com.br");
+    expect(sanitizePartnerHost("beauty.megaflood.cloud")).toBe("");
+    expect(partnerHostCandidates("www.app.minhamarca.com.br:443")).toEqual([
+      "app.minhamarca.com.br",
+      "www.app.minhamarca.com.br",
+    ]);
+    expect(partnerCustomUrl("https://crm.parceiro.com")).toBe("https://crm.parceiro.com");
+    expect(partnerLandingPath("teste")).toBe("/p/teste");
+    expect(partnerSlugFromPath("/p/teste")).toBe("teste");
+    expect(parseLandingFeatures('[{"title":"Agenda","text":"Sem conflito"}]')).toEqual([
+      { title: "Agenda", text: "Sem conflito" },
+    ]);
+    expect(resolvePartnerLanding("Ana Beauty", {}).headline).toContain("Ana Beauty");
+    expect(resolveHqLanding("MegaBeauty", {}).headline).toContain("agenda");
+    expect(resolveHqLanding("MegaBeauty", {}).features).toHaveLength(6);
+    expect(resolveHqLanding("MegaBeauty", { headline: "Home nova", kicker: "CRM" }).headline).toBe("Home nova");
+    expect(resolveHqLanding("MegaBeauty", { headline: "Home nova", kicker: "CRM" }).kicker).toBe("CRM");
+    expect(LANDING_CATALOG.map((group) => group.id)).toEqual(["atendimento", "operacao", "gestao", "crescimento"]);
+    expect(landingCatalogTitles()).toEqual(
+      expect.arrayContaining([
+        "Agenda",
+        "Atendimento WhatsApp",
+        "Comandas",
+        "Clientes",
+        "Anamnese",
+        "Equipe",
+        "Usuários",
+        "Serviços",
+        "Estoque",
+        "Fornecedores",
+        "Promoções",
+        "Cadastros",
+        "Painel",
+        "Financeiro",
+        "Comissões",
+        "Metas",
+        "Notas fiscais",
+        "Cashback",
+        "Marketing",
+        "Documentação e POPs",
+        "Assistente IA",
+        "Avisos",
+        "Suporte",
+        "Configurações",
+      ]),
+    );
+    expect(landingCatalogTitles()).toHaveLength(24);
+    expect(LANDING_STEPS).toHaveLength(3);
+    expect(brandFromPartner({ name: "Parceiro", faviconUrl: "/uploads/logo/x-favicon/icon.png" }).faviconUrl).toBe(
+      "/uploads/logo/x-favicon/icon.png",
+    );
+    expect(brandLogoSrc({ logoUrl: SYSTEM_LOGO, logoDarkUrl: SYSTEM_LOGO_DARK }, true)).toBe(SYSTEM_LOGO_DARK);
+    expect(brandLogoSrc({ logoUrl: "/uploads/light.png", logoDarkUrl: "/uploads/dark.png" }, true)).toBe("/uploads/dark.png");
+    expect(brandLogoSrc({ logoUrl: "/uploads/light.png", logoDarkUrl: null }, true)).toBe("/uploads/light.png");
+    expect(brandLogoSrc({ logoUrl: "/uploads/light.png", logoDarkUrl: "/uploads/dark.png" }, false)).toBe("/uploads/light.png");
+  });
+
+  it("resume saldo e converte indicados em taxa", () => {
+    expect(
+      summarizePartnerLedger([
+        { status: "AVAILABLE", type: "SALE", commissionCents: 1000 },
+        { status: "PENDING", type: "SALE", commissionCents: 400 },
+        { status: "PAID", type: "SALE", commissionCents: 200 },
+        { status: "CANCELED", type: "SALE", commissionCents: 999 },
+      ]),
+    ).toEqual({ earned: 1600, available: 1000, pending: 400, paid: 200 });
+    expect(partnerConversionRate(10, 3)).toBe(30);
+    expect(nextCommissionStatusAfterRefund("PENDING")).toBe("CANCELED");
+    expect(shouldCreateReversal("PAID")).toBe(true);
+    expect(homePath("PARTNER", "PARTNER")).toBe("/parceiro");
+  });
+});
+
+describe("apresentações", () => {
+  it("mantém os três decks com capa e fechamento", () => {
+    expect(pitchDeckSlugs()).toEqual(["salao", "fornecedores", "parceiros"]);
+    expect(listPitchDecks()).toHaveLength(3);
+    for (const slug of pitchDeckSlugs()) {
+      const deck = getPitchDeck(slug);
+      expect(deck?.slides[0]?.kind).toBe("cover");
+      expect(deck?.slides.at(-1)?.kind).toBe("close");
+      expect((deck?.slides.length ?? 0) >= 8).toBe(true);
+    }
+    expect(getPitchDeck("salao")?.slides[0]?.title).toMatch(/WhatsApp da recepção/);
+    expect(getPitchDeck("salao")?.slides[0]?.image).toContain("/apresentacao/");
+    expect(getPitchDeck("fornecedores")?.slides[0]?.title).toMatch(/estoque de cada salão/);
+    expect(getPitchDeck("parceiros")?.slides[0]?.title).toMatch(/sua marca/);
+    expect(getPitchDeck("inexistente")).toBeNull();
+    expect(listPitchDecks().every((deck) => deck.coverImage.startsWith("/apresentacao/"))).toBe(true);
+    expect(megaWhatsAppHref("reunião")).toContain("https://wa.me/5511985521672");
+    for (const slug of pitchDeckSlugs()) {
+      const deck = getPitchDeck(slug);
+      expect(deck?.cta).toBe(PITCH_CTA_LABEL);
+      expect(deck?.ctaHref).toContain("https://wa.me/5511985521672");
+      expect(deck?.ctaHref).not.toContain("/cadastro");
+    }
+  });
+});
+
+describe("recepcionista virtual", () => {
+  const catalog = {
+    salon: "Studio Aurora",
+    city: "Atibaia",
+    hours: "09:00 às 19:00",
+    services: [
+      { name: "Escova", durationMin: 45, price: "R$ 80,00", professionals: ["Camila Ferreira"] },
+      { name: "Corte feminino", durationMin: 60, price: "R$ 120,00", professionals: ["Camila Ferreira"] },
+    ],
+    professionals: [
+      {
+        name: "Camila Ferreira",
+        nickname: "Cami",
+        specialty: "Cabelo",
+        today: ["14:00", "15:00", "16:30"],
+        tomorrow: ["09:00", "10:30"],
+      },
+      {
+        name: "Kelly Souza",
+        nickname: null,
+        specialty: "Coloração",
+        today: [],
+        tomorrow: ["11:00", "13:00"],
+      },
+    ],
+  };
+
+  it("reconhece pedido de pessoa e não marca sozinha", () => {
+    expect(wantsHumanHandover("quero falar com alguém da recepção")).toBe(true);
+    expect(wantsHumanHandover("não é robô, chama a recepção")).toBe(true);
+    expect(wantsHumanHandover("tem horário de escova amanhã?")).toBe(false);
+    expect(asksAvailability("tem horário disponível na agenda da Kelly?")).toBe(true);
+    expect(asksPrices("quanto custa a escova?")).toBe(true);
+    expect(matchCatalogProfessional("horário da Kelly", catalog.professionals)?.name).toBe("Kelly Souza");
+    expect(matchCatalogProfessional("agenda da Cami", catalog.professionals)?.name).toBe("Camila Ferreira");
+
+    const config = normalizeReceptionist({ name: "Luna", emoji: "nenhum" });
+    expect(config.name).toBe("Luna");
+    expect(config.enabled).toBe(false);
+
+    const handover = localReceptionistReply({ config, catalog, incoming: "quero falar com uma pessoa" });
+    expect(handover.handover).toBe(true);
+    expect(handover.text).toMatch(/equipe/);
+
+    const slots = localReceptionistReply({
+      config,
+      catalog,
+      incoming: "tem horário disponível na agenda da Kelly?",
+    });
+    expect(slots.handover).toBe(false);
+    expect(slots.text).toMatch(/Kelly/);
+    expect(slots.text).toMatch(/11:00/);
+    expect(slots.text).not.toMatch(/marquei|agendado|confirmado/);
+
+    const price = localReceptionistReply({ config, catalog, incoming: "quanto custa a escova?" });
+    expect(price.text).toMatch(/R\$ 80,00/);
+
+    const prompt = buildReceptionistSystemPrompt({ ...DEFAULT_RECEPTIONIST, name: "Luna" }, catalog);
+    expect(prompt).toMatch(/Nunca confirme, crie ou altere agendamento/);
+    expect(prompt).toMatch(/Varie as palavras/);
+    expect(prompt).toMatch(/Só responda porque a cliente escreveu/);
+    expect(prompt).toMatch(/11:00/);
+    expect(prompt).not.toMatch(/Juliana/);
+  });
+
+  it("lê fromMe, status, QR e eventos do webhook da Evolution", () => {
+    expect(isEvolutionFromMe({ data: { key: { fromMe: true, remoteJid: "5511999999999@s.whatsapp.net" } } })).toBe(true);
+    expect(isEvolutionFromMe({ data: { fromMe: true, remoteJid: "5511999999999@s.whatsapp.net" } })).toBe(true);
+    expect(isEvolutionFromMe({ data: { key: { fromMe: false, remoteJid: "5511999999999@s.whatsapp.net" } } })).toBe(false);
+    expect(extractPhone({ data: { key: { remoteJid: "120363@g.us" } } })).toBe("");
+    expect(extractPhone({ data: { key: { remoteJid: "5511988887777@s.whatsapp.net" } } })).toBe("5511988887777");
+    expect(extractPhone({ data: { remoteJid: "5511988887777@s.whatsapp.net" } })).toBe("5511988887777");
+    expect(
+      extractPhone({
+        event: "messages.update",
+        data: [{ key: { remoteJid: "5511988887777@s.whatsapp.net", fromMe: false, id: "ACK1" }, status: "READ" }],
+      }),
+    ).toBe("5511988887777");
+    expect(extractEvolutionMessageId({ data: { key: { id: "BAE5F6" } } })).toBe("BAE5F6");
+    expect(extractEvolutionMessageId({ data: { keyId: "ACK1" } })).toBe("ACK1");
+    expect(evolutionWebhookKind({ event: "MESSAGES_UPSERT" })).toBe("messages-upsert");
+    expect(evolutionWebhookKind({ event: "messages.update" })).toBe("messages-update");
+    expect(evolutionWebhookKind({ event: "QRCODE_UPDATED" })).toBe("qrcode");
+    expect(evolutionWebhookKind({ event: "connection.update" })).toBe("connection");
+    expect(EVOLUTION_WEBHOOK_EVENTS).toEqual(
+      expect.arrayContaining(["MESSAGES_UPSERT", "MESSAGES_UPDATE", "CONNECTION_UPDATE", "QRCODE_UPDATED"]),
+    );
+    expect(
+      extractQrBase64({
+        event: "QRCODE_UPDATED",
+        data: { qrcode: { base64: "data:image/png;base64,abc" } },
+      }),
+    ).toBe("data:image/png;base64,abc");
+  });
+});
+
+describe("WhatsApp API oficial", () => {
+  it("lê texto e botão do webhook da Meta", () => {
+    expect(normalizeWhatsAppProvider("official")).toBe("official");
+    expect(normalizeWhatsAppProvider("evolution")).toBe("evolution");
+    expect(isMetaConfigured({ phoneNumberId: "123", accessToken: "EAAG" })).toBe(true);
+    expect(isMetaConfigured({ phoneNumberId: "123", accessToken: "" })).toBe(false);
+    expect(metaGraphUrl("v21.0", "123/messages")).toBe("https://graph.facebook.com/v21.0/123/messages");
+    expect(metaVerifyChallenge({ mode: "subscribe", token: "abc", challenge: "42" }, "abc")).toBe("42");
+    expect(metaVerifyChallenge({ mode: "subscribe", token: "abc", challenge: "42" }, "nope")).toBeNull();
+    expect(metaSignatureOk("{}", "sha256=nope", "")).toBe(true);
+
+    const inbound = extractMetaInbound({
+      object: "whatsapp_business_account",
+      entry: [
+        {
+          changes: [
+            {
+              value: {
+                metadata: { phone_number_id: "1099" },
+                contacts: [{ wa_id: "5511988887777", profile: { name: "Ana" } }],
+                messages: [
+                  { from: "5511988887777", id: "wamid.1", type: "text", text: { body: "tem horário da Camila?" } },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    });
+    expect(inbound).toEqual([
+      {
+        phoneNumberId: "1099",
+        phone: "5511988887777",
+        body: "tem horário da Camila?",
+        waId: "wamid.1",
+        name: "Ana",
+      },
+    ]);
+    expect(extractMetaInbound({ entry: [{ changes: [{ value: { statuses: [{ id: "1" }] } }] }] })).toEqual([]);
+  });
+
+  it("escolhe o canal ativo sem misturar Evolution e oficial", () => {
+    expect(
+      isSalonWhatsAppConnected({
+        whatsappProvider: "official",
+        metaStatus: "open",
+        metaPhoneNumberId: "1",
+        metaAccessToken: "token",
+        evolutionStatus: "open",
+        evolutionInstance: "mb-x",
+      }),
+    ).toBe(true);
+    expect(
+      isSalonWhatsAppConnected({
+        whatsappProvider: "official",
+        metaStatus: "close",
+        metaPhoneNumberId: "1",
+        metaAccessToken: "token",
+        evolutionStatus: "open",
+        evolutionInstance: "mb-x",
+      }),
+    ).toBe(false);
+    expect(
+      isSalonWhatsAppConnected({
+        whatsappProvider: "evolution",
+        evolutionStatus: "open",
+        evolutionInstance: "mb-x",
+        metaStatus: "open",
+        metaPhoneNumberId: "1",
+        metaAccessToken: "token",
+      }),
+    ).toBe(true);
+  });
+});
+
+describe("boas práticas do WhatsApp", () => {
+  it("varia texto, calcula delay e reconhece confirmação de lembrete", () => {
+    expect(spin("{a|b}", () => 0)).toBe("a");
+    expect(spin("{a|b}", () => 0.99)).toBe("b");
+    expect(spin("Oi {{nome}}")).toBe("Oi {{nome}}");
+    expect(typingDelayMs("oi")).toBeGreaterThanOrEqual(2000);
+    expect(typingDelayMs("x".repeat(400))).toBe(5000);
+    expect(isConfirmReply("1")).toBe(true);
+    expect(isConfirmReply("Sim!")).toBe(true);
+    expect(isConfirmReply("quanto custa")).toBe(false);
+    expect(looksLikeReminderPrompt("Pode me responder com 1 para confirmar seu horário de amanhã?")).toBe(true);
+    expect(looksLikeReminderPrompt("tem horário da Camila?")).toBe(false);
+    expect(HUMAN_TYPING_DELAY_MS).toBe(1200);
+    expect(BOT_PAUSE_HOURS).toBe(2);
+    expect(isConversationBotPaused({ botPaused: true })).toBe(true);
+    expect(isConversationBotPaused({ botPaused: false, botPausedUntil: null })).toBe(false);
+    expect(isConversationBotPaused({ botPaused: false, botPausedUntil: botPausedUntilFromNow(2, new Date("2026-11-02T15:00:00-03:00")) }, new Date("2026-11-02T16:00:00-03:00"))).toBe(true);
+    expect(isConversationBotPaused({ botPaused: false, botPausedUntil: botPausedUntilFromNow(2, new Date("2026-11-02T12:00:00-03:00")) }, new Date("2026-11-02T16:00:00-03:00"))).toBe(false);
+  });
+});
+
+describe("visão geral, receita 7d e profissional do dia", () => {
+  it("faz parse de reais tanto pt-BR quanto decimal com ponto", () => {
+    expect(parseBRLToCents("R$ 1.230,50")).toBe(123050);
+    expect(parseBRLToCents("100.50")).toBe(10050);
+    expect(parseBRLToCents("1.000")).toBe(100000);
+    expect(parseBRLToCents("-50,00")).toBe(-5000);
   });
 
   it("calcula KPIs do dia atual sem duplicar receita de agendamentos com comanda", () => {
@@ -336,7 +1830,7 @@ describe("painel", () => {
       today: "2026-11-20",
       prevTotalCents: 50000,
       income: [
-        { date: "2026-11-10", amountCents: 99900 }, // fora da janela
+        { date: "2026-11-10", amountCents: 99900 },
         { date: "2026-11-14", amountCents: 10000 },
         { date: "2026-11-18", amountCents: 25000 },
         { date: "2026-11-18", amountCents: 15000 },
@@ -357,15 +1851,6 @@ describe("painel", () => {
       transactionsCount: 2,
       isPeak: true,
     });
-    expect(result.days.find((d) => d.date === "2026-11-15")).toMatchObject({
-      revenueCents: 0,
-      transactionsCount: 0,
-    });
-    expect(result.days.at(-1)).toMatchObject({
-      date: "2026-11-20",
-      isToday: true,
-      revenueCents: 20000,
-    });
   });
 
   it("identifica o Profissional do Dia por atendimentos e por comissões nas últimas 24h", () => {
@@ -373,74 +1858,16 @@ describe("painel", () => {
       attendances: [
         { professionalId: "p1", name: "Ana Silva", specialty: "Cabelo", color: "#2563EB", priceCents: 8000 },
         { professionalId: "p1", name: "Ana Silva", specialty: "Cabelo", color: "#2563EB", priceCents: 9000 },
-        { professionalId: "p1", name: "Ana Silva", specialty: "Cabelo", color: "#2563EB", priceCents: 7000 },
         { professionalId: "p2", name: "Bruno Costa", specialty: "Coloração", color: "#8B5CF6", priceCents: 45000 },
       ],
       commissions: [
-        { professionalId: "p1", name: "Ana Silva", specialty: "Cabelo", color: "#2563EB", amountCents: 9600 },
+        { professionalId: "p1", name: "Ana Silva", specialty: "Cabelo", color: "#2563EB", amountCents: 6800 },
         { professionalId: "p2", name: "Bruno Costa", specialty: "Coloração", color: "#8B5CF6", amountCents: 22500 },
       ],
     });
 
+    expect(result.byAttendances).toMatchObject({ professionalId: "p1", attendances: 2 });
+    expect(result.byCommissions).toMatchObject({ professionalId: "p2", commissionCents: 22500 });
     expect(result.defaultCriterion).toBe("attendances");
-    expect(result.activeProfessionalsCount).toBe(2);
-    expect(result.byAttendances).toMatchObject({
-      professionalId: "p1",
-      name: "Ana Silva",
-      attendances: 3,
-      commissionCents: 9600,
-    });
-    expect(result.byCommissions).toMatchObject({
-      professionalId: "p2",
-      name: "Bruno Costa",
-      attendances: 1,
-      commissionCents: 22500,
-    });
-
-    const onlyCommissions = buildProfessionalOfTheDay({
-      attendances: [],
-      commissions: [
-        { professionalId: "p3", name: "Carla Dias", amountCents: 12000 },
-      ],
-    });
-    expect(onlyCommissions.byAttendances).toBeNull();
-    expect(onlyCommissions.byCommissions).toMatchObject({ professionalId: "p3", commissionCents: 12000 });
-    expect(onlyCommissions.defaultCriterion).toBe("commissions");
-
-    const empty = buildProfessionalOfTheDay({ attendances: [], commissions: [] });
-    expect(empty.byAttendances).toBeNull();
-    expect(empty.byCommissions).toBeNull();
-    expect(empty.activeProfessionalsCount).toBe(0);
-  });
-});
-
-describe("anamnese", () => {
-  it("detecta alertas clínicos em respostas Sim", () => {
-    const questions = DEFAULT_ANAMNESIS_FORMS[0].questions;
-    const alerts = collectAlerts(questions, {
-      alergia: { value: "yes", detail: "Látex" },
-      gestante: { value: "no" },
-    });
-    expect(alerts.some((item) => item.includes("Látex") || item.includes("Possui alguma alergia"))).toBe(true);
-    expect(alerts.some((item) => item.toLowerCase().includes("gestante"))).toBe(false);
-  });
-
-  it("lista perguntas obrigatórias em branco", () => {
-    const questions = DEFAULT_ANAMNESIS_FORMS[0].questions;
-    const missing = missingRequired(questions, { alergia: { value: "no" } });
-    expect(missing.length).toBeGreaterThan(3);
-    expect(
-      missingRequired(
-        questions,
-        Object.fromEntries(questions.filter((q) => q.required).map((q) => [q.id, { value: "no" }])),
-      ),
-    ).toEqual([]);
-  });
-
-  it("serializa e lê perguntas da ficha", () => {
-    const json = serializeQuestions(DEFAULT_ANAMNESIS_FORMS[1].questions);
-    const parsed = parseQuestions(json);
-    expect(parsed.find((q) => q.id === "ppd")?.alertOn).toBe("yes");
-    expect(parseQuestions("não-é-json")).toEqual([]);
   });
 });

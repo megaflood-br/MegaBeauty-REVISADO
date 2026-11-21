@@ -18,14 +18,20 @@ export function ComandaBoard({
   services,
   products,
   paymentMethods = [],
+  canCreate = true,
+  canEdit = true,
+  hidePhones = false,
 }: {
   comandas: ComandaFormValue[];
   nextNumber: number;
   clients: { id: string; name: string; phone: string; creditCents: number; cashbackCents: number }[];
   professionals: { id: string; name: string }[];
-  services: { id: string; name: string; priceCents: number }[];
-  products: { id: string; name: string; priceCents: number }[];
+  services: { id: string; name: string; priceCents: number; promoPriceCents?: number | null; promoName?: string | null }[];
+  products: { id: string; name: string; priceCents: number; promoPriceCents?: number | null; promoName?: string | null }[];
   paymentMethods?: PaymentMethodOption[];
+  canCreate?: boolean;
+  canEdit?: boolean;
+  hidePhones?: boolean;
 }) {
   const [editing, setEditing] = useState<ComandaFormValue | null | undefined>(undefined);
   const [showOpen, setShowOpen] = useState(true);
@@ -56,10 +62,14 @@ export function ComandaBoard({
           <h1 className="font-display text-3xl">Comandas</h1>
           <CirclePlay size={16} className="text-ink-soft" />
         </div>
-        <Button type="button" onClick={() => setEditing(null)}>
-          <Plus size={16} />
-          Nova comanda
-        </Button>
+        {canCreate ? (
+          <Button type="button" onClick={() => setEditing(null)}>
+            <Plus size={16} />
+            Nova comanda
+          </Button>
+        ) : (
+          <p className="text-sm text-ink-soft">Consulta apenas. Abrir comanda fica com quem tem permissão.</p>
+        )}
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[240px_1fr]">
@@ -98,18 +108,18 @@ export function ComandaBoard({
           {visible.length === 0 ? (
             <p className="px-4 py-12 text-center text-sm text-ink-soft">Nenhuma comanda neste filtro.</p>
           ) : (
-            <>
-              <div className="grid grid-cols-[80px_1fr_120px_120px_110px] items-center gap-2 border-b border-line px-4 py-2.5 text-sm font-medium text-ink-soft">
+            <div className="overflow-x-auto">
+              <div className="grid min-w-[540px] grid-cols-[80px_1fr_120px_120px_110px] items-center gap-2 border-b border-line px-4 py-2.5 text-sm font-medium text-ink-soft">
                 <span>Ticket</span>
                 <span>Cliente</span>
                 <span>Status</span>
                 <span className="text-right">Total</span>
                 <span className="text-right">Data</span>
               </div>
-              <ul>
+              <ul className="min-w-[540px]">
                 {visible.map((c) => (
                   <li key={c.id} className="border-b border-line last:border-0">
-                    {c.status === "OPEN" ? (
+                    {c.status === "OPEN" && canEdit ? (
                       <button
                         type="button"
                         onClick={() => setEditing(c)}
@@ -128,12 +138,12 @@ export function ComandaBoard({
                   </li>
                 ))}
               </ul>
-            </>
+            </div>
           )}
         </div>
       </div>
 
-      {editing !== undefined ? (
+      {editing !== undefined && ((editing === null && canCreate) || (editing && canEdit)) ? (
         <ComandaDrawer
           key={editing?.id ?? "new"}
           open
@@ -144,6 +154,7 @@ export function ComandaBoard({
           services={services}
           products={products}
           paymentMethods={paymentMethods}
+          hidePhones={hidePhones}
           onClose={() => setEditing(undefined)}
         />
       ) : null}

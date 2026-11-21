@@ -1,10 +1,7 @@
 import { addDays } from "date-fns";
-import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { slugify } from "@/lib/utils";
 import { ensureFinanceCatalog } from "@/lib/finance-catalog";
-
-export type LedgerDb = Prisma.TransactionClient | typeof prisma;
 
 export function feeCents(amountCents: number, feeBps: number) {
   if (amountCents <= 0 || feeBps <= 0) return 0;
@@ -37,15 +34,7 @@ export function accountBalanceDelta(tx: { type: string; netCents: number; settle
 }
 
 export type AccountBalanceInput = {
-  accounts: {
-    id: string;
-    name: string;
-    details: string;
-    isDefault: boolean;
-    active: boolean;
-    sortOrder: number;
-    adminOnly?: boolean;
-  }[];
+  accounts: { id: string; name: string; details: string; isDefault: boolean; active: boolean; sortOrder: number }[];
   methods: { accountId: string; name: string; active: boolean }[];
   transactions: {
     accountId: string | null;
@@ -56,7 +45,6 @@ export type AccountBalanceInput = {
     feeCents?: number;
     organizational?: boolean;
   }[];
-  includeAdminOnly?: boolean;
 };
 
 export type AccountBalanceRow = {
@@ -72,7 +60,6 @@ export type AccountBalanceRow = {
 };
 
 export function summarizeAccountBalances(input: AccountBalanceInput): AccountBalanceRow[] {
-  const includeAdminOnly = input.includeAdminOnly ?? true;
   const linked = new Set(input.methods.filter((m) => m.active).map((m) => m.accountId));
   const methodsByAccount = new Map<string, string[]>();
   for (const method of input.methods) {
@@ -99,12 +86,7 @@ export function summarizeAccountBalances(input: AccountBalanceInput): AccountBal
   }
 
   return input.accounts
-    .filter(
-      (account) =>
-        account.active &&
-        (includeAdminOnly || !account.adminOnly) &&
-        (linked.has(account.id) || totals.has(account.id)),
-    )
+    .filter((account) => account.active && (linked.has(account.id) || totals.has(account.id)))
     .map((account) => {
       const row = totals.get(account.id) ?? { income: 0, expense: 0, settled: 0, pending: 0 };
       return {
@@ -140,15 +122,10 @@ export type LedgerEntryInput = {
   competenceAt?: Date | null;
 };
 
-export async function resolvePaymentMethod(
-  tenantId: string,
-  opts: { id?: string | null; code?: string | null },
-  db: LedgerDb = prisma,
-  skipEnsure = false,
-) {
-  if (!skipEnsure) await ensureFinanceCatalog(tenantId);
+export async function resolvePaymentMethod(tenantId: string, opts: { id?: string | null; code?: string | null }) {
+  await ensureFinanceCatalog(tenantId);
   if (opts.id) {
-    const byId = await db.paymentMethodConfig.findFirst({
+    const byId = await prisma.paymentMethodConfig.findFirst({
       where: { id: opts.id, tenantId, active: true },
       include: { account: true },
     });
@@ -156,74 +133,57 @@ export async function resolvePaymentMethod(
   }
   const code = (opts.code || "").trim();
   if (code) {
-    const byCode = await db.paymentMethodConfig.findFirst({
+    const byCode = await prisma.paymentMethodConfig.findFirst({
       where: { tenantId, active: true, code },
       include: { account: true },
       orderBy: [{ favorite: "desc" }, { sortOrder: "asc" }, { name: "asc" }],
     });
     if (byCode) return byCode;
   }
-  return db.paymentMethodConfig.findFirst({
+  return prisma.paymentMethodConfig.findFirst({
     where: { tenantId, active: true },
     include: { account: true },
     orderBy: [{ favorite: "desc" }, { sortOrder: "asc" }],
   });
 }
 
-export async function resolveAccount(
-  tenantId: string,
-  accountId?: string | null,
-  db: LedgerDb = prisma,
-  skipEnsure = false,
-) {
-  if (!skipEnsure) await ensureFinanceCatalog(tenantId);
+export async function resolveAccount(tenantId: string, accountId?: string | null) {
+  await ensureFinanceCatalog(tenantId);
   if (accountId) {
-    const found = await db.financeAccount.findFirst({
+    const found = await prisma.financeAccount.findFirst({
       where: { id: accountId, tenantId, active: true },
     });
     if (found) return found;
   }
   return (
-    (await db.financeAccount.findFirst({
+    (await prisma.financeAccount.findFirst({
       where: { tenantId, active: true, isDefault: true },
       orderBy: { sortOrder: "asc" },
     })) ??
-    db.financeAccount.findFirst({
+    prisma.financeAccount.findFirst({
       where: { tenantId, active: true },
       orderBy: { sortOrder: "asc" },
     })
   );
 }
 
-export async function resolveCategory(
-  tenantId: string,
-  slug: string,
-  type: "INCOME" | "EXPENSE",
-  db: LedgerDb = prisma,
-  skipEnsure = false,
-) {
-  if (!skipEnsure) await ensureFinanceCatalog(tenantId);
-  return db.financeCategory.findFirst({
+export async function resolveCategory(tenantId: string, slug: string, type: "INCOME" | "EXPENSE") {
+  await ensureFinanceCatalog(tenantId);
+  return prisma.financeCategory.findFirst({
     where: { tenantId, slug, type, active: true },
   });
 }
 
-async function resolveLedgerData(input: LedgerEntryInput, db: LedgerDb) {
-  if (input.amountCents <= 0) {
-    throw new Error("Valor do lançamento deve ser maior que zero.");
-  }
-  if (db === prisma) {
-    await ensureFinanceCatalog(input.tenantId);
-  }
+async function resolveLedgerData(input: LedgerEntryInput) {
   const organizational = Boolean(input.organizational);
   const occurredAt = input.occurredAt ?? new Date();
   const method = organizational
     ? null
-    : await resolvePaymentMethod(input.tenantId, { id: input.methodId, code: input.methodCode }, db, true);
+    : await resolvePaymentMethod(input.tenantId, { id: input.methodId, code: input.methodCode });
   const account = organizational
     ? null
-    : await resolveAccount(input.tenantId, input.accountId || method?.accountId, db, true);
-  const category = await resolveCategory(input.tenantId, input.category, input.type, db, true);
+    : await resolveAccount(input.tenantId, input.accountId || method?.accountId);
+  const category = await resolveCategory(input.tenantId, input.category, input.type);
   const feeBps = input.type === "INCOME" ? (method?.feeBps ?? 0) : 0;
   const fee = feeCents(input.amountCents, feeBps);
   const net = netAmountCents(input.amountCents, feeBps);
@@ -255,26 +215,23 @@ async function resolveLedgerData(input: LedgerEntryInput, db: LedgerDb) {
   };
 }
 
-export async function postLedgerEntry(input: LedgerEntryInput, db: LedgerDb = prisma) {
-  const data = await resolveLedgerData(input, db);
-  return db.transaction.create({
+export async function postLedgerEntry(input: LedgerEntryInput) {
+  const data = await resolveLedgerData(input);
+  return prisma.transaction.create({
     data: { tenantId: input.tenantId, ...data },
   });
 }
 
-export async function updateLedgerEntry(id: string, input: LedgerEntryInput, db: LedgerDb = prisma) {
-  const existing = await db.transaction.findFirst({
+export async function updateLedgerEntry(id: string, input: LedgerEntryInput) {
+  const existing = await prisma.transaction.findFirst({
     where: { id, tenantId: input.tenantId },
     select: { id: true, appointmentId: true, comandaId: true },
   });
   if (!existing) return null;
-  const data = await resolveLedgerData(
-    {
-      ...input,
-      appointmentId: input.appointmentId ?? existing.appointmentId,
-      comandaId: input.comandaId ?? existing.comandaId,
-    },
-    db,
-  );
-  return db.transaction.update({ where: { id }, data });
+  const data = await resolveLedgerData({
+    ...input,
+    appointmentId: input.appointmentId ?? existing.appointmentId,
+    comandaId: input.comandaId ?? existing.comandaId,
+  });
+  return prisma.transaction.update({ where: { id }, data });
 }

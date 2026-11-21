@@ -6,8 +6,10 @@ import { useRouter } from "next/navigation";
 import { AlertTriangle, CirclePlay, Pencil, Plus } from "lucide-react";
 import { Badge, Button, Input } from "@/components/ui";
 import { AnamnesisDrawer } from "@/components/anamneses/anamnesis-drawer";
+import { AnamnesisDocument, ViewAnamnesisButton } from "@/components/anamneses/anamnesis-document";
 import { AnamnesisFormDrawer } from "@/components/anamneses/form-drawer";
 import { deleteAnamnesisForm } from "@/app/actions/anamnesis";
+import { useConfirm } from "@/components/confirm-dialog";
 import {
   ANAMNESIS_AREA_LABEL,
   ANAMNESIS_STATUS_COLOR,
@@ -15,7 +17,7 @@ import {
   type AnamnesisStatus,
 } from "@/lib/anamnesis";
 import { formatMediumDate, zonedDateTime } from "@/lib/dates";
-import { cn, formatPhoneBR } from "@/lib/utils";
+import { cn, displayPhoneBR } from "@/lib/utils";
 import type { AnamnesisFormRow, AnamnesisRow } from "@/components/anamneses/types";
 
 type Tab = "registros" | "fichas";
@@ -25,18 +27,32 @@ export function AnamnesisBoard({
   forms,
   clients,
   professionals,
+  salonName,
+  scoped = false,
+  hidePhones = false,
+  canCreate = true,
+  canEdit = true,
+  canManageForms = true,
 }: {
   records: AnamnesisRow[];
   forms: AnamnesisFormRow[];
   clients: { id: string; name: string; phone: string }[];
   professionals: { id: string; name: string }[];
+  salonName?: string;
+  scoped?: boolean;
+  hidePhones?: boolean;
+  canCreate?: boolean;
+  canEdit?: boolean;
+  canManageForms?: boolean;
 }) {
   const router = useRouter();
+  const confirm = useConfirm();
   const [tab, setTab] = useState<Tab>("registros");
   const [query, setQuery] = useState("");
   const [showDraft, setShowDraft] = useState(true);
   const [showDone, setShowDone] = useState(true);
   const [editing, setEditing] = useState<AnamnesisRow | null | undefined>(undefined);
+  const [viewing, setViewing] = useState<AnamnesisRow | null>(null);
   const [editingForm, setEditingForm] = useState<AnamnesisFormRow | null | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
 
@@ -56,7 +72,10 @@ export function AnamnesisBoard({
     [q, records, showDone, showDraft],
   );
 
-  async function removeForm(id: string) {
+  async function removeForm(id: string, name: string) {
+    if (!(await confirm({ title: `Excluir a ficha ${name}?`, description: "Só é possível excluir fichas que ainda não têm anamneses preenchidas." }))) {
+      return;
+    }
     setError(null);
     const fd = new FormData();
     fd.set("id", id);
@@ -76,19 +95,25 @@ export function AnamnesisBoard({
             <h1 className="font-display text-3xl">Anamnese</h1>
             <CirclePlay size={16} className="text-ink-soft" />
           </div>
-          <p className="mt-1 text-sm text-ink-soft">Fichas de saúde vinculadas a cada cliente.</p>
+          <p className="mt-1 text-sm text-ink-soft">
+            {scoped
+              ? "Só as fichas dos serviços que você atende. Manicure não vê anamnese de estética, e o contrário também."
+              : "Fichas de saúde vinculadas a cada cliente."}
+          </p>
         </div>
-        <Button type="button" onClick={() => (tab === "fichas" ? setEditingForm(null) : setEditing(null))}>
-          <Plus size={16} />
-          {tab === "fichas" ? "Nova ficha" : "Nova anamnese"}
-        </Button>
+        {(tab === "fichas" ? canManageForms : canCreate) ? (
+          <Button type="button" onClick={() => (tab === "fichas" ? setEditingForm(null) : setEditing(null))}>
+            <Plus size={16} />
+            {tab === "fichas" ? "Nova ficha" : "Nova anamnese"}
+          </Button>
+        ) : null}
       </div>
 
       <div className="flex gap-2">
         {(
           [
             ["registros", "Preenchidas"],
-            ["fichas", "Modelos"],
+            ...(canManageForms ? ([["fichas", "Modelos"]] as const) : []),
           ] as const
         ).map(([id, label]) => (
           <button
@@ -134,7 +159,8 @@ export function AnamnesisBoard({
                     <th className="font-medium">Ficha</th>
                     <th className="font-medium">Profissional</th>
                     <th className="font-medium">Data</th>
-                    <th className="px-4 font-medium">Status</th>
+                    <th className="font-medium">Status</th>
+                    <th className="px-4 font-medium text-right">Ações</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -144,10 +170,14 @@ export function AnamnesisBoard({
                         <Link href={`/clientes/${row.clientId}?tab=anamneses`} className="font-medium text-wine">
                           {row.clientName}
                         </Link>
-                        <div className="text-xs text-ink-soft">{formatPhoneBR(row.clientPhone)}</div>
+                        <div className="text-xs text-ink-soft">{displayPhoneBR(row.clientPhone, hidePhones)}</div>
                       </td>
                       <td>
-                        <button type="button" className="text-left font-medium hover:text-wine" onClick={() => setEditing(row)}>
+                        <button
+                          type="button"
+                          className="text-left font-medium hover:text-wine"
+                          onClick={() => (row.status === "COMPLETED" ? setViewing(row) : setEditing(row))}
+                        >
                           {row.formName}
                         </button>
                         <div className="text-xs text-ink-soft">{ANAMNESIS_AREA_LABEL[row.formArea]}</div>
@@ -160,10 +190,25 @@ export function AnamnesisBoard({
                       </td>
                       <td>{row.professionalName ?? "—"}</td>
                       <td>{formatMediumDate(zonedDateTime(row.occurredAt, "12:00"))}</td>
-                      <td className="px-4">
+                      <td>
                         <Badge color={ANAMNESIS_STATUS_COLOR[row.status as AnamnesisStatus]}>
                           {ANAMNESIS_STATUS_LABEL[row.status as AnamnesisStatus]}
                         </Badge>
+                      </td>
+                      <td className="px-4 text-right">
+                        <div className="flex flex-wrap justify-end gap-3">
+                          <ViewAnamnesisButton onClick={() => setViewing(row)} />
+                          {canCreate || canEdit ? (
+                            <button
+                              type="button"
+                              className="inline-flex items-center gap-1 text-sm font-medium text-ink-soft hover:text-ink"
+                              onClick={() => setEditing(row)}
+                            >
+                              <Pencil size={14} />
+                              Editar
+                            </button>
+                          ) : null}
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -193,7 +238,7 @@ export function AnamnesisBoard({
                   <Pencil size={14} />
                   Editar
                 </Button>
-                <Button type="button" variant="ghost" className="text-red-600" onClick={() => removeForm(form.id)}>
+                <Button type="button" variant="ghost" className="text-red-600" onClick={() => removeForm(form.id, form.name)}>
                   Excluir
                 </Button>
               </div>
@@ -202,6 +247,23 @@ export function AnamnesisBoard({
         </div>
       )}
 
+      {viewing ? (
+        <AnamnesisDocument
+          record={viewing}
+          form={forms.find((form) => form.id === viewing.formId) ?? null}
+          salonName={salonName}
+          hidePhones={hidePhones}
+          onClose={() => setViewing(null)}
+          onEdit={
+            canCreate || canEdit
+              ? () => {
+                  setEditing(viewing);
+                  setViewing(null);
+                }
+              : undefined
+          }
+        />
+      ) : null}
       {editing !== undefined ? (
         <AnamnesisDrawer
           open
@@ -209,6 +271,15 @@ export function AnamnesisBoard({
           forms={forms}
           clients={clients}
           professionals={professionals}
+          hidePhones={hidePhones}
+          onView={
+            editing
+              ? () => {
+                  setViewing(editing);
+                  setEditing(undefined);
+                }
+              : undefined
+          }
           onClose={() => setEditing(undefined)}
         />
       ) : null}

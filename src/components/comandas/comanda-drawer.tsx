@@ -10,6 +10,7 @@ import { formatBRL, parseBRLToCents } from "@/lib/money";
 import { comandaTotal, itemLineTotal } from "@/lib/comandas";
 import { calendarDate } from "@/lib/dates";
 import { PaymentDrawer } from "@/components/comandas/payment-drawer";
+import { useConfirm } from "@/components/confirm-dialog";
 import type { ComandaFormValue, ComandaItemDraft, PaymentDraft, PaymentMethodOption } from "@/components/comandas/types";
 
 function centsToInput(cents: number) {
@@ -55,6 +56,7 @@ export function ComandaDrawer({
   services,
   products,
   paymentMethods = [],
+  hidePhones = false,
   onClose,
 }: {
   open: boolean;
@@ -62,12 +64,14 @@ export function ComandaDrawer({
   nextNumber: number;
   clients: { id: string; name: string; phone: string; creditCents: number; cashbackCents: number }[];
   professionals: { id: string; name: string }[];
-  services: { id: string; name: string; priceCents: number }[];
-  products: { id: string; name: string; priceCents: number }[];
+  services: { id: string; name: string; priceCents: number; promoPriceCents?: number | null; promoName?: string | null }[];
+  products: { id: string; name: string; priceCents: number; promoPriceCents?: number | null; promoName?: string | null }[];
   paymentMethods?: PaymentMethodOption[];
+  hidePhones?: boolean;
   onClose: () => void;
 }) {
   const router = useRouter();
+  const confirm = useConfirm();
   const formRef = useRef<HTMLFormElement>(null);
   const defaultPro = comanda?.professionalId ?? professionals[0]?.id ?? "";
   const [error, setError] = useState<string | null>(null);
@@ -87,15 +91,15 @@ export function ComandaDrawer({
       ...services.map((s) => ({
         value: `SERVICE:${s.id}`,
         label: s.name,
-        hint: formatBRL(s.priceCents),
-        priceCents: s.priceCents,
+        hint: s.promoPriceCents != null ? `${formatBRL(s.promoPriceCents)} na ${s.promoName}` : formatBRL(s.priceCents),
+        priceCents: s.promoPriceCents ?? s.priceCents,
         type: "SERVICE" as const,
       })),
       ...products.map((p) => ({
         value: `PRODUCT:${p.id}`,
         label: p.name,
-        hint: `Produto · ${formatBRL(p.priceCents)}`,
-        priceCents: p.priceCents,
+        hint: p.promoPriceCents != null ? `Produto · ${formatBRL(p.promoPriceCents)} na ${p.promoName}` : `Produto · ${formatBRL(p.priceCents)}`,
+        priceCents: p.promoPriceCents ?? p.priceCents,
         type: "PRODUCT" as const,
       })),
     ],
@@ -206,7 +210,8 @@ export function ComandaDrawer({
     setItems((rows) => rows.map((row) => (row.key === key ? { ...row, ...patch } : row)));
   }
 
-  function removeItem(key: string) {
+  async function removeItem(key: string) {
+    if (!(await confirm({ title: "Remover este item da comanda?", confirmLabel: "Remover" }))) return;
     setMenuKey(null);
     setItems((rows) => (rows.length === 1 ? [emptyItem(defaultPro)] : rows.filter((row) => row.key !== key)));
   }
@@ -232,7 +237,7 @@ export function ComandaDrawer({
                   placeholder="Busque por um cliente"
                   value={clientId}
                   onChange={setClientId}
-                  options={clients.map((c) => ({ value: c.id, label: c.name, hint: c.phone }))}
+                  options={clients.map((c) => ({ value: c.id, label: c.name, hint: hidePhones ? undefined : c.phone }))}
                 />
               </Field>
               <Field label="Data">
@@ -345,7 +350,7 @@ export function ComandaDrawer({
                               <button
                                 type="button"
                                 className="block w-full px-3 py-1.5 text-left text-sm text-red-600 hover:bg-sand"
-                                onClick={() => removeItem(item.key)}
+                                onClick={() => void removeItem(item.key)}
                               >
                                 Remover
                               </button>

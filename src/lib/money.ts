@@ -6,10 +6,9 @@ export function formatBRL(cents: number) {
 }
 
 export function parseBRLToCents(value: string) {
-  const cleaned = value.replace(/[^\d,.-]/g, "").trim();
+  const cleaned = value.replace(/[^\d,.-]/g, "");
   if (!cleaned) return 0;
-
-  let normalized = cleaned;
+  let normalized: string;
   if (cleaned.includes(",")) {
     normalized = cleaned.replace(/\./g, "").replace(",", ".");
   } else if (/^-?\d+\.\d{1,2}$/.test(cleaned)) {
@@ -17,8 +16,7 @@ export function parseBRLToCents(value: string) {
   } else {
     normalized = cleaned.replace(/\./g, "");
   }
-
   const amount = Number.parseFloat(normalized);
-  if (!Number.isFinite(amount)) return 0;
+  if (Number.isNaN(amount)) return 0;
   return Math.round(amount * 100);
 }

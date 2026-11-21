@@ -3,39 +3,44 @@
 import { useState } from "react";
 import Link from "next/link";
 import { loginAction } from "@/app/actions/auth";
+import { BrandMark } from "@/components/brand-mark";
+import { useBrand } from "@/components/branding-provider";
 import { Button, Field, Input } from "@/components/ui";
 
 export default function LoginPage() {
   const [error, setError] = useState<string | null>(null);
+  const { name } = useBrand();
 
   return (
     <main className="grid min-h-screen lg:grid-cols-2">
       <section className="hidden bg-slate-950 p-12 text-white lg:flex lg:flex-col lg:justify-between">
-        <div className="text-2xl font-semibold tracking-tight">
-          Mega<span className="text-blue-400">Beauty</span>
-        </div>
-        <div>
-          <h1 className="font-display text-5xl leading-tight">A agenda do salão, sem planilha e sem caos.</h1>
-          <p className="mt-4 max-w-md text-slate-300">
-            CRM, comissões, estoque, WhatsApp e IA no mesmo lugar — multi-tenant, em TypeScript.
+        <BrandMark onDark imgClassName="h-auto w-full max-w-2xl object-contain object-left" />
+        <div className="max-w-2xl">
+          <h1 className="font-display text-5xl leading-tight">O sistema do seu salão, do horário ao caixa.</h1>
+          <p className="mt-4 text-slate-300">
+            Agenda, comandas, comissões, estoque e WhatsApp no mesmo lugar — feito para donos de salão, não para planilha.
           </p>
         </div>
-        <p className="text-sm text-slate-400">Demo: iris.p@example.org / demo1234</p>
+        <p className="text-sm text-slate-400">Ainda não é cliente? Abra sua conta no {name} e comece hoje.</p>
       </section>
-      <section className="flex items-center justify-center bg-cream p-8">
+      <section className="flex min-h-dvh items-center justify-center bg-cream p-6 pt-[max(2rem,env(safe-area-inset-top))] lg:min-h-0 lg:p-8">
         <form
           className="w-full max-w-sm space-y-4"
+
           action={async (formData) => {
             const result = await loginAction(formData);
             if (result?.error) setError(result.error);
           }}
         >
+          <div className="lg:hidden">
+            <BrandMark imgClassName="h-16 max-w-[20rem]" />
+          </div>
           <h2 className="font-display text-3xl">Entrar</h2>
           <Field label="E-mail">
-            <Input name="email" type="email" defaultValue="iris.p@example.org" required />
+            <Input name="email" type="email" autoComplete="email" required />
           </Field>
           <Field label="Senha">
-            <Input name="password" type="password" defaultValue="demo1234" required />
+            <Input name="password" type="password" autoComplete="current-password" required />
           </Field>
           {error ? <p className="text-sm text-warn">{error}</p> : null}
           <Button className="w-full">Acessar painel</Button>

@@ -1,0 +1,230 @@
+"use client";
+
+import { useRef, useState } from "react";
+import { ImageIcon } from "lucide-react";
+import { savePlatformBrand } from "@/app/actions/platform-brand";
+import { Button, Card, Field, Input } from "@/components/ui";
+import { readBrandLogo } from "@/lib/product-photo";
+import { SYSTEM_FAVICON, SYSTEM_LOGO, SYSTEM_LOGO_DARK, SYSTEM_PRIMARY } from "@/lib/branding";
+import { useRouter } from "next/navigation";
+
+export function AppearanceBoard({
+  logoUrl,
+  logoDarkUrl,
+  faviconUrl,
+  primary,
+}: {
+  logoUrl: string;
+  logoDarkUrl: string;
+  faviconUrl: string;
+  primary: string;
+}) {
+  const router = useRouter();
+  const fileRef = useRef<HTMLInputElement>(null);
+  const darkRef = useRef<HTMLInputElement>(null);
+  const iconRef = useRef<HTMLInputElement>(null);
+  const [url, setUrl] = useState(logoUrl || SYSTEM_LOGO);
+  const [darkUrl, setDarkUrl] = useState(logoDarkUrl || SYSTEM_LOGO_DARK);
+  const [icon, setIcon] = useState(faviconUrl || "");
+  const [color, setColor] = useState(primary || SYSTEM_PRIMARY);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function onSave(formData: FormData) {
+    setBusy(true);
+    setError(null);
+    formData.set("logoUrl", url);
+    formData.set("logoDarkUrl", darkUrl);
+    formData.set("faviconUrl", icon);
+    formData.set("accentColor", color);
+    await savePlatformBrand(formData);
+    setBusy(false);
+    router.refresh();
+  }
+
+  return (
+    <div className="max-w-2xl space-y-4">
+      <div>
+        <h1 className="font-display text-3xl">Aparência</h1>
+        <p className="mt-1 text-sm text-ink-soft">
+          Logo, favicon, cor e landing da home oficial. A identidade de cada salão continua nas configurações da empresa.
+        </p>
+      </div>
+
+      <Card>
+        <form
+          className="grid gap-5"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void onSave(new FormData(event.currentTarget));
+          }}
+        >
+          <Field label="Logo para fundo claro">
+            <input type="hidden" name="logoUrl" value={url} />
+            <div className="flex flex-wrap items-center gap-4">
+              <div className="flex items-center rounded-lg bg-white px-3 py-3 ring-1 ring-line">
+                {url ? <img src={url} alt="" className="h-16 w-auto max-w-[18rem] object-contain" /> : <ImageIcon size={22} className="text-slate-400" />}
+              </div>
+              <div className="space-y-2">
+                <input
+                  ref={fileRef}
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp,image/*"
+                  className="hidden"
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (!file) return;
+                    void readBrandLogo(file)
+                      .then((next) => {
+                        setError(null);
+                        setUrl(next);
+                      })
+                      .catch((err: Error) => setError(err.message));
+                  }}
+                />
+                <div className="flex gap-2">
+                  <Button type="button" variant="outline" className="h-8 px-3 text-xs" onClick={() => fileRef.current?.click()}>
+                    {url && url !== SYSTEM_LOGO ? "Trocar" : "Enviar"}
+                  </Button>
+                  {url && url !== SYSTEM_LOGO ? (
+                    <Button type="button" variant="ghost" className="h-8 px-3 text-xs" onClick={() => setUrl(SYSTEM_LOGO)}>
+                      Padrão
+                    </Button>
+                  ) : null}
+                </div>
+                <p className="text-xs text-ink-soft">Home, cadastro e telas claras. PNG transparente.</p>
+              </div>
+            </div>
+          </Field>
+
+          <Field label="Logo para fundo escuro">
+            <input type="hidden" name="logoDarkUrl" value={darkUrl} />
+            <div className="flex flex-wrap items-center gap-4">
+              <div className="flex items-center rounded-lg bg-slate-950 px-3 py-3">
+                {darkUrl ? <img src={darkUrl} alt="" className="h-16 w-auto max-w-[18rem] object-contain" /> : <ImageIcon size={22} className="text-slate-400" />}
+              </div>
+              <div className="space-y-2">
+                <input
+                  ref={darkRef}
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp,image/*"
+                  className="hidden"
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (!file) return;
+                    void readBrandLogo(file)
+                      .then((next) => {
+                        setError(null);
+                        setDarkUrl(next);
+                      })
+                      .catch((err: Error) => setError(err.message));
+                  }}
+                />
+                <div className="flex gap-2">
+                  <Button type="button" variant="outline" className="h-8 px-3 text-xs" onClick={() => darkRef.current?.click()}>
+                    {darkUrl && darkUrl !== SYSTEM_LOGO_DARK ? "Trocar" : "Enviar"}
+                  </Button>
+                  {darkUrl && darkUrl !== SYSTEM_LOGO_DARK ? (
+                    <Button type="button" variant="ghost" className="h-8 px-3 text-xs" onClick={() => setDarkUrl(SYSTEM_LOGO_DARK)}>
+                      Padrão
+                    </Button>
+                  ) : null}
+                </div>
+                <p className="text-xs text-ink-soft">Login e menu. PNG claro ou branco, fundo transparente.</p>
+              </div>
+            </div>
+          </Field>
+
+          <Field label="Favicon">
+            <input type="hidden" name="faviconUrl" value={icon} />
+            <div className="flex flex-wrap items-center gap-4">
+              <div className="flex h-16 w-16 items-center justify-center rounded-lg bg-white ring-1 ring-line">
+                {icon ? (
+                  <img src={icon} alt="" className="h-10 w-10 object-contain" />
+                ) : (
+                  <img src={SYSTEM_FAVICON} alt="" className="h-10 w-10 object-contain opacity-60" />
+                )}
+              </div>
+              <div className="space-y-2">
+                <input
+                  ref={iconRef}
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp,image/*"
+                  className="hidden"
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (!file) return;
+                    void readBrandLogo(file)
+                      .then((next) => {
+                        setError(null);
+                        setIcon(next);
+                      })
+                      .catch((err: Error) => setError(err.message));
+                  }}
+                />
+                <div className="flex gap-2">
+                  <Button type="button" variant="outline" className="h-8 px-3 text-xs" onClick={() => iconRef.current?.click()}>
+                    {icon ? "Trocar" : "Enviar favicon"}
+                  </Button>
+                  {icon ? (
+                    <Button type="button" variant="ghost" className="h-8 px-3 text-xs" onClick={() => setIcon("")}>
+                      Padrão
+                    </Button>
+                  ) : null}
+                </div>
+                <p className="text-xs text-ink-soft">Ícone da aba do navegador. PNG quadrado, de preferência 192×192 ou 512×512.</p>
+              </div>
+            </div>
+          </Field>
+
+          <Field label="Cor primária">
+            <div className="flex flex-wrap items-center gap-3">
+              <input
+                type="color"
+                value={color}
+                onChange={(event) => setColor(event.target.value)}
+                className="h-11 w-14 cursor-pointer rounded-lg border border-line bg-paper p-1"
+                aria-label="Cor primária"
+              />
+              <Input
+                value={color}
+                onChange={(event) => setColor(event.target.value)}
+                className="max-w-40 font-mono uppercase"
+              />
+              <Button type="button" variant="ghost" className="h-8 px-3 text-xs" onClick={() => setColor(SYSTEM_PRIMARY)}>
+                Restaurar #FF0447
+              </Button>
+            </div>
+            <p className="text-xs text-ink-soft">Botões, links, item ativo do menu e destaques do layout.</p>
+          </Field>
+
+          <div className="rounded-xl border border-line bg-sand/60 p-4">
+            <p className="text-xs font-medium text-ink-soft uppercase tracking-wide">Prévia</p>
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <div className="flex items-center bg-white px-3 py-3 ring-1 ring-line">
+                {url ? <img src={url} alt="" className="h-12 w-auto max-w-[12rem] object-contain" /> : null}
+              </div>
+              <div className="flex items-center bg-slate-950 px-3 py-3">
+                {darkUrl ? <img src={darkUrl} alt="" className="h-12 w-auto max-w-[12rem] object-contain" /> : null}
+              </div>
+              <span className="inline-flex rounded-lg px-4 py-2 text-sm font-medium text-white" style={{ background: color }}>
+                Botão primário
+              </span>
+              <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-white ring-1 ring-line">
+                <img src={icon || SYSTEM_FAVICON} alt="" className="h-6 w-6 object-contain" />
+              </span>
+              <span className="text-sm font-medium" style={{ color }}>
+                Link de exemplo
+              </span>
+            </div>
+          </div>
+
+          {error ? <p className="text-sm text-warn">{error}</p> : null}
+          <Button type="submit" disabled={busy}>
+            {busy ? "Salvando..." : "Salvar aparência"}
+          </Button>
+        </form>
+      </Card>
+    </div>
+  );
+}

@@ -1,12 +1,11 @@
-import { subDays } from "date-fns";
 import { prisma } from "@/lib/db";
 import { requireTenant } from "@/lib/tenant";
-import { canSeeFinance } from "@/lib/auth";
 import { calendarDate, shiftCalendarDate } from "@/lib/dates";
 import { availableCommission, consumedProductCents } from "@/lib/commissions";
 import { CommissionBoard } from "@/components/comissoes/commission-board";
 import type { CommissionRow } from "@/components/comissoes/types";
 import { loadFinanceCatalog } from "@/lib/finance-catalog";
+import { canManageCommissions, canViewAllCommissions } from "@/lib/permissions";
 
 type ProductUsage = { quantity: number; product: { costCents: number } };
 
@@ -15,36 +14,17 @@ function usagesCost(usages: ProductUsage[]) {
 }
 
 export default async function ComissoesPage() {
-  const { session } = await requireTenant();
-  const isFinanceManager = canSeeFinance(session.role);
-  let restrictedProfessionalId: string | null = null;
-
-  if (!isFinanceManager) {
-    const user = await prisma.user.findUnique({
-      where: { id: session.userId },
-      select: { professionalId: true },
-    });
-    if (!user?.professionalId) {
-      return (
-        <div className="space-y-2">
-          <h1 className="font-display text-3xl">Comissões</h1>
-          <p className="text-ink-soft">Somente gerentes ou profissionais vinculados acessam comissões.</p>
-        </div>
-      );
-    }
-    restrictedProfessionalId = user.professionalId;
-  }
-
+  const { session, access } = await requireTenant();
   const today = calendarDate();
   const defaultFrom = shiftCalendarDate(today, -30);
-  const cutoff = subDays(new Date(), 180);
-
+  const canManage = canManageCommissions(access);
+  const ownOnly = !canViewAllCommissions(access);
+  const scopedProfessionalId = ownOnly ? access.professionalId ?? "__none__" : null;
   const [commissions, professionals, catalog] = await Promise.all([
     prisma.commission.findMany({
       where: {
         tenantId: session.tenantId,
-        ...(restrictedProfessionalId ? { professionalId: restrictedProfessionalId } : {}),
-        OR: [{ status: "PENDING" }, { createdAt: { gte: cutoff } }],
+        ...(scopedProfessionalId ? { professionalId: scopedProfessionalId } : {}),
       },
       include: {
         professional: true,
@@ -62,12 +42,11 @@ export default async function ComissoesPage() {
         },
       },
       orderBy: { createdAt: "desc" },
-      take: 500,
     }),
     prisma.professional.findMany({
       where: {
         tenantId: session.tenantId,
-        ...(restrictedProfessionalId ? { id: restrictedProfessionalId } : {}),
+        ...(scopedProfessionalId ? { id: scopedProfessionalId } : {}),
       },
       orderBy: { name: "asc" },
       select: { id: true, name: true, commissionPct: true, receivesCommission: true },
@@ -118,6 +97,8 @@ export default async function ComissoesPage() {
       methods={catalog.methods}
       defaultFrom={defaultFrom}
       defaultTo={today}
+      canManage={canManage}
+      ownOnly={ownOnly}
     />
   );
 }

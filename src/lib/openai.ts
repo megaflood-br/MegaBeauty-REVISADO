@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { ASSISTANT_SYSTEM_PROMPT } from "@/lib/assistant";
 
 export function createOpenAI(apiKey?: string | null) {
   const key = apiKey || process.env.OPENAI_API_KEY;
@@ -12,6 +13,7 @@ export function fallbackInsight(stats: {
   occupancy: number;
   noShows: number;
   lowStock: number;
+  lowStockNames?: string[];
 }) {
   const hints: string[] = [];
   if (stats.occupancy < 55) {
@@ -26,7 +28,9 @@ export function fallbackInsight(stats: {
       `Houve ${stats.noShows} não comparecimento(s). Ative o lembrete automático 24h antes e peça confirmação com um toque.`,
     );
   }
-  if (stats.lowStock > 0) {
+  if (stats.lowStockNames?.length) {
+    hints.push(`Em baixa agora: ${stats.lowStockNames.join(", ")}. Reponha antes do pico de sábado.`);
+  } else if (stats.lowStock > 0) {
     hints.push(`${stats.lowStock} produto(s) estão no estoque mínimo. Reponha antes do pico de sábado.`);
   }
   if (stats.appointments === 0) {
@@ -45,9 +49,9 @@ export async function chatWithSalonContext(params: {
     return {
       source: "local" as const,
       answer:
-        "A OpenAI ainda não está configurada neste salão. Com os dados atuais: " +
+        "A OpenAI ainda não está configurada na plataforma. Com os dados atuais: " +
         params.context.slice(0, 400) +
-        " Configure a chave em Configurações para respostas mais precisas.",
+        " Configure a chave universal em Plataforma → Integrações.",
     };
   }
 
@@ -57,8 +61,7 @@ export async function chatWithSalonContext(params: {
     messages: [
       {
         role: "system",
-        content:
-          "Você é a assistente da MegaBeauty, um CRM para salões de beleza no Brasil. Responda em português, de forma objetiva, com ações práticas sobre agenda, clientes, estoque, comissões, WhatsApp e faturamento. Use apenas o contexto fornecido.",
+        content: ASSISTANT_SYSTEM_PROMPT,
       },
       { role: "user", content: `Contexto do salão:\n${params.context}\n\nPergunta: ${params.question}` },
     ],
@@ -96,4 +99,30 @@ export async function draftWhatsAppMessage(params: {
     ],
   });
   return completion.choices[0]?.message?.content ?? "";
+}
+
+export async function chatAsReceptionist(params: {
+  apiKey?: string | null;
+  system: string;
+  incoming: string;
+  history?: { role: "user" | "assistant"; text: string }[];
+}) {
+  const client = createOpenAI(params.apiKey);
+  if (!client) return null;
+  const history = (params.history ?? []).slice(-8).map((item) => ({
+    role: item.role === "assistant" ? ("assistant" as const) : ("user" as const),
+    content: item.text,
+  }));
+  const completion = await client.chat.completions.create({
+    model: "gpt-4o-mini",
+    temperature: 0.5,
+    max_tokens: 220,
+    messages: [
+      { role: "system", content: params.system },
+      ...history,
+      { role: "user", content: params.incoming },
+    ],
+  });
+  const text = completion.choices[0]?.message?.content?.trim() ?? "";
+  return text || null;
 }

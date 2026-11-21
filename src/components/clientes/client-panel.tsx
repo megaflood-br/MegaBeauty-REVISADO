@@ -15,12 +15,13 @@ import {
 } from "lucide-react";
 import { Button, Field, Input, Textarea } from "@/components/ui";
 import { upsertClient } from "@/app/actions/clients";
-import { cn, formAction } from "@/lib/utils";
+import { cn, formAction, HIDDEN_PHONE_LABEL } from "@/lib/utils";
 import { formatBRL } from "@/lib/money";
 import { calendarDate, formatMediumDate, formatTime } from "@/lib/dates";
 import { STATUS_LABEL, type AppointmentStatus } from "@/lib/constants";
 import { comandaTotal } from "@/lib/comandas";
 import { ClientAnamneses } from "@/components/anamneses/client-anamneses";
+import { CashbackTab, type CashbackMoveRow } from "@/components/clientes/cashback-tab";
 import type { AnamnesisFormRow, AnamnesisRow } from "@/components/anamneses/types";
 import type { buildClientMetrics } from "@/lib/client-metrics";
 
@@ -85,6 +86,13 @@ export function ClientPanel({
   anamneses,
   forms,
   professionals,
+  cashbackEnabled,
+  cashbackCentsPerPoint,
+  cashbackMoves,
+  salonName,
+  hidePhones = false,
+  canCreateAnamnesis = true,
+  canEditAnamnesis = true,
 }: {
   tab: ClientTab;
   client: {
@@ -108,6 +116,13 @@ export function ClientPanel({
   anamneses: AnamnesisRow[];
   forms: AnamnesisFormRow[];
   professionals: { id: string; name: string }[];
+  cashbackEnabled: boolean;
+  cashbackCentsPerPoint: number;
+  cashbackMoves: CashbackMoveRow[];
+  salonName?: string;
+  hidePhones?: boolean;
+  canCreateAnamnesis?: boolean;
+  canEditAnamnesis?: boolean;
 }) {
   return (
     <div className="overflow-hidden rounded-2xl border border-line bg-white shadow-sm">
@@ -157,7 +172,7 @@ export function ClientPanel({
           {tab === "painel" ? (
             <PainelTab metrics={metrics} appointments={appointments} />
           ) : tab === "cadastro" ? (
-            <CadastroTab client={client} />
+            <CadastroTab client={client} hidePhones={hidePhones} />
           ) : tab === "debitos" ? (
             <ComandasTab
               title="Débitos"
@@ -167,7 +182,13 @@ export function ClientPanel({
           ) : tab === "creditos" ? (
             <BalanceTab label="Crédito disponível" amount={client.creditCents} empty="Sem crédito lançado." />
           ) : tab === "cashback" ? (
-            <BalanceTab label="Cashback" amount={client.cashbackCents} empty="Sem cashback acumulado." />
+            <CashbackTab
+              clientId={client.id}
+              balanceCents={client.cashbackCents}
+              enabled={cashbackEnabled}
+              centsPerPoint={cashbackCentsPerPoint}
+              movements={cashbackMoves}
+            />
           ) : tab === "agendamentos" ? (
             <AppointmentsTab appointments={appointments} />
           ) : tab === "produtos" ? (
@@ -183,7 +204,7 @@ export function ClientPanel({
           ) : tab === "mensagens" ? (
             <MessagesTab messages={messages} />
           ) : tab === "anotacoes" ? (
-            <NotesTab client={client} />
+            <NotesTab client={client} hidePhones={hidePhones} />
           ) : tab === "arquivos" ? (
             <EmptyState text="Nenhuma imagem ou arquivo anexado." />
           ) : tab === "anamneses" ? (
@@ -192,6 +213,10 @@ export function ClientPanel({
               records={anamneses}
               forms={forms}
               professionals={professionals}
+              salonName={salonName}
+              hidePhones={hidePhones}
+              canCreate={canCreateAnamnesis}
+              canEdit={canEditAnamnesis}
             />
           ) : (
             <EmptyState text="Nenhuma venda por assinatura." />
@@ -325,6 +350,7 @@ function StatCard({ icon, value, label }: { icon: ReactNode; value: string; labe
 
 function CadastroTab({
   client,
+  hidePhones = false,
 }: {
   client: {
     id: string;
@@ -337,6 +363,7 @@ function CadastroTab({
     source: string;
     birthDate: Date | null;
   };
+  hidePhones?: boolean;
 }) {
   return (
     <form action={formAction(upsertClient)} className="grid max-w-xl gap-3">
@@ -345,7 +372,11 @@ function CadastroTab({
         <Input name="name" defaultValue={client.name} required />
       </Field>
       <Field label="WhatsApp">
-        <Input name="phone" defaultValue={client.phone} required />
+        {hidePhones ? (
+          <Input value={HIDDEN_PHONE_LABEL} disabled />
+        ) : (
+          <Input name="phone" defaultValue={client.phone} required />
+        )}
       </Field>
       <Field label="E-mail">
         <Input name="email" type="email" defaultValue={client.email ?? ""} />
@@ -374,6 +405,7 @@ function CadastroTab({
 
 function NotesTab({
   client,
+  hidePhones = false,
 }: {
   client: {
     id: string;
@@ -385,12 +417,13 @@ function NotesTab({
     notes: string | null;
     birthDate: Date | null;
   };
+  hidePhones?: boolean;
 }) {
   return (
     <form action={formAction(upsertClient)} className="grid max-w-xl gap-3">
       <input type="hidden" name="id" value={client.id} />
       <input type="hidden" name="name" value={client.name} />
-      <input type="hidden" name="phone" value={client.phone} />
+      {hidePhones ? null : <input type="hidden" name="phone" value={client.phone} />}
       <input type="hidden" name="email" value={client.email ?? ""} />
       <input type="hidden" name="instagram" value={client.instagram ?? ""} />
       <input type="hidden" name="tags" value={client.tags} />

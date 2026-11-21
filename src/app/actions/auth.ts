@@ -5,17 +5,33 @@ import { prisma } from "@/lib/db";
 import {
   clearSessionCookie,
   hashPassword,
+  homePath,
   setSessionCookie,
   verifyPassword,
 } from "@/lib/auth";
+import { cookies, headers } from "next/headers";
 import { slugify } from "@/lib/utils";
 import type { Role } from "@/lib/constants";
 import { ensureFinanceCatalog } from "@/lib/finance-catalog";
 import { ensureAnamnesisForms } from "@/lib/anamnesis";
+import { resolveSignupPlan } from "@/lib/plans";
+import { firstTouchPartnerId, PARTNER_REF_COOKIE, partnerHostCandidates, sanitizePartnerSlug } from "@/lib/partners";
 
-function safeRedirectPath(next: string) {
-  if (!next || !next.startsWith("/") || next.startsWith("//")) return "/dashboard";
-  return next;
+async function resolveSignupPartner() {
+  const jar = await cookies();
+  const headerList = await headers();
+  const ref = sanitizePartnerSlug(headerList.get("x-partner-ref") || jar.get(PARTNER_REF_COOKIE)?.value);
+  if (ref) {
+    const bySlug = await prisma.partner.findUnique({ where: { slug: ref }, select: { id: true, status: true } });
+    if (bySlug) return bySlug;
+  }
+  const candidates = partnerHostCandidates(headerList.get("x-forwarded-host") || headerList.get("host"));
+  if (!candidates.length) return null;
+  const byHost = await prisma.partnerBrand.findFirst({
+    where: { customHost: { in: candidates } },
+    select: { partner: { select: { id: true, status: true } } },
+  });
+  return byHost?.partner ?? null;
 }
 
 export async function loginAction(formData: FormData) {
@@ -25,12 +41,15 @@ export async function loginAction(formData: FormData) {
   const password = String(formData.get("password") ?? "");
   const next = String(formData.get("next") ?? "/dashboard");
 
-  const user = await prisma.user.findUnique({ where: { email } });
+  const user = await prisma.user.findUnique({ where: { email }, include: { tenant: true } });
   if (!user || !user.active) {
     return { error: "E-mail ou senha inválidos." };
   }
   const ok = await verifyPassword(password, user.passwordHash);
   if (!ok) return { error: "E-mail ou senha inválidos." };
+  if (user.tenant.status === "SUSPENDED" && user.role !== "SUPER_ADMIN") {
+    return { error: "Esta conta está suspensa. Fale com o suporte MegaBeauty." };
+  }
 
   await setSessionCookie({
     userId: user.id,
@@ -39,8 +58,10 @@ export async function loginAction(formData: FormData) {
     name: user.name,
     role: user.role as Role,
   });
-
-  redirect(safeRedirectPath(next));
+  const home = homePath(user.role, user.tenant.kind);
+  const safeNext = next.startsWith("/") && !next.startsWith("//") ? next : home;
+  const allowedNext = home === "/dashboard" ? safeNext : home;
+  redirect(allowedNext);
 }
 
 export async function registerAction(formData: FormData) {
@@ -62,11 +83,19 @@ export async function registerAction(formData: FormData) {
   const slugTaken = await prisma.tenant.findUnique({ where: { slug } });
   if (slugTaken) slug = `${slug}-${Math.random().toString(36).slice(2, 6)}`;
 
+  const signupPlan = await resolveSignupPlan();
+  const partner = await resolveSignupPartner();
+  const partnerId = firstTouchPartnerId(null, partner?.status === "ACTIVE" ? partner.id : null);
   const tenant = await prisma.tenant.create({
     data: {
       name: salon,
       slug,
       email,
+      plan: signupPlan?.slug ?? "profissional",
+      status: "TRIAL",
+      billingStatus: "TRIAL",
+      partnerId,
+      trialEndsAt: new Date(Date.now() + (signupPlan?.trialDays ?? 14) * 86_400_000),
       users: {
         create: {
           email,
@@ -102,7 +131,6 @@ export async function registerAction(formData: FormData) {
     name: user.name,
     role: "OWNER",
   });
-
   redirect("/dashboard");
 }
 

@@ -3,10 +3,9 @@
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/db";
 import { requireTenant } from "@/lib/tenant";
-import { canSeeFinance } from "@/lib/auth";
+import { canAccess, canManageCommissions } from "@/lib/permissions";
 import { parseBRLToCents } from "@/lib/money";
 import { zonedDateTime } from "@/lib/dates";
-import { ensureFinanceCatalog } from "@/lib/finance-catalog";
 import { postLedgerEntry, updateLedgerEntry } from "@/lib/ledger";
 
 function parseTransactionForm(formData: FormData) {
@@ -41,12 +40,13 @@ function parseTransactionForm(formData: FormData) {
 }
 
 export async function saveTransaction(formData: FormData) {
-  const { session } = await requireTenant();
-  if (!canSeeFinance(session.role)) return { error: "Sem permissão." };
+  const { session, access } = await requireTenant();
+  if (!canAccess(access, "finance")) return { error: "Sem permissão." };
 
   const id = String(formData.get("id") ?? "");
   const parsed = parseTransactionForm(formData);
-  if (parsed.amountCents <= 0) return { error: "Informe um valor positivo." };
+
+  if (!parsed.amountCents) return { error: "Informe um valor." };
   if (!parsed.category) return { error: "Selecione a categoria." };
   if (!parsed.methodId && !parsed.method) return { error: "Selecione a forma de pagamento." };
 
@@ -93,78 +93,52 @@ export async function createTransaction(formData: FormData) {
 }
 
 export async function payCommissions(formData?: FormData) {
-  const { session } = await requireTenant();
-  if (!canSeeFinance(session.role)) return { error: "Sem permissão." };
-
+  const { session, access } = await requireTenant();
+  if (!canManageCommissions(access)) return { error: "Só o administrador pode pagar comissões." };
   const data = formData instanceof FormData ? formData : new FormData();
   const professionalId = String(data.get("professionalId") ?? "");
   const ids = data.getAll("commissionId").map(String).filter(Boolean);
   const accountId = String(data.get("accountId") ?? "") || null;
   const methodId = String(data.get("methodId") ?? "") || null;
+
   if (!ids.length && !professionalId) return { error: "Selecione as comissões para pagar." };
 
-  await ensureFinanceCatalog(session.tenantId);
+  const pending = await prisma.commission.findMany({
+    where: {
+      tenantId: session.tenantId,
+      status: "PENDING",
+      ...(ids.length ? { id: { in: ids } } : {}),
+      ...(professionalId ? { professionalId } : {}),
+    },
+    include: { professional: true },
+  });
+  if (!pending.length) return { error: "Nenhuma comissão pendente para pagar." };
 
-  try {
-    const result = await prisma.$transaction(async (tx) => {
-      const pending = await tx.commission.findMany({
-        where: {
-          tenantId: session.tenantId,
-          status: "PENDING",
-          ...(ids.length ? { id: { in: ids } } : {}),
-          ...(professionalId ? { professionalId } : {}),
-        },
-        include: { professional: true },
-      });
-      if (!pending.length) return { error: "Nenhuma comissão pendente para pagar." };
+  const byProfessional = new Map<string, { name: string; total: number }>();
+  for (const row of pending) {
+    const current = byProfessional.get(row.professionalId) ?? { name: row.professional.name, total: 0 };
+    current.total += row.amountCents;
+    byProfessional.set(row.professionalId, current);
+  }
 
-      const updated = await tx.commission.updateMany({
-        where: {
-          tenantId: session.tenantId,
-          status: "PENDING",
-          id: { in: pending.map((row) => row.id) },
-        },
-        data: { status: "PAID", paidAt: new Date() },
-      });
-      if (updated.count !== pending.length) {
-        throw new Error("CONCURRENT_COMMISSION_PAYMENT");
-      }
+  await prisma.commission.updateMany({
+    where: { tenantId: session.tenantId, id: { in: pending.map((row) => row.id) } },
+    data: { status: "PAID", paidAt: new Date() },
+  });
 
-      const byProfessional = new Map<string, { name: string; total: number }>();
-      for (const row of pending) {
-        const current = byProfessional.get(row.professionalId) ?? { name: row.professional.name, total: 0 };
-        current.total += row.amountCents;
-        byProfessional.set(row.professionalId, current);
-      }
-
-      for (const [id, info] of byProfessional) {
-        if (info.total <= 0) continue;
-        await postLedgerEntry(
-          {
-            tenantId: session.tenantId,
-            type: "EXPENSE",
-            category: "comissao",
-            amountCents: info.total,
-            methodId,
-            methodCode: "PIX",
-            accountId,
-            professionalId: id,
-            description: `Pagamento de comissão para ${info.name}`,
-          },
-          tx,
-        );
-      }
-
-      return { ok: true as const };
+  for (const [id, info] of byProfessional) {
+    if (!info.total) continue;
+    await postLedgerEntry({
+      tenantId: session.tenantId,
+      type: "EXPENSE",
+      category: "comissao",
+      amountCents: info.total,
+      methodId,
+      methodCode: "PIX",
+      accountId,
+      professionalId: id,
+      description: `Pagamento de comissão para ${info.name}`,
     });
-
-    if ("error" in result) return result;
-  } catch (err) {
-    if (err instanceof Error && err.message === "CONCURRENT_COMMISSION_PAYMENT") {
-      return { error: "Algumas comissões já foram pagas em outra operação. Atualize a página." };
-    }
-    console.error("payCommissions", err);
-    return { error: "Não foi possível registrar o pagamento das comissões." };
   }
 
   revalidatePath("/comissoes");

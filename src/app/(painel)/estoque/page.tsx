@@ -1,16 +1,21 @@
 import { prisma } from "@/lib/db";
 import { requireTenant } from "@/lib/tenant";
 import { StockBoard } from "@/components/estoque/stock-board";
+import { loadSalonNotices } from "@/lib/salon-notices";
 
 export default async function EstoquePage() {
-  const { session } = await requireTenant();
-  const [products, categories, services, lots, requests, professionals] = await Promise.all([
+  const { session, tenant } = await requireTenant();
+  const [products, categories, services, lots, requests, professionals, notices] = await Promise.all([
     prisma.product.findMany({
       where: { tenantId: session.tenantId },
       include: { category: true, services: { include: { service: true } } },
       orderBy: { name: "asc" },
     }),
-    prisma.productCategory.findMany({ where: { tenantId: session.tenantId }, orderBy: { sortOrder: "asc" } }),
+    prisma.productCategory.findMany({
+      where: { tenantId: session.tenantId },
+      orderBy: { sortOrder: "asc" },
+      include: { _count: { select: { products: true } } },
+    }),
     prisma.service.findMany({
       where: { tenantId: session.tenantId, active: true },
       orderBy: { name: "asc" },
@@ -31,13 +36,15 @@ export default async function EstoquePage() {
       orderBy: { name: "asc" },
       select: { id: true, name: true },
     }),
+    loadSalonNotices(session.tenantId, tenant.city),
   ]);
 
   const brands = [...new Set(products.map((p) => p.brand).filter((name): name is string => Boolean(name)))];
 
   return (
     <StockBoard
-      categories={categories.map((c) => ({ id: c.id, name: c.name }))}
+      restock={notices.restock}
+      categories={categories.map((c) => ({ id: c.id, name: c.name, productCount: c._count.products }))}
       brands={brands}
       services={services}
       professionals={professionals}
@@ -64,6 +71,8 @@ export default async function EstoquePage() {
         notes: p.notes,
         requestAvailable: p.requestAvailable,
         active: p.active,
+        ncm: p.ncm,
+        cfop: p.cfop,
         services: p.services.map((row) => ({
           serviceId: row.serviceId,
           quantity: row.quantity,

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Filter, Info, RefreshCw } from "lucide-react";
 import { Button, Card, Input } from "@/components/ui";
 import { formatBRL } from "@/lib/money";
@@ -13,6 +13,7 @@ import {
   type TodayOverviewMetrics,
 } from "@/lib/dashboard";
 import { BarChart, CompareBars, DonutChart, Sparkline } from "@/components/painel/charts";
+import { MovementHeat } from "@/components/painel/movement-heat";
 import { ProfessionalOfTheDay } from "@/components/painel/professional-of-the-day";
 import { RevenueBarChart } from "@/components/painel/revenue-bar-chart";
 import { TodayOverview } from "@/components/painel/today-overview";
@@ -56,12 +57,14 @@ export function DashboardBoard({
   todayOverview,
   last7DaysRevenue,
   professionalOfTheDay,
+  alerts,
 }: {
   userName: string;
   metrics: DashboardMetrics;
   todayOverview: TodayOverviewMetrics;
   last7DaysRevenue: Last7DaysRevenueMetrics;
   professionalOfTheDay: ProfessionalOfTheDayMetrics;
+  alerts?: ReactNode;
 }) {
   const [filterOpen, setFilterOpen] = useState(false);
   const [tab, setTab] = useState<"appointments" | "comandas">("appointments");
@@ -99,6 +102,8 @@ export function DashboardBoard({
         </form>
       </div>
 
+      {alerts}
+
       <div className="grid items-stretch gap-5 xl:grid-cols-12">
         <div className="xl:col-span-8">
           <TodayOverview overview={todayOverview} />
@@ -135,6 +140,10 @@ export function DashboardBoard({
           <TrendBadge value={metrics.conversionPct} label="taxa de conversão" tone="purple" />
         </Card>
       </div>
+
+      <Card>
+        <MovementHeat movement={metrics.movement} />
+      </Card>
 
       <Card className="p-0">
         <div className="flex gap-6 border-b border-line px-5">

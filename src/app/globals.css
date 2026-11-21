@@ -3,11 +3,11 @@
 :root {
   --ink: #0f172a;
   --ink-soft: #64748b;
-  --wine: #2563eb;
-  --wine-deep: #1d4ed8;
-  --rose: #6366f1;
+  --wine: #ff0447;
+  --wine-deep: #c70337;
+  --rose: #ff4d7a;
   --gold: #64748b;
-  --gold-soft: #dbeafe;
+  --gold-soft: #ffdce5;
   --cream: #f6f7f9;
   --sand: #f1f5f9;
   --paper: #ffffff;
@@ -41,6 +41,11 @@
 html,
 body {
   min-height: 100%;
+  overflow-x: clip;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
 }
 
 body {
@@ -57,7 +62,7 @@ textarea {
 }
 
 ::selection {
-  background: #dbeafe;
+  background: var(--gold-soft);
 }
 
 .font-display {
@@ -94,4 +99,31 @@ textarea {
 .agenda-day-col {
   flex: 1 1 0%;
   min-width: 14rem;
+}
+
+@media print {
+  body {
+    background: #fff !important;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+
+  body * {
+    visibility: hidden;
+  }
+
+  .print-root,
+  .print-root * {
+    visibility: visible;
+  }
+
+  .print-root {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    box-shadow: none !important;
+    background: #fff;
+  }
 }

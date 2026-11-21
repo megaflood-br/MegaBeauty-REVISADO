@@ -9,6 +9,7 @@ import { paymentChange } from "@/lib/comandas";
 import { PAYMENT_LABEL, type PaymentMethod } from "@/lib/constants";
 import { feePercentLabel } from "@/lib/finance-catalog";
 import type { PaymentDraft, PaymentMethodOption } from "@/components/comandas/types";
+import { useConfirm } from "@/components/confirm-dialog";
 
 function centsToInput(cents: number) {
   return (cents / 100).toFixed(2).replace(".", ",");
@@ -60,6 +61,7 @@ function PaymentDrawerBody({
   onClose,
   onInvoice,
 }: PaymentDrawerProps) {
+  const confirm = useConfirm();
   const [amount, setAmount] = useState(() => centsToInput(totalCents));
   const [installments, setInstallments] = useState("1");
   const [date, setDate] = useState(() => calendarDate());
@@ -223,11 +225,14 @@ function PaymentDrawerBody({
                         className="rounded-lg p-1 text-ink-soft hover:bg-sand"
                         aria-label="Remover pagamento"
                         onClick={() => {
-                          setPayments((rows) => {
-                            const next = rows.filter((row) => row.key !== payment.key);
-                            const nextPaid = next.reduce((sum, row) => sum + row.amountCents, 0);
-                            setAmount(centsToInput(Math.max(0, totalCents - nextPaid)));
-                            return next;
+                          void confirm({ title: "Remover este pagamento?", confirmLabel: "Remover" }).then((ok) => {
+                            if (!ok) return;
+                            setPayments((rows) => {
+                              const next = rows.filter((row) => row.key !== payment.key);
+                              const nextPaid = next.reduce((sum, row) => sum + row.amountCents, 0);
+                              setAmount(centsToInput(Math.max(0, totalCents - nextPaid)));
+                              return next;
+                            });
                           });
                         }}
                       >

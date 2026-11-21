@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/db";
-import { assertProductsInTenant, assertServiceCategoryInTenant, requireTenant } from "@/lib/tenant";
+import { requireTenant } from "@/lib/tenant";
 import { parseBRLToCents } from "@/lib/money";
 
 export async function upsertService(formData: FormData) {
@@ -11,8 +11,8 @@ export async function upsertService(formData: FormData) {
   const name = String(formData.get("name") ?? "").trim();
   const durationMin = Number(formData.get("durationMin") ?? 15);
   const safeDuration = Number.isFinite(durationMin) && durationMin > 0 ? durationMin : 15;
-  const priceCents = Math.max(0, parseBRLToCents(String(formData.get("price") ?? "0")));
-  const extraCostCents = Math.max(0, parseBRLToCents(String(formData.get("extraCost") ?? "0")));
+  const priceCents = parseBRLToCents(String(formData.get("price") ?? "0"));
+  const extraCostCents = parseBRLToCents(String(formData.get("extraCost") ?? "0"));
   const categoryId = String(formData.get("categoryId") ?? "") || null;
   const toNullableInt = (raw: FormDataEntryValue | null) => {
     const text = String(raw ?? "")
@@ -23,7 +23,7 @@ export async function upsertService(formData: FormData) {
       .trim();
     if (!text) return null;
     const value = Number(text);
-    return Number.isFinite(value) ? Math.min(100, Math.max(0, Math.round(value))) : null;
+    return Number.isFinite(value) ? Math.round(value) : null;
   };
   const commissionPct = toNullableInt(formData.get("commissionPct"));
   const cashbackPct = toNullableInt(formData.get("cashbackPct"));
@@ -42,22 +42,15 @@ export async function upsertService(formData: FormData) {
   if (imageUrl && imageUrl.length > 400_000) {
     return { error: "Imagem muito grande. Use uma foto menor." };
   }
-  if (categoryId && !(await assertServiceCategoryInTenant(session.tenantId, categoryId))) {
-    return { error: "Categoria inválida." };
-  }
 
   const productIds = formData.getAll("consumedProductId").map(String);
   const productQtys = formData.getAll("consumedQty").map(String);
   const products = productIds
     .map((productId, index) => ({
       productId,
-      quantity: Math.max(0.01, Number(productQtys[index] ?? 1) || 1),
+      quantity: Number(productQtys[index] ?? 1) || 1,
     }))
     .filter((row) => row.productId);
-
-  if (!(await assertProductsInTenant(session.tenantId, products.map((p) => p.productId)))) {
-    return { error: "Um ou mais produtos vinculados são inválidos." };
-  }
 
   const data = {
     name,
@@ -76,38 +69,35 @@ export async function upsertService(formData: FormData) {
     active,
     onlineBooking,
     favorite,
+    fiscalCode: String(formData.get("fiscalCode") ?? "").trim() || null,
+    issPct: toNullableInt(formData.get("issPct")),
   };
 
   try {
-    const result = await prisma.$transaction(async (tx) => {
-      if (id) {
-        const existing = await tx.service.findFirst({ where: { id, tenantId: session.tenantId } });
-        if (!existing) return { error: "Serviço não encontrado." };
-        await tx.service.update({ where: { id }, data });
-        await tx.serviceProduct.deleteMany({ where: { serviceId: id } });
-        if (products.length) {
-          await tx.serviceProduct.createMany({
-            data: products.map((row) => ({ serviceId: id, productId: row.productId, quantity: row.quantity })),
-          });
-        }
-      } else {
-        const created = await tx.service.create({
-          data: { tenantId: session.tenantId, ...data },
+    if (id) {
+      const existing = await prisma.service.findFirst({ where: { id, tenantId: session.tenantId } });
+      if (!existing) return { error: "Serviço não encontrado." };
+      await prisma.service.update({ where: { id }, data });
+      await prisma.serviceProduct.deleteMany({ where: { serviceId: id } });
+      if (products.length) {
+        await prisma.serviceProduct.createMany({
+          data: products.map((row) => ({ serviceId: id, productId: row.productId, quantity: row.quantity })),
         });
-        if (products.length) {
-          await tx.serviceProduct.createMany({
-            data: products.map((row) => ({ serviceId: created.id, productId: row.productId, quantity: row.quantity })),
-          });
-        }
       }
-      return { ok: true as const };
-    });
-    if ("error" in result) return result;
+    } else {
+      const created = await prisma.service.create({
+        data: { tenantId: session.tenantId, ...data },
+      });
+      if (products.length) {
+        await prisma.serviceProduct.createMany({
+          data: products.map((row) => ({ serviceId: created.id, productId: row.productId, quantity: row.quantity })),
+        });
+      }
+    }
   } catch (err) {
     console.error("upsertService", err);
     return { error: "Não foi possível salvar o serviço. Confira os campos e tente de novo." };
   }
-
   revalidatePath("/servicos");
   revalidatePath("/agenda");
   return { ok: true };

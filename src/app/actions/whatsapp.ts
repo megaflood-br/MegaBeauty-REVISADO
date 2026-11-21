@@ -3,64 +3,61 @@
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/db";
 import { requireTenant } from "@/lib/tenant";
-import { canManageSettings } from "@/lib/auth";
-import { isEvolutionConfigured, sendTextMessage } from "@/lib/evolution";
+import { canAccess } from "@/lib/permissions";
+import { logoutEvolutionInstance } from "@/lib/evolution";
 import { draftWhatsAppMessage } from "@/lib/openai";
+import { resolvePlatformIntegrations } from "@/lib/integrations";
+import { provisionWhatsAppInstance } from "@/lib/whatsapp-live";
+import { markSalonConversationRead, sendSalonComposing, sendSalonWhatsApp } from "@/lib/whatsapp-send";
+import { isWhatsAppProvider, newMetaVerifyToken, readMetaPhone } from "@/lib/whatsapp-meta";
+import { HUMAN_TYPING_DELAY_MS, botPausedUntilFromNow } from "@/lib/whatsapp-copy";
 
-function isSafeWebhookUrl(raw: string) {
-  try {
-    const parsed = new URL(raw);
-    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return false;
-    if (process.env.NODE_ENV === "production") {
-      if (parsed.protocol !== "https:") return false;
-      const host = parsed.hostname.toLowerCase();
-      if (
-        host === "localhost" ||
-        host === "127.0.0.1" ||
-        host === "0.0.0.0" ||
-        host === "::1" ||
-        host.startsWith("10.") ||
-        host.startsWith("192.168.") ||
-        /^172\.(1[6-9]|2\d|3[0-1])\./.test(host) ||
-        host.startsWith("169.254.")
-      ) {
-        return false;
-      }
-    }
-    return true;
-  } catch {
-    return false;
-  }
+function revalidateWhatsApp() {
+  revalidatePath("/whatsapp");
+  revalidatePath("/atendimento");
+  revalidatePath("/marketing");
+  revalidatePath("/configuracoes");
+  revalidatePath("/recepcionista");
+}
+
+function keep(current: string | null | undefined, next: string) {
+  const value = next.trim();
+  if (!value || value.includes("••••")) return current ?? null;
+  return value;
 }
 
 export async function sendWhatsApp(formData: FormData) {
-  const { session, tenant } = await requireTenant();
-  const phone = String(formData.get("phone") ?? "").replace(/\D/g, "");
+  const { session } = await requireTenant();
   const body = String(formData.get("body") ?? "").trim();
   const conversationId = String(formData.get("conversationId") ?? "");
+  let phone = String(formData.get("phone") ?? "").replace(/\D/g, "");
+  if (!body) return { error: "Mensagem é obrigatória." };
 
-  if (!phone || !body) return { error: "Telefone e mensagem são obrigatórios." };
+  const existingConversation = conversationId
+    ? await prisma.conversation.findFirst({
+        where: { id: conversationId, tenantId: session.tenantId },
+      })
+    : null;
+  if (existingConversation) phone = existingConversation.phone.replace(/\D/g, "") || existingConversation.phone;
+  if (!phone) return { error: "Telefone e mensagem são obrigatórios." };
 
   const conversation =
-    (conversationId
-      ? await prisma.conversation.findFirst({
-          where: { id: conversationId, tenantId: session.tenantId },
-        })
-      : null) ??
+    existingConversation ??
     (await prisma.conversation.upsert({
       where: { tenantId_phone: { tenantId: session.tenantId, phone } },
       update: { lastMessageAt: new Date() },
       create: { tenantId: session.tenantId, phone, lastMessageAt: new Date() },
     }));
 
-  const config = {
-    url: tenant.evolutionUrl ?? process.env.EVOLUTION_API_URL ?? "",
-    apiKey: tenant.evolutionApiKey ?? process.env.EVOLUTION_API_KEY ?? "",
-    instance: tenant.evolutionInstance ?? "",
-  };
-
-  if (isEvolutionConfigured(config)) {
-    await sendTextMessage(config, phone, body);
+  const sent = await sendSalonWhatsApp({
+    tenantId: session.tenantId,
+    phone,
+    text: body,
+    presence: true,
+    delayMs: HUMAN_TYPING_DELAY_MS,
+  });
+  if (!sent.sent && sent.error && !/Conecte/.test(sent.error)) {
+    return { error: sent.error };
   }
 
   await prisma.message.create({
@@ -68,21 +65,62 @@ export async function sendWhatsApp(formData: FormData) {
       conversationId: conversation.id,
       direction: "OUT",
       body,
+      source: "HUMAN",
     },
   });
   await prisma.conversation.update({
     where: { id: conversation.id },
-    data: { lastMessageAt: new Date(), unread: 0 },
+    data: { lastMessageAt: new Date(), unread: 0, botPausedUntil: botPausedUntilFromNow() },
   });
 
-  revalidatePath("/whatsapp");
-  return { ok: true, mocked: !isEvolutionConfigured(config) };
+  revalidateWhatsApp();
+  return { ok: true, mocked: !sent.sent };
+}
+
+export async function markConversationOpened(conversationId: string) {
+  const { session } = await requireTenant();
+  const conversation = await prisma.conversation.findFirst({
+    where: { id: conversationId, tenantId: session.tenantId },
+    include: {
+      messages: {
+        where: { direction: "IN", waId: { not: null } },
+        orderBy: { createdAt: "desc" },
+        take: 20,
+        select: { waId: true },
+      },
+    },
+  });
+  if (!conversation) return { error: "Conversa não encontrada." };
+  if (conversation.unread > 0) {
+    await prisma.conversation.update({
+      where: { id: conversation.id },
+      data: { unread: 0 },
+    });
+    revalidatePath("/atendimento");
+  }
+  const waIds = conversation.messages.map((row) => row.waId).filter((id): id is string => Boolean(id));
+  if (waIds.length) {
+    void markSalonConversationRead({ tenantId: session.tenantId, phone: conversation.phone, waIds });
+  }
+  return { ok: true as const };
+}
+
+export async function sendInboxComposing(conversationId: string) {
+  const { session } = await requireTenant();
+  const conversation = await prisma.conversation.findFirst({
+    where: { id: conversationId, tenantId: session.tenantId },
+    select: { phone: true },
+  });
+  if (!conversation) return { error: "Conversa não encontrada." };
+  await sendSalonComposing(session.tenantId, conversation.phone);
+  return { ok: true as const };
 }
 
 export async function generateWhatsAppDraft(goal: string, clientName: string) {
   const { tenant } = await requireTenant();
+  const integrations = await resolvePlatformIntegrations();
   const text = await draftWhatsAppMessage({
-    apiKey: tenant.openaiApiKey,
+    apiKey: integrations.openaiApiKey,
     goal,
     clientName,
     salonName: tenant.name,
@@ -90,40 +128,100 @@ export async function generateWhatsAppDraft(goal: string, clientName: string) {
   return { text };
 }
 
-export async function saveEvolutionSettings(formData: FormData) {
-  const { session } = await requireTenant();
-  if (!canManageSettings(session.role)) return { error: "Sem permissão." };
-
-  const evolutionUrl = String(formData.get("evolutionUrl") ?? "").trim();
-  const evolutionApiKey = String(formData.get("evolutionApiKey") ?? "").trim();
-  const evolutionInstance = String(formData.get("evolutionInstance") ?? "").trim();
-  const clearEvolutionKey = String(formData.get("clearEvolutionApiKey") ?? "") === "1";
-
-  if (evolutionUrl && !isSafeWebhookUrl(evolutionUrl)) {
-    return { error: "URL da Evolution API inválida." };
+export async function connectWhatsAppInstance() {
+  const { session, access } = await requireTenant();
+  if (!canAccess(access, "settings", "edit")) return { error: "Sem permissão para alterar conexões." };
+  try {
+    const result = await provisionWhatsAppInstance(session.tenantId);
+    await prisma.tenant.update({
+      where: { id: session.tenantId },
+      data: { whatsappProvider: "evolution" },
+    });
+    revalidateWhatsApp();
+    return { ok: true as const, qr: result.qr };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : "Não foi possível gerar o QR Code." };
   }
+}
 
-  const data: {
-    evolutionUrl: string | null;
-    evolutionInstance: string | null;
-    evolutionApiKey?: string | null;
-  } = {
-    evolutionUrl: evolutionUrl || null,
-    evolutionInstance: evolutionInstance || null,
-  };
-
-  if (clearEvolutionKey) {
-    data.evolutionApiKey = null;
-  } else if (evolutionApiKey) {
-    data.evolutionApiKey = evolutionApiKey;
+export async function disconnectWhatsAppInstance() {
+  const { session, tenant, access } = await requireTenant();
+  if (!canAccess(access, "settings", "edit")) return { error: "Sem permissão para alterar conexões." };
+  const server = await resolvePlatformIntegrations();
+  if (server.hasEvolution && tenant.evolutionInstance) {
+    try {
+      await logoutEvolutionInstance({
+        url: server.evolutionUrl,
+        apiKey: server.evolutionApiKey,
+        instance: tenant.evolutionInstance,
+      });
+    } catch {
+      // still clear local status
+    }
   }
-
   await prisma.tenant.update({
     where: { id: session.tenantId },
-    data,
+    data: { evolutionStatus: "close", evolutionNumber: null, evolutionQr: null },
   });
+  revalidateWhatsApp();
+  return { ok: true as const };
+}
 
-  revalidatePath("/whatsapp");
-  revalidatePath("/configuracoes");
-  return { ok: true };
+export async function setWhatsAppProvider(formData: FormData) {
+  const { session, access } = await requireTenant();
+  if (!canAccess(access, "settings", "edit")) return { error: "Sem permissão para alterar conexões." };
+  const provider = String(formData.get("provider") ?? "");
+  if (!isWhatsAppProvider(provider)) return { error: "Método de conexão inválido." };
+  await prisma.tenant.update({
+    where: { id: session.tenantId },
+    data: { whatsappProvider: provider },
+  });
+  revalidateWhatsApp();
+  return { ok: true as const };
+}
+
+export async function saveOfficialWhatsApp(formData: FormData) {
+  const { session, tenant, access } = await requireTenant();
+  if (!canAccess(access, "settings", "edit")) return { error: "Sem permissão para alterar conexões." };
+  const phoneNumberId = String(formData.get("metaPhoneNumberId") ?? "").trim();
+  const wabaId = String(formData.get("metaWabaId") ?? "").trim();
+  const accessToken = keep(tenant.metaAccessToken, String(formData.get("metaAccessToken") ?? ""));
+  if (!phoneNumberId) return { error: "Informe o Phone Number ID da Meta." };
+  if (!accessToken) return { error: "Informe o token permanente da Cloud API." };
+
+  const server = await resolvePlatformIntegrations();
+  try {
+    const live = await readMetaPhone({
+      phoneNumberId,
+      accessToken,
+      graphVersion: server.metaGraphVersion,
+    });
+    await prisma.tenant.update({
+      where: { id: session.tenantId },
+      data: {
+        whatsappProvider: "official",
+        metaPhoneNumberId: phoneNumberId,
+        metaAccessToken: accessToken,
+        metaWabaId: wabaId || tenant.metaWabaId,
+        metaVerifyToken: tenant.metaVerifyToken || newMetaVerifyToken(),
+        metaNumber: live.number,
+        metaStatus: "open",
+      },
+    });
+    revalidateWhatsApp();
+    return { ok: true as const, number: live.number };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : "Não foi possível validar a API oficial." };
+  }
+}
+
+export async function disconnectOfficialWhatsApp() {
+  const { session, access } = await requireTenant();
+  if (!canAccess(access, "settings", "edit")) return { error: "Sem permissão para alterar conexões." };
+  await prisma.tenant.update({
+    where: { id: session.tenantId },
+    data: { metaStatus: "close" },
+  });
+  revalidateWhatsApp();
+  return { ok: true as const };
 }

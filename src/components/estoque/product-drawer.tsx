@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { ImageIcon, Info, X } from "lucide-react";
 import { Button, Field, Input, Select, Textarea } from "@/components/ui";
 import { SearchSelect } from "@/components/search-select";
-import { upsertProduct } from "@/app/actions/inventory";
+import { saveProductCategory, upsertProduct } from "@/app/actions/inventory";
 import { STOCK_UNITS } from "@/lib/constants";
 import { stockUnitLabel } from "@/lib/stock";
 import { cn, initials } from "@/lib/utils";
@@ -17,7 +17,7 @@ const TABS = [
   { id: "cashback", label: "Cashback" },
   { id: "retorno", label: "Retorno" },
   { id: "servicos", label: "Serviços vinculados" },
-  { id: "nota", label: "Configurar nota fiscal", disabled: true },
+  { id: "nota", label: "Configurar nota fiscal" },
 ] as const;
 
 function centsToInput(cents: number) {
@@ -52,6 +52,11 @@ export function ProductDrawer({
   const [linked, setLinked] = useState(
     product?.services.length ? product.services : [{ serviceId: "", quantity: 1 }],
   );
+  const [categoryList, setCategoryList] = useState(categories);
+  const [categoryId, setCategoryId] = useState(product?.categoryId ?? "");
+  const [addingCategory, setAddingCategory] = useState(categories.length === 0);
+  const [newCategory, setNewCategory] = useState("");
+  const [savingCategory, setSavingCategory] = useState(false);
 
   const unitShort = stockUnitLabel(unit);
 
@@ -95,11 +100,11 @@ export function ProductDrawer({
                 <button
                   key={item.id}
                   type="button"
-                  disabled={"disabled" in item && item.disabled}
+                  disabled={"disabled" in item && (item as { disabled?: boolean }).disabled === true}
                   onClick={() => setTab(item.id)}
                   className={cn(
                     "flex w-full shrink-0 rounded-lg px-3 py-2 text-left text-sm whitespace-nowrap lg:rounded-none lg:border-l-2",
-                    "disabled" in item && item.disabled
+                    "disabled" in item && (item as { disabled?: boolean }).disabled === true
                       ? "cursor-not-allowed border-transparent text-slate-400"
                       : tab === item.id
                         ? "border-blue-600 bg-blue-50 font-medium text-blue-600 lg:bg-transparent"
@@ -162,10 +167,60 @@ export function ProductDrawer({
                     <SearchSelect
                       name="categoryId"
                       required
-                      placeholder="Categoria"
-                      defaultValue={product?.categoryId ?? ""}
-                      options={categories.map((c) => ({ value: c.id, label: c.name }))}
+                      placeholder={categoryList.length ? "Categoria" : "Cadastre uma categoria"}
+                      value={categoryId}
+                      onChange={setCategoryId}
+                      options={categoryList.map((c) => ({ value: c.id, label: c.name }))}
                     />
+                    <button
+                      type="button"
+                      className="mt-1 text-xs font-medium text-blue-700 underline"
+                      onClick={() => setAddingCategory((open) => !open)}
+                    >
+                      {addingCategory ? "Fechar" : "Nova categoria"}
+                    </button>
+                    {addingCategory ? (
+                      <div className="mt-2 flex gap-2">
+                        <Input
+                          value={newCategory}
+                          onChange={(e) => setNewCategory(e.target.value)}
+                          placeholder="Ex.: Coloração"
+                        />
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className="shrink-0"
+                          disabled={savingCategory || !newCategory.trim()}
+                          onClick={async () => {
+                            setError(null);
+                            setSavingCategory(true);
+                            const fd = new FormData();
+                            fd.set("name", newCategory.trim());
+                            try {
+                              const result = await saveProductCategory(fd);
+                              if (result && "error" in result && result.error) {
+                                setError(result.error);
+                                return;
+                              }
+                              if (result && "id" in result && result.id && result.name) {
+                                setCategoryList((list) =>
+                                  list.some((item) => item.id === result.id)
+                                    ? list
+                                    : [...list, { id: result.id, name: result.name }],
+                                );
+                                setCategoryId(result.id);
+                                setNewCategory("");
+                                setAddingCategory(false);
+                              }
+                            } finally {
+                              setSavingCategory(false);
+                            }
+                          }}
+                        >
+                          {savingCategory ? "..." : "Criar"}
+                        </Button>
+                      </div>
+                    ) : null}
                   </Field>
                   <Field label="Marca">
                     <Input name="brand" list="product-brands" placeholder="Marca" defaultValue={product?.brand ?? ""} />
@@ -201,7 +256,7 @@ export function ProductDrawer({
                       name="minStock"
                       suffix={unitShort}
                       info="Quando o saldo chegar nesse valor, o produto entra no alerta de estoque baixo."
-                      defaultValue={String(product?.minStock ?? 0)}
+                      defaultValue={String(product?.minStock && product.minStock > 0 ? product.minStock : 2)}
                     />
                   </Field>
                   {product ? (
@@ -276,6 +331,16 @@ export function ProductDrawer({
                   <Input name="returnAfterDays" type="number" min={0} placeholder="30" defaultValue={product?.returnAfterDays ?? ""} />
                 </Field>
                 <p className="text-sm text-ink-soft">Usado para lembrar a reposição ou a próxima compra do cliente.</p>
+              </div>
+
+              <div className={tab === "nota" ? "grid max-w-lg gap-3" : "hidden"}>
+                <Field label="NCM">
+                  <Input name="ncm" defaultValue={product?.ncm ?? ""} placeholder="33049990" />
+                </Field>
+                <Field label="CFOP">
+                  <Input name="cfop" defaultValue={product?.cfop ?? ""} placeholder="5102" />
+                </Field>
+                <p className="text-sm text-ink-soft">Usados na NFC-e / NF-e quando o produto entra na comanda.</p>
               </div>
 
               <div className={tab === "servicos" ? "grid gap-3" : "hidden"}>

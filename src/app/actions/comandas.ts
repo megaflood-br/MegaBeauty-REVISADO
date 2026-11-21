@@ -3,19 +3,25 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { prisma } from "@/lib/db";
-import {
-  assertClientInTenant,
-  assertProfessionalInTenant,
-  assertProfessionalsInTenant,
-  requireTenant,
-} from "@/lib/tenant";
+import { requireTenant } from "@/lib/tenant";
 import { calculateCommission } from "@/lib/commissions";
-import { allocatePayments, comandaTotal, itemLineTotal } from "@/lib/comandas";
-import { parseBRLToCents } from "@/lib/money";
-import { zonedDateTime } from "@/lib/dates";
+import { nextStock } from "@/lib/stock";
+import { allocatePayments, comandaSubtotal, comandaTotal } from "@/lib/comandas";
+import { parseBRLToCents, formatBRL } from "@/lib/money";
+import { calendarDate, zonedDateTime } from "@/lib/dates";
 import { PAYMENT_METHODS } from "@/lib/constants";
-import { ensureFinanceCatalog } from "@/lib/finance-catalog";
 import { postLedgerEntry } from "@/lib/ledger";
+import {
+  cashbackExpiry,
+  centsToPoints,
+  earnCashbackCents,
+  maxRedeemCents,
+  tenantCashbackConfig,
+} from "@/lib/cashback";
+import { applyCatalogPrice } from "@/lib/promotions";
+import { loadPromoRules } from "@/lib/promo-load";
+import { moneyVar, safeDispatch } from "@/lib/dispatch-whatsapp-campaign";
+import { canAccess } from "@/lib/permissions";
 
 async function nextNumber(tenantId: string) {
   const last = await prisma.comanda.findFirst({
@@ -37,46 +43,43 @@ function revalidateComandas() {
 }
 
 export async function createComandaFromAppointment(appointmentId: string) {
-  const { session } = await requireTenant();
+  const { session, access } = await requireTenant();
   const appointment = await prisma.appointment.findFirst({
     where: { id: appointmentId, tenantId: session.tenantId },
     include: { items: { include: { service: true } }, comanda: true },
   });
   if (!appointment) return { error: "Agendamento não encontrado." };
-  if (appointment.comanda) return { ok: true as const, id: appointment.comanda.id, existing: true };
+  if (appointment.comanda) {
+    if (!canAccess(access, "comandas")) return { error: "Sem permissão para abrir comanda." };
+    return { ok: true as const, id: appointment.comanda.id, existing: true };
+  }
+  if (!canAccess(access, "comandas", "create")) return { error: "Sem permissão para abrir comanda." };
 
-  const comanda = await prisma.$transaction(async (tx) => {
-    const last = await tx.comanda.findFirst({
-      where: { tenantId: session.tenantId },
-      orderBy: { number: "desc" },
-      select: { number: true },
-    });
-    const created = await tx.comanda.create({
-      data: {
-        tenantId: session.tenantId,
-        number: (last?.number ?? 0) + 1,
-        clientId: appointment.clientId,
-        appointmentId: appointment.id,
-        professionalId: appointment.professionalId,
-        status: "OPEN",
-        items: {
-          create: appointment.items.map((item) => ({
-            type: "SERVICE",
-            serviceId: item.serviceId,
-            professionalId: item.professionalId ?? appointment.professionalId,
-            description: item.service.name,
-            quantity: 1,
-            priceCents: item.priceCents,
-            durationMin: item.durationMin,
-          })),
-        },
+  const comanda = await prisma.comanda.create({
+    data: {
+      tenantId: session.tenantId,
+      number: await nextNumber(session.tenantId),
+      clientId: appointment.clientId,
+      appointmentId: appointment.id,
+      professionalId: appointment.professionalId,
+      status: "OPEN",
+      items: {
+        create: appointment.items.map((item) => ({
+          type: "SERVICE",
+          serviceId: item.serviceId,
+          professionalId: item.professionalId ?? appointment.professionalId,
+          description: item.service.name,
+          quantity: 1,
+          priceCents: item.priceCents,
+          durationMin: item.durationMin,
+        })),
       },
-    });
-    await tx.appointment.update({
-      where: { id: appointment.id },
-      data: { status: appointment.status === "PENDING" ? "CONFIRMED" : appointment.status },
-    });
-    return created;
+    },
+  });
+
+  await prisma.appointment.update({
+    where: { id: appointment.id },
+    data: { status: appointment.status === "PENDING" ? "CONFIRMED" : appointment.status },
   });
 
   revalidateComandas();
@@ -84,27 +87,22 @@ export async function createComandaFromAppointment(appointmentId: string) {
 }
 
 export async function upsertComanda(formData: FormData) {
-  const { session } = await requireTenant();
+  const { session, access } = await requireTenant();
   const id = String(formData.get("id") ?? "");
+  if (!canAccess(access, "comandas", id ? "edit" : "create")) {
+    return { error: "Sem permissão para alterar comanda." };
+  }
   const clientId = String(formData.get("clientId") ?? "");
   const professionalId = String(formData.get("professionalId") ?? "") || null;
   const notes = String(formData.get("notes") ?? "").trim() || null;
-  const discountCents = Math.max(0, parseBRLToCents(String(formData.get("discount") ?? "0")));
-  const creditCents = Math.max(0, parseBRLToCents(String(formData.get("credit") ?? "0")));
-  const cashbackCents = Math.max(0, parseBRLToCents(String(formData.get("cashback") ?? "0")));
+  const discountCents = parseBRLToCents(String(formData.get("discount") ?? "0"));
+  const creditCents = parseBRLToCents(String(formData.get("credit") ?? "0"));
+  const cashbackCents = parseBRLToCents(String(formData.get("cashback") ?? "0"));
   const dateRaw = String(formData.get("occurredAt") ?? "");
   const occurredAt = /^\d{4}-\d{2}-\d{2}$/.test(dateRaw) ? zonedDateTime(dateRaw, "12:00") : new Date();
   const numberRaw = Number(formData.get("number") ?? "");
 
   if (!clientId) return { error: "Selecione um cliente." };
-
-  const client = await prisma.client.findFirst({
-    where: { id: clientId, tenantId: session.tenantId },
-    select: { id: true, creditCents: true, cashbackCents: true },
-  });
-  if (!client) return { error: "Cliente não encontrado." };
-  if (creditCents > client.creditCents) return { error: "Crédito informado excede o saldo do cliente." };
-  if (cashbackCents > client.cashbackCents) return { error: "Cashback informado excede o saldo do cliente." };
 
   const keys = formData.getAll("itemKey").map(String);
   const qtys = formData.getAll("itemQty").map(String);
@@ -113,10 +111,7 @@ export async function upsertComanda(formData: FormData) {
   const discountTypes = formData.getAll("itemDiscountType").map(String);
   const itemProfessionals = formData.getAll("itemProfessionalId").map(String);
 
-  const allProfessionalIds = [professionalId ?? "", ...itemProfessionals].filter(Boolean);
-  if (!(await assertProfessionalsInTenant(session.tenantId, allProfessionalIds))) {
-    return { error: "Profissional inválido." };
-  }
+  const promos = await loadPromoRules(session.tenantId);
 
   const parsedItems: {
     type: string;
@@ -130,139 +125,106 @@ export async function upsertComanda(formData: FormData) {
     durationMin: number;
   }[] = [];
 
-  const serviceEntityIds: string[] = [];
-  const productEntityIds: string[] = [];
-  for (const key of keys) {
-    if (!key) continue;
-    const [kind, entityId] = key.split(":");
-    if (kind === "SERVICE" && entityId) serviceEntityIds.push(entityId);
-    if (kind === "PRODUCT" && entityId) productEntityIds.push(entityId);
-  }
-
-  const [services, products] = await Promise.all([
-    serviceEntityIds.length
-      ? prisma.service.findMany({ where: { id: { in: serviceEntityIds }, tenantId: session.tenantId } })
-      : Promise.resolve([]),
-    productEntityIds.length
-      ? prisma.product.findMany({ where: { id: { in: productEntityIds }, tenantId: session.tenantId } })
-      : Promise.resolve([]),
-  ]);
-  const serviceById = new Map(services.map((s) => [s.id, s]));
-  const productById = new Map(products.map((p) => [p.id, p]));
-
   for (let i = 0; i < keys.length; i++) {
     const key = keys[i];
     if (!key) continue;
     const [kind, entityId] = key.split(":");
-    const rawQty = Number(String(qtys[i] ?? "1").replace(",", "."));
-    const quantity = Number.isFinite(rawQty) && rawQty > 0 ? rawQty : 1;
-    const inputPriceCents = Math.max(0, parseBRLToCents(prices[i] ?? "0"));
+    const quantity = Number(String(qtys[i] ?? "1").replace(",", ".")) || 1;
+    const priceCents = parseBRLToCents(prices[i] ?? "0");
     const discountInput = discounts[i] ?? "0";
     const discountType = discountTypes[i] === "percent" ? "percent" : "money";
-
+    const gross = Math.round(quantity * priceCents);
+    const discountCentsItem =
+      discountType === "percent"
+        ? Math.round(gross * ((Number(String(discountInput).replace(",", ".")) || 0) / 100))
+        : parseBRLToCents(discountInput);
     if (kind === "SERVICE") {
-      const service = serviceById.get(entityId);
+      const service = await prisma.service.findFirst({ where: { id: entityId, tenantId: session.tenantId } });
       if (!service) continue;
-      const resolvedPrice = inputPriceCents || service.priceCents;
-      const gross = Math.round(quantity * resolvedPrice);
-      const discountCentsItem =
-        discountType === "percent"
-          ? Math.round(gross * (Math.min(100, Math.max(0, Number(String(discountInput).replace(",", ".")) || 0)) / 100))
-          : Math.max(0, parseBRLToCents(discountInput));
+      const priced = applyCatalogPrice(promos, dateRaw && /^\d{4}-\d{2}-\d{2}$/.test(dateRaw) ? dateRaw : calendarDate(), "SERVICE", service.id, service.priceCents, priceCents || undefined);
       parsedItems.push({
         type: "SERVICE",
         serviceId: service.id,
         productId: null,
         professionalId: itemProfessionals[i] || professionalId,
-        description: service.name,
+        description: priced.promoName ? `${service.name} (${priced.promoName})` : service.name,
         quantity,
-        priceCents: resolvedPrice,
-        discountCents: Math.min(gross, Math.max(0, discountCentsItem)),
+        priceCents: priced.priceCents,
+        discountCents: Math.min(Math.round(quantity * priced.priceCents), Math.max(0, discountCentsItem)),
         durationMin: service.durationMin,
       });
     } else if (kind === "PRODUCT") {
-      const product = productById.get(entityId);
+      const product = await prisma.product.findFirst({ where: { id: entityId, tenantId: session.tenantId } });
       if (!product) continue;
-      const resolvedPrice = inputPriceCents || product.saleCents;
-      const gross = Math.round(quantity * resolvedPrice);
-      const discountCentsItem =
-        discountType === "percent"
-          ? Math.round(gross * (Math.min(100, Math.max(0, Number(String(discountInput).replace(",", ".")) || 0)) / 100))
-          : Math.max(0, parseBRLToCents(discountInput));
+      const priced = applyCatalogPrice(promos, dateRaw && /^\d{4}-\d{2}-\d{2}$/.test(dateRaw) ? dateRaw : calendarDate(), "PRODUCT", product.id, product.saleCents, priceCents || undefined);
       parsedItems.push({
         type: "PRODUCT",
         serviceId: null,
         productId: product.id,
         professionalId: itemProfessionals[i] || professionalId,
-        description: product.name,
+        description: priced.promoName ? `${product.name} (${priced.promoName})` : product.name,
         quantity,
-        priceCents: resolvedPrice,
-        discountCents: Math.min(gross, Math.max(0, discountCentsItem)),
+        priceCents: priced.priceCents,
+        discountCents: Math.min(Math.round(quantity * priced.priceCents), Math.max(0, discountCentsItem)),
         durationMin: 0,
       });
     }
   }
 
   try {
-    const result = await prisma.$transaction(async (tx) => {
-      let comandaId = id;
-      let number = Number.isFinite(numberRaw) && numberRaw > 0 ? Math.round(numberRaw) : await nextNumber(session.tenantId);
+    let comandaId = id;
+    let number = Number.isFinite(numberRaw) && numberRaw > 0 ? Math.round(numberRaw) : await nextNumber(session.tenantId);
 
-      if (id) {
-        const existing = await tx.comanda.findFirst({ where: { id, tenantId: session.tenantId } });
-        if (!existing) return { error: "Comanda não encontrada." };
-        if (existing.status !== "OPEN") return { error: "Esta comanda já foi encerrada." };
-        if (number !== existing.number) {
-          const taken = await tx.comanda.findFirst({ where: { tenantId: session.tenantId, number } });
-          if (taken) return { error: "Já existe uma comanda com este número." };
-        }
-        await tx.comanda.update({
-          where: { id },
-          data: {
-            clientId,
-            professionalId,
-            notes,
-            discountCents,
-            creditCents,
-            cashbackCents,
-            occurredAt,
-            number,
-          },
-        });
-        await tx.comandaItem.deleteMany({ where: { comandaId: id } });
-      } else {
-        const taken = await tx.comanda.findFirst({ where: { tenantId: session.tenantId, number } });
-        if (taken) number = await nextNumber(session.tenantId);
-        const created = await tx.comanda.create({
-          data: {
-            tenantId: session.tenantId,
-            number,
-            clientId,
-            professionalId,
-            notes,
-            discountCents,
-            creditCents,
-            cashbackCents,
-            occurredAt,
-            status: "OPEN",
-          },
-        });
-        comandaId = created.id;
+    if (id) {
+      const existing = await prisma.comanda.findFirst({ where: { id, tenantId: session.tenantId } });
+      if (!existing) return { error: "Comanda não encontrada." };
+      if (existing.status !== "OPEN") return { error: "Esta comanda já foi encerrada." };
+      if (number !== existing.number) {
+        const taken = await prisma.comanda.findFirst({ where: { tenantId: session.tenantId, number } });
+        if (taken) return { error: "Já existe uma comanda com este número." };
       }
+      await prisma.comanda.update({
+        where: { id },
+        data: {
+          clientId,
+          professionalId,
+          notes,
+          discountCents,
+          creditCents,
+          cashbackCents,
+          occurredAt,
+          number,
+        },
+      });
+      await prisma.comandaItem.deleteMany({ where: { comandaId: id } });
+    } else {
+      const taken = await prisma.comanda.findFirst({ where: { tenantId: session.tenantId, number } });
+      if (taken) number = await nextNumber(session.tenantId);
+      const created = await prisma.comanda.create({
+        data: {
+          tenantId: session.tenantId,
+          number,
+          clientId,
+          professionalId,
+          notes,
+          discountCents,
+          creditCents,
+          cashbackCents,
+          occurredAt,
+          status: "OPEN",
+        },
+      });
+      comandaId = created.id;
+    }
 
-      if (parsedItems.length) {
-        await tx.comandaItem.createMany({
-          data: parsedItems.map((item) => ({ comandaId, ...item })),
-        });
-      }
-
-      return { ok: true as const, id: comandaId };
-    });
-
-    if ("error" in result) return result;
+    if (parsedItems.length) {
+      await prisma.comandaItem.createMany({
+        data: parsedItems.map((item) => ({ comandaId, ...item })),
+      });
+    }
     revalidateComandas();
-    revalidatePath(`/comandas/${result.id}`);
-    return result;
+    revalidatePath(`/comandas/${comandaId}`);
+    return { ok: true, id: comandaId };
   } catch (err) {
     if (
       typeof err === "object" &&
@@ -278,16 +240,11 @@ export async function upsertComanda(formData: FormData) {
 }
 
 export async function createWalkInComanda(formData: FormData) {
-  const { session } = await requireTenant();
+  const { session, access } = await requireTenant();
+  if (!canAccess(access, "comandas", "create")) return { error: "Sem permissão para abrir comanda." };
   const clientId = String(formData.get("clientId") ?? "");
   const professionalId = String(formData.get("professionalId") ?? "") || null;
   if (!clientId) return { error: "Selecione um cliente." };
-  if (!(await assertClientInTenant(session.tenantId, clientId))) {
-    return { error: "Cliente inválido." };
-  }
-  if (professionalId && !(await assertProfessionalInTenant(session.tenantId, professionalId))) {
-    return { error: "Profissional inválido." };
-  }
 
   const comanda = await prisma.comanda.create({
     data: {
@@ -303,37 +260,38 @@ export async function createWalkInComanda(formData: FormData) {
 }
 
 export async function addComandaItem(formData: FormData) {
-  const { session } = await requireTenant();
+  const { session, access } = await requireTenant();
+  if (!canAccess(access, "comandas", "edit")) return { error: "Sem permissão para alterar comanda." };
   const comandaId = String(formData.get("comandaId") ?? "");
   const type = String(formData.get("type") ?? "SERVICE");
   const serviceId = String(formData.get("serviceId") ?? "") || null;
   const productId = String(formData.get("productId") ?? "") || null;
   const professionalId = String(formData.get("professionalId") ?? "") || null;
-  const rawQty = Number(formData.get("quantity") ?? 1);
-  const quantity = Number.isFinite(rawQty) && rawQty > 0 ? rawQty : 1;
+  const quantity = Number(formData.get("quantity") ?? 1) || 1;
 
   const comanda = await prisma.comanda.findFirst({
     where: { id: comandaId, tenantId: session.tenantId, status: "OPEN" },
   });
   if (!comanda) return { error: "Comanda não encontrada ou já fechada." };
-  if (professionalId && !(await assertProfessionalInTenant(session.tenantId, professionalId))) {
-    return { error: "Profissional inválido." };
-  }
+
+  const promos = await loadPromoRules(session.tenantId);
+  const onDate = calendarDate(comanda.occurredAt);
 
   if (type === "SERVICE") {
     const service = await prisma.service.findFirst({
       where: { id: serviceId ?? "", tenantId: session.tenantId },
     });
     if (!service) return { error: "Selecione um serviço." };
+    const priced = applyCatalogPrice(promos, onDate, "SERVICE", service.id, service.priceCents);
     await prisma.comandaItem.create({
       data: {
         comandaId,
         type: "SERVICE",
         serviceId: service.id,
         professionalId: professionalId ?? comanda.professionalId,
-        description: service.name,
+        description: priced.promoName ? `${service.name} (${priced.promoName})` : service.name,
         quantity,
-        priceCents: service.priceCents,
+        priceCents: priced.priceCents,
         durationMin: service.durationMin,
       },
     });
@@ -342,14 +300,15 @@ export async function addComandaItem(formData: FormData) {
       where: { id: productId ?? "", tenantId: session.tenantId },
     });
     if (!product) return { error: "Selecione um produto." };
+    const priced = applyCatalogPrice(promos, onDate, "PRODUCT", product.id, product.saleCents);
     await prisma.comandaItem.create({
       data: {
         comandaId,
         type: "PRODUCT",
         productId: product.id,
-        description: product.name,
+        description: priced.promoName ? `${product.name} (${priced.promoName})` : product.name,
         quantity,
-        priceCents: product.saleCents,
+        priceCents: priced.priceCents,
       },
     });
   }
@@ -360,7 +319,8 @@ export async function addComandaItem(formData: FormData) {
 }
 
 export async function removeComandaItem(itemId: string) {
-  const { session } = await requireTenant();
+  const { session, access } = await requireTenant();
+  if (!canAccess(access, "comandas", "edit")) return { error: "Sem permissão para alterar comanda." };
   const item = await prisma.comandaItem.findFirst({
     where: { id: itemId, comanda: { tenantId: session.tenantId, status: "OPEN" } },
   });
@@ -412,186 +372,237 @@ async function finalizeOpenComanda(
   payments: ParsedPayment[],
   discountOverride?: number,
 ) {
-  await ensureFinanceCatalog(tenantId);
+  const comanda = await prisma.comanda.findFirst({
+    where: { id: comandaId, tenantId },
+    include: {
+      items: { include: { service: { include: { products: true } }, product: true } },
+      appointment: { include: { commissions: true } },
+    },
+  });
+  if (!comanda) return { error: "Comanda não encontrada." };
+  if (comanda.status !== "OPEN") return { error: "Esta comanda já foi encerrada." };
+  if (comanda.items.length === 0) return { error: "Inclua itens antes de fechar." };
+  if (!payments.length) return { error: "Adicione um pagamento." };
 
-  try {
-    const result = await prisma.$transaction(async (tx) => {
-      const comanda = await tx.comanda.findFirst({
-        where: { id: comandaId, tenantId },
-        include: {
-          items: { include: { service: { include: { products: true } } } },
-          appointment: { include: { commissions: true, transactions: true } },
-        },
-      });
-      if (!comanda) return { error: "Comanda não encontrada." };
-      if (comanda.status !== "OPEN") return { error: "Esta comanda já foi encerrada." };
-      if (comanda.items.length === 0) return { error: "Inclua itens antes de fechar." };
-      if (!payments.length) return { error: "Adicione um pagamento." };
+  const discountCents = discountOverride ?? comanda.discountCents;
+  const tenant = await prisma.tenant.findUnique({ where: { id: tenantId } });
+  if (!tenant) return { error: "Salão não encontrado." };
+  const cashback = tenantCashbackConfig(tenant);
+  const client = await prisma.client.findFirst({ where: { id: comanda.clientId, tenantId } });
+  if (comanda.cashbackCents > 0) {
+    const allowed = maxRedeemCents(comandaSubtotal(comanda.items), cashback, client?.cashbackCents ?? 0);
+    if (comanda.cashbackCents > allowed) {
+      return { error: `O cashback usado passa do limite (${formatBRL(allowed)}).` };
+    }
+  }
+  const total = comandaTotal({
+    items: comanda.items,
+    discountCents,
+    creditCents: comanda.creditCents,
+    cashbackCents: comanda.cashbackCents,
+  });
+  const paidCents = payments.reduce((sum, p) => sum + p.amountCents, 0);
+  if (paidCents < total) return { error: "O total pago é menor que o valor da comanda." };
 
-      const discountCents = Math.max(0, discountOverride ?? comanda.discountCents);
-      const total = comandaTotal({
-        items: comanda.items,
-        discountCents,
-        creditCents: comanda.creditCents,
-        cashbackCents: comanda.cashbackCents,
-      });
-      const paidCents = payments.reduce((sum, p) => sum + p.amountCents, 0);
-      if (paidCents < total) return { error: "O total pago é menor que o valor da comanda." };
+  const allocated = allocatePayments(total, payments);
+  const primary = allocated.find((p) => p.appliedCents > 0) ?? allocated[0];
 
-      const allocated = allocatePayments(total, payments);
-      const primary = allocated.find((p) => p.appliedCents > 0) ?? allocated[0];
+  await prisma.comanda.update({
+    where: { id: comanda.id },
+    data: {
+      status: "CLOSED",
+      closedAt: new Date(),
+      paymentMethod: primary.method,
+      discountCents,
+    },
+  });
 
-      // Conditional update prevents concurrent double-closing race conditions
-      const locked = await tx.comanda.updateMany({
-        where: { id: comanda.id, tenantId, status: "OPEN" },
-        data: {
-          status: "CLOSED",
-          closedAt: new Date(),
-          paymentMethod: primary.method,
-          discountCents,
-        },
-      });
-      if (locked.count === 0) {
-        return { error: "Esta comanda já foi encerrada." };
+  if (client && (comanda.creditCents > 0 || comanda.cashbackCents > 0 || cashback.enabled)) {
+    let nextCashback = client.cashbackCents;
+    const movements: {
+      type: "EARN" | "REDEEM";
+      amountCents: number;
+      points: number;
+      reason: string;
+      expiresAt: Date | null;
+    }[] = [];
+
+    if (comanda.creditCents > 0 || comanda.cashbackCents > 0) {
+      nextCashback = Math.max(0, nextCashback - comanda.cashbackCents);
+      if (comanda.cashbackCents > 0) {
+        movements.push({
+          type: "REDEEM",
+          amountCents: -comanda.cashbackCents,
+          points: -centsToPoints(comanda.cashbackCents, cashback.centsPerPoint),
+          reason: `Resgate na comanda #${comanda.number}`,
+          expiresAt: null,
+        });
       }
+    }
 
-      if (comanda.creditCents > 0 || comanda.cashbackCents > 0) {
-        const client = await tx.client.findFirst({ where: { id: comanda.clientId, tenantId } });
-        if (!client || client.creditCents < comanda.creditCents || client.cashbackCents < comanda.cashbackCents) {
-          throw new Error("INSUFFICIENT_CLIENT_BALANCE");
-        }
-        await tx.client.update({
-          where: { id: client.id },
+    if (cashback.enabled) {
+      const earned = earnCashbackCents(
+        comanda.items.map((item) => ({
+          type: item.type,
+          quantity: item.quantity,
+          priceCents: item.priceCents,
+          discountCents: item.discountCents,
+          cashbackPct: item.type === "PRODUCT" ? item.product?.cashbackPct : item.service?.cashbackPct,
+        })),
+        cashback,
+      );
+      if (earned > 0) {
+        nextCashback += earned;
+        movements.push({
+          type: "EARN",
+          amountCents: earned,
+          points: centsToPoints(earned, cashback.centsPerPoint),
+          reason: `Acúmulo da comanda #${comanda.number}`,
+          expiresAt: cashbackExpiry(cashback.expireDays),
+        });
+        safeDispatch({
+          tenantId,
+          trigger: "CASHBACK",
+          client,
+          sentOn: comanda.id,
+          vars: { valor: moneyVar(earned) },
+        });
+      }
+    }
+
+    await prisma.client.update({
+      where: { id: client.id },
+      data: {
+        creditCents: Math.max(0, client.creditCents - comanda.creditCents),
+        cashbackCents: nextCashback,
+      },
+    });
+    if (movements.length) {
+      await prisma.cashbackMovement.createMany({
+        data: movements.map((move) => ({
+          tenantId,
+          clientId: client.id,
+          comandaId: comanda.id,
+          ...move,
+        })),
+      });
+    }
+  }
+
+  for (const payment of allocated) {
+    if (payment.appliedCents <= 0) continue;
+    await postLedgerEntry({
+      tenantId,
+      type: "INCOME",
+      category: "comanda",
+      amountCents: payment.appliedCents,
+      methodId: payment.paymentMethodId,
+      methodCode: payment.method,
+      description:
+        payment.installments > 1 ? `Comanda #${comanda.number} · ${payment.installments}x` : `Comanda #${comanda.number}`,
+      appointmentId: comanda.appointmentId,
+      comandaId: comanda.id,
+      occurredAt: payment.occurredAt,
+    });
+  }
+
+  for (const item of comanda.items.filter((i) => i.type === "SERVICE")) {
+    const professionalId = item.professionalId ?? comanda.professionalId;
+    if (!professionalId) continue;
+    const professional = await prisma.professional.findFirst({
+      where: { id: professionalId, tenantId },
+    });
+    if (!professional) continue;
+    const { percent, amountCents } = calculateCommission({
+      priceCents: Math.round(item.priceCents * item.quantity),
+      professionalPct: professional.commissionPct,
+      servicePct: item.service?.commissionPct,
+    });
+    await prisma.commission.create({
+      data: {
+        tenantId,
+        professionalId,
+        appointmentId: comanda.appointmentId,
+        comandaId: comanda.id,
+        amountCents,
+        percent,
+      },
+    });
+  }
+
+  for (const item of comanda.items) {
+    if (item.type === "PRODUCT" && item.productId) {
+      const product = await prisma.product.findFirst({
+        where: { id: item.productId, tenantId },
+      });
+      if (!product) continue;
+      const stock = nextStock(product.stock, "OUT", item.quantity);
+      await prisma.product.update({ where: { id: product.id }, data: { stock } });
+      await prisma.stockMovement.create({
+        data: {
+          tenantId,
+          productId: product.id,
+          type: "OUT",
+          quantity: item.quantity,
+          reason: `Comanda #${comanda.number}`,
+          comandaId: comanda.id,
+          appointmentId: comanda.appointmentId,
+        },
+      });
+    }
+    if (item.type === "SERVICE" && item.service) {
+      for (const usage of item.service.products) {
+        const product = await prisma.product.findFirst({
+          where: { id: usage.productId, tenantId },
+        });
+        if (!product) continue;
+        const qty = usage.quantity * item.quantity;
+        const stock = nextStock(product.stock, "OUT", qty);
+        await prisma.product.update({ where: { id: product.id }, data: { stock } });
+        await prisma.stockMovement.create({
           data: {
-            creditCents: { decrement: comanda.creditCents },
-            cashbackCents: { decrement: comanda.cashbackCents },
+            tenantId,
+            productId: product.id,
+            type: "OUT",
+            quantity: qty,
+            reason: `Uso em ${item.description}`,
+            comandaId: comanda.id,
+            appointmentId: comanda.appointmentId,
           },
         });
       }
-
-      const appointmentAlreadyCharged = (comanda.appointment?.transactions.length ?? 0) > 0;
-      if (!appointmentAlreadyCharged) {
-        for (const payment of allocated) {
-          if (payment.appliedCents <= 0) continue;
-          await postLedgerEntry(
-            {
-              tenantId,
-              type: "INCOME",
-              category: "comanda",
-              amountCents: payment.appliedCents,
-              methodId: payment.paymentMethodId,
-              methodCode: payment.method,
-              description:
-                payment.installments > 1 ? `Comanda #${comanda.number} · ${payment.installments}x` : `Comanda #${comanda.number}`,
-              appointmentId: comanda.appointmentId,
-              comandaId: comanda.id,
-              occurredAt: payment.occurredAt,
-            },
-            tx,
-          );
-        }
-      }
-
-      const appointmentAlreadyCommissioned = (comanda.appointment?.commissions.length ?? 0) > 0;
-      if (!appointmentAlreadyCommissioned) {
-        for (const item of comanda.items.filter((i) => i.type === "SERVICE")) {
-          const professionalId = item.professionalId ?? comanda.professionalId;
-          if (!professionalId) continue;
-          const professional = await tx.professional.findFirst({
-            where: { id: professionalId, tenantId },
-          });
-          if (!professional || !professional.receivesCommission) continue;
-          const baseCents = itemLineTotal(item);
-          const { percent, amountCents } = calculateCommission({
-            priceCents: baseCents,
-            professionalPct: professional.commissionPct,
-            servicePct: item.service?.commissionPct,
-          });
-          if (amountCents <= 0) continue;
-          await tx.commission.create({
-            data: {
-              tenantId,
-              professionalId,
-              appointmentId: comanda.appointmentId,
-              comandaId: comanda.id,
-              amountCents,
-              percent,
-            },
-          });
-        }
-      }
-
-      for (const item of comanda.items) {
-        if (item.type === "PRODUCT" && item.productId) {
-          const product = await tx.product.findFirst({
-            where: { id: item.productId, tenantId },
-            select: { id: true },
-          });
-          if (!product) continue;
-          await tx.product.update({
-            where: { id: product.id },
-            data: { stock: { decrement: item.quantity } },
-          });
-          await tx.stockMovement.create({
-            data: {
-              tenantId,
-              productId: product.id,
-              type: "OUT",
-              quantity: item.quantity,
-              reason: `Comanda #${comanda.number}`,
-              comandaId: comanda.id,
-              appointmentId: comanda.appointmentId,
-            },
-          });
-        }
-        if (item.type === "SERVICE" && item.service) {
-          for (const usage of item.service.products) {
-            const product = await tx.product.findFirst({
-              where: { id: usage.productId, tenantId },
-              select: { id: true },
-            });
-            if (!product) continue;
-            const qty = usage.quantity * item.quantity;
-            await tx.product.update({
-              where: { id: product.id },
-              data: { stock: { decrement: qty } },
-            });
-            await tx.stockMovement.create({
-              data: {
-                tenantId,
-                productId: product.id,
-                type: "OUT",
-                quantity: qty,
-                reason: `Uso em ${item.description}`,
-                comandaId: comanda.id,
-                appointmentId: comanda.appointmentId,
-              },
-            });
-          }
-        }
-      }
-
-      if (comanda.appointmentId) {
-        await tx.appointment.update({
-          where: { id: comanda.appointmentId },
-          data: { status: "COMPLETED" },
-        });
-      }
-
-      return { ok: true as const, id: comanda.id };
-    });
-
-    if ("error" in result) return result;
-    revalidateComandas();
-    revalidatePath(`/comandas/${result.id}`);
-    return result;
-  } catch (err) {
-    if (err instanceof Error && err.message === "INSUFFICIENT_CLIENT_BALANCE") {
-      return { error: "Saldo de crédito ou cashback do cliente insuficiente." };
     }
-    console.error("finalizeOpenComanda", err);
-    return { error: "Não foi possível fechar a comanda. Tente novamente." };
   }
+
+  if (comanda.appointmentId) {
+    await prisma.appointment.update({
+      where: { id: comanda.appointmentId },
+      data: { status: "COMPLETED" },
+    });
+  }
+
+  if (tenant.fiscalEnabled && tenant.fiscalAutoIssue) {
+    try {
+      const { issueComandaInvoices } = await import("@/lib/fiscal-issue");
+      await issueComandaInvoices(tenantId, comanda.id);
+    } catch {
+      // fechamento não depende da nota
+    }
+  }
+
+  if (client) {
+    safeDispatch({
+      tenantId,
+      trigger: "REVIEW",
+      client,
+      sentOn: comanda.id,
+    });
+  }
+
+  revalidateComandas();
+  revalidatePath(`/comandas/${comanda.id}`);
+  revalidatePath("/notas");
+  return { ok: true as const, id: comanda.id };
 }
 
 export async function invoiceComanda(formData: FormData) {
@@ -603,11 +614,12 @@ export async function invoiceComanda(formData: FormData) {
 }
 
 export async function closeComanda(formData: FormData) {
-  const { session } = await requireTenant();
+  const { session, access } = await requireTenant();
+  if (!canAccess(access, "comandas", "edit")) return { error: "Sem permissão para fechar comanda." };
   const comandaId = String(formData.get("comandaId") ?? "");
   const paymentMethodId = String(formData.get("paymentMethodId") ?? "");
   const method = String(formData.get("method") ?? "PIX");
-  const discountCents = Math.max(0, parseBRLToCents(String(formData.get("discount") ?? "0")));
+  const discountCents = parseBRLToCents(String(formData.get("discount") ?? "0"));
   const allowed = new Set<string>(PAYMENT_METHODS);
   if (!paymentMethodId && !allowed.has(method)) return { error: "Forma de pagamento inválida." };
 
