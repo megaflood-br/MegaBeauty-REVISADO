@@ -2,6 +2,7 @@ import { SignJWT, jwtVerify } from "jose";
 import { cookies } from "next/headers";
 import bcrypt from "bcryptjs";
 import { SESSION_COOKIE, type Role } from "@/lib/constants";
+import "@/lib/tenant-headers";
 
 export type SessionUser = {
   userId: string;

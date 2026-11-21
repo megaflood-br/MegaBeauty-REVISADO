@@ -142,8 +142,22 @@ import {
   localReceptionistReply,
   matchCatalogProfessional,
   normalizeReceptionist,
+  resolveAvailabilityIntentFromMessages,
   wantsHumanHandover,
 } from "@/lib/receptionist";
+import {
+  contiguousSlotsForDuration,
+  formatAvailabilitySlots,
+  parseExplicitDurationMin,
+  parseRequestedDate,
+} from "@/lib/receptionist-availability";
+import {
+  PUBLIC_BOOKING_MAX_DAYS,
+  buildUpcomingBookingDays,
+  isDateInBookingWindow,
+  publicBookingRange,
+  publicBookingSlotsForDate,
+} from "@/lib/booking-availability";
 import {
   fillPopText,
   matchServicePop,
@@ -1654,6 +1668,235 @@ describe("recepcionista virtual", () => {
     expect(prompt).toMatch(/Só responda porque a cliente escreveu/);
     expect(prompt).toMatch(/11:00/);
     expect(prompt).not.toMatch(/Juliana/);
+  });
+
+  it("interpreta datas futuras em português até 60 dias e rejeita datas inválidas ou fora da janela", () => {
+    // Referência: quarta-feira 2026-11-18
+    const ref = "2026-11-18";
+    expect(parseRequestedDate("tem vaga hoje?", ref)?.date).toBe("2026-11-18");
+    expect(parseRequestedDate("e amanhã?", ref)?.date).toBe("2026-11-19");
+    expect(parseRequestedDate("depois de amanhã", ref)?.date).toBe("2026-11-20");
+    expect(parseRequestedDate("daqui a 5 dias", ref)?.date).toBe("2026-11-23");
+    expect(parseRequestedDate("tem vaga sexta?", ref)?.date).toBe("2026-11-20");
+    expect(parseRequestedDate("tem vaga sexta que vem?", ref)?.date).toBe("2026-11-27");
+    expect(parseRequestedDate("e dia 28?", ref)?.date).toBe("2026-11-28");
+    expect(parseRequestedDate("no dia 5", ref)?.date).toBe("2026-12-05");
+    expect(parseRequestedDate("05/12", ref)?.date).toBe("2026-12-05");
+    expect(parseRequestedDate("28 de novembro", ref)?.date).toBe("2026-11-28");
+    expect(parseRequestedDate("05/01", ref)?.date).toBe("2027-01-05");
+    expect(parseRequestedDate("05/01", ref)?.outOfRange).toBe(false);
+
+    // Data inválida de calendário deve retornar null
+    expect(parseRequestedDate("31/02/2026", ref)).toBeNull();
+    expect(parseRequestedDate("dia 32", ref)).toBeNull();
+
+    // Data passada e além de 60 dias devem ser sinalizadas
+    expect(parseRequestedDate("15/11/2026", ref)?.isPast).toBe(true);
+    expect(parseRequestedDate("daqui a 90 dias", ref)?.outOfRange).toBe(true);
+    expect(asksAvailability("tem vaga sexta que vem?")).toBe(true);
+    expect(asksAvailability("dia 28?")).toBe(true);
+    expect(parseExplicitDurationMin("preciso de 3 horas livres")).toBe(180);
+  });
+
+  it("calcula encaixe exato por duração contínua (ex.: procedimento de 3h) sem truncar a grade", () => {
+    // 08:00..20:00 com ocupado 11:00..12:00 -> para 180 min (3h):
+    // 08:00 cabe exato (08:00..11:00), 08:15..11:45 conflitam, 12:00..17:00 cabem, 17:15 passa das 20:00.
+    const slots3h = contiguousSlotsForDuration({
+      openTime: "08:00",
+      closeTime: "20:00",
+      slotMinutes: 15,
+      durationMin: 180,
+      busy: [{ start: "11:00", end: "12:00" }],
+    });
+    expect(slots3h[0]).toBe("08:00");
+    expect(slots3h).not.toContain("08:15");
+    expect(slots3h).not.toContain("10:00");
+    expect(slots3h).not.toContain("11:45");
+    expect(slots3h).toContain("12:00");
+    expect(slots3h).toContain("15:00");
+    expect(slots3h[slots3h.length - 1]).toBe("17:00");
+    expect(slots3h).not.toContain("17:15");
+
+    const summary = formatAvailabilitySlots(slots3h, 15);
+    expect(summary).toContain("08:00");
+    expect(summary).toContain("12:00 até 17:00");
+
+    // Dia fragmentado sem nenhum bloco contínuo de 3 horas retorna vazio (mesmo tendo vários slots curtos)
+    const fragmented3h = contiguousSlotsForDuration({
+      openTime: "08:00",
+      closeTime: "19:00",
+      slotMinutes: 15,
+      durationMin: 180,
+      busy: [
+        { start: "10:00", end: "11:00" },
+        { start: "13:00", end: "14:00" },
+        { start: "16:00", end: "17:00" },
+      ],
+    });
+    expect(fragmented3h).toEqual([]);
+
+    // Filtro de horário atual (hoje) descarta inícios no passado
+    const todaySlots = contiguousSlotsForDuration({
+      openTime: "08:00",
+      closeTime: "20:00",
+      slotMinutes: 30,
+      durationMin: 180,
+      busy: [],
+      nowHHmm: "14:10",
+    });
+    expect(todaySlots[0]).toBe("14:30");
+    expect(todaySlots[todaySlots.length - 1]).toBe("17:00");
+  });
+
+  it("herda serviço do histórico e responde disponibilidade exata para datas futuras e bloqueios longos", () => {
+    const richCatalog = {
+      ...catalog,
+      todayDate: "2026-11-18",
+      slotMinutes: 15,
+      services: [
+        ...catalog.services,
+        { name: "Luzes", durationMin: 180, price: "R$ 380,00", professionals: ["Kelly Souza"] },
+      ],
+    };
+    const intent = resolveAvailabilityIntentFromMessages({
+      incoming: "e no dia 28?",
+      history: [{ role: "user", text: "Quero fazer luzes com a Kelly" }],
+      catalog: richCatalog,
+      referenceDate: "2026-11-18",
+    });
+    expect(intent.dateMatch?.date).toBe("2026-11-28");
+    expect(intent.service?.name).toBe("Luzes");
+    expect(intent.service?.durationMin).toBe(180);
+    expect(intent.professional?.name).toBe("Kelly Souza");
+
+    const config = normalizeReceptionist({ name: "Luna", emoji: "nenhum" });
+    const withSlots = localReceptionistReply({
+      config,
+      catalog: richCatalog,
+      incoming: "tem vaga para luzes dia 28?",
+      availability: {
+        date: "2026-11-28",
+        label: "sábado, 28 de novembro",
+        durationMin: 180,
+        serviceName: "Luzes",
+        slotMinutes: 15,
+        isPast: false,
+        outOfRange: false,
+        professionals: [
+          {
+            name: "Kelly Souza",
+            nickname: null,
+            specialty: "Coloração",
+            startTimes: ["08:00", "13:00", "13:15", "13:30", "13:45", "14:00", "14:15"],
+            summary: "08:00, 13:00 até 14:15",
+          },
+        ],
+      },
+    });
+    expect(withSlots.text).toContain("sábado, 28 de novembro");
+    expect(withSlots.text).toContain("Luzes (3h)");
+    expect(withSlots.text).toContain("08:00, 13:00 até 14:15");
+    expect(withSlots.text).toMatch(/recepção confirma/);
+
+    const noFit = localReceptionistReply({
+      config,
+      catalog: richCatalog,
+      incoming: "tem vaga para luzes dia 28?",
+      availability: {
+        date: "2026-11-28",
+        label: "sábado, 28 de novembro",
+        durationMin: 180,
+        serviceName: "Luzes",
+        slotMinutes: 15,
+        isPast: false,
+        outOfRange: false,
+        professionals: [
+          { name: "Kelly Souza", nickname: null, specialty: "Coloração", startTimes: [], summary: "" },
+        ],
+      },
+    });
+    expect(noFit.text).toMatch(/não há encaixe contínuo/i);
+    expect(noFit.text).toContain("Luzes (3h)");
+
+    const outOfRange = localReceptionistReply({
+      config,
+      catalog: richCatalog,
+      incoming: "tem vaga daqui a 90 dias?",
+      availability: {
+        date: "2027-02-16",
+        label: "terça-feira, 16 de fevereiro",
+        durationMin: 180,
+        serviceName: "Luzes",
+        slotMinutes: 15,
+        isPast: false,
+        outOfRange: true,
+        professionals: [],
+      },
+    });
+    expect(outOfRange.text).toContain("60 dias");
+  });
+
+  it("gera janela de 30 dias no agendamento online e valida encaixe completo por duração e expediente", () => {
+    const today = "2026-11-21";
+    const range = publicBookingRange(today, PUBLIC_BOOKING_MAX_DAYS);
+    expect(range.today).toBe("2026-11-21");
+    expect(range.maxDate).toBe("2026-12-21");
+
+    const days = buildUpcomingBookingDays(today, PUBLIC_BOOKING_MAX_DAYS);
+    expect(days).toHaveLength(31); // hoje + próximos 30 dias
+    expect(days[0].date).toBe("2026-11-21");
+    expect(days[0].isToday).toBe(true);
+    expect(days[1].isTomorrow).toBe(true);
+    expect(days[30].date).toBe("2026-12-21");
+
+    expect(isDateInBookingWindow("2026-11-21", today)).toBe(true);
+    expect(isDateInBookingWindow("2026-12-15", today)).toBe(true);
+    expect(isDateInBookingWindow("2026-12-21", today)).toBe(true);
+    expect(isDateInBookingWindow("2026-11-20", today)).toBe(false);
+    expect(isDateInBookingWindow("2026-12-22", today)).toBe(false);
+
+    // Dia futuro (+25 dias): procedimento de 180 min (3h) em expediente 09:00..19:00 com ocupado 12:00..13:00
+    const futureDate = "2026-12-16";
+    const slots = publicBookingSlotsForDate({
+      date: futureDate,
+      openTime: "09:00",
+      closeTime: "19:00",
+      slotMinutes: 30,
+      durationMin: 180,
+      professionalId: "pro-1",
+      today,
+      busy: [
+        {
+          professionalId: "pro-1",
+          startAt: zonedDateTime(futureDate, "12:00").toISOString(),
+          endAt: zonedDateTime(futureDate, "13:00").toISOString(),
+        },
+        // Outra profissional ocupada no mesmo dia não deve bloquear pro-1
+        {
+          professionalId: "pro-2",
+          startAt: zonedDateTime(futureDate, "13:00").toISOString(),
+          endAt: zonedDateTime(futureDate, "16:00").toISOString(),
+        },
+      ],
+    });
+    expect(slots).toEqual(["09:00", "13:00", "13:30", "14:00", "14:30", "15:00", "15:30", "16:00"]);
+    // 16:30 + 3h = 19:30 > 19:00 -> não pode aparecer
+    expect(slots).not.toContain("16:30");
+    expect(slots).not.toContain("09:30");
+
+    // No dia de hoje, horários que já passaram devem ser descartados
+    const todaySlots = publicBookingSlotsForDate({
+      date: today,
+      openTime: "09:00",
+      closeTime: "19:00",
+      slotMinutes: 30,
+      durationMin: 60,
+      professionalId: "pro-1",
+      today,
+      now: zonedDateTime(today, "16:40"),
+      busy: [],
+    });
+    expect(todaySlots).toEqual(["17:00", "17:30", "18:00"]);
   });
 
   it("lê fromMe, status, QR e eventos do webhook da Evolution", () => {

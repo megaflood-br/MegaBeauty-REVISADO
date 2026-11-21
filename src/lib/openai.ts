@@ -106,23 +106,85 @@ export async function chatAsReceptionist(params: {
   system: string;
   incoming: string;
   history?: { role: "user" | "assistant"; text: string }[];
+  tools?: OpenAI.Chat.Completions.ChatCompletionTool[];
+  onToolCall?: (name: string, args: Record<string, unknown>) => Promise<string>;
+  maxToolRounds?: number;
 }) {
   const client = createOpenAI(params.apiKey);
   if (!client) return null;
-  const history = (params.history ?? []).slice(-8).map((item) => ({
+  const history: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = (params.history ?? []).slice(-8).map((item) => ({
     role: item.role === "assistant" ? ("assistant" as const) : ("user" as const),
     content: item.text,
   }));
-  const completion = await client.chat.completions.create({
+  const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
+    { role: "system", content: params.system },
+    ...history,
+    { role: "user", content: params.incoming },
+  ];
+
+  const hasTools = Boolean(params.tools?.length && params.onToolCall);
+  if (!hasTools) {
+    const completion = await client.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0.5,
+      max_tokens: 240,
+      messages,
+    });
+    const text = completion.choices[0]?.message?.content?.trim() ?? "";
+    return text || null;
+  }
+
+  const maxRounds = Math.min(3, Math.max(1, params.maxToolRounds ?? 3));
+  for (let round = 0; round < maxRounds; round++) {
+    const completion = await client.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0.5,
+      max_tokens: 260,
+      messages,
+      tools: params.tools,
+      tool_choice: "auto",
+    });
+    const message = completion.choices[0]?.message;
+    if (!message) return null;
+
+    const toolCalls = message.tool_calls ?? [];
+    if (!toolCalls.length) {
+      const text = message.content?.trim() ?? "";
+      return text || null;
+    }
+
+    messages.push({
+      role: "assistant",
+      content: message.content ?? "",
+      tool_calls: toolCalls,
+    });
+
+    for (const toolCall of toolCalls.slice(0, 4)) {
+      if (toolCall.type !== "function") continue;
+      let parsedArgs: Record<string, unknown> = {};
+      try {
+        const raw = JSON.parse(toolCall.function.arguments || "{}");
+        if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+          parsedArgs = raw as Record<string, unknown>;
+        }
+      } catch {
+        parsedArgs = {};
+      }
+      const toolOutput = await params.onToolCall!(toolCall.function.name, parsedArgs);
+      messages.push({
+        role: "tool",
+        tool_call_id: toolCall.id,
+        content: toolOutput,
+      });
+    }
+  }
+
+  const finalCompletion = await client.chat.completions.create({
     model: "gpt-4o-mini",
     temperature: 0.5,
-    max_tokens: 220,
-    messages: [
-      { role: "system", content: params.system },
-      ...history,
-      { role: "user", content: params.incoming },
-    ],
+    max_tokens: 240,
+    messages,
   });
-  const text = completion.choices[0]?.message?.content?.trim() ?? "";
-  return text || null;
+  const finalText = finalCompletion.choices[0]?.message?.content?.trim() ?? "";
+  return finalText || null;
 }

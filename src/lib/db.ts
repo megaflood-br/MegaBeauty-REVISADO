@@ -1,9 +1,22 @@
+import path from "node:path";
 import { PrismaClient } from "@prisma/client";
+import { applyTenantIsolation, createTenantPrisma } from "@/lib/prisma-tenant";
+import type { TenantScopeKind } from "@/lib/tenant-context";
 
-const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
+const globalForPrisma = globalThis as unknown as {
+  prismaBase?: PrismaClient;
+  prisma?: ReturnType<typeof applyTenantIsolation>;
+};
 
-function createPrisma() {
+function resolveDatabaseUrl() {
+  const configured = process.env.DATABASE_URL?.trim();
+  if (configured) return configured;
+  return `file:${path.resolve(process.cwd(), "prisma/dev.db")}`;
+}
+
+function createBasePrisma() {
   return new PrismaClient({
+    datasourceUrl: resolveDatabaseUrl(),
     log: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
   });
 }
@@ -63,8 +76,34 @@ function isCurrentClient(client: PrismaClient | undefined): client is PrismaClie
   );
 }
 
-export const prisma = isCurrentClient(globalForPrisma.prisma) ? globalForPrisma.prisma : createPrisma();
+const currentBase = isCurrentClient(globalForPrisma.prismaBase)
+  ? globalForPrisma.prismaBase
+  : createBasePrisma();
+
+/**
+ * Unscoped base PrismaClient for platform-wide operations or migrations.
+ * Prefer `prisma` (automatically tenant-isolated) or `withoutTenantScope(...)`.
+ */
+export const unscopedPrisma = currentBase;
+
+/**
+ * Default Prisma client with automatic `tenantId` isolation across all
+ * tenant-scoped models whenever an active request or AsyncLocalStorage
+ * tenant context is present.
+ */
+export const prisma =
+  globalForPrisma.prismaBase === currentBase && globalForPrisma.prisma
+    ? globalForPrisma.prisma
+    : applyTenantIsolation(currentBase);
+
+/**
+ * Returns a Prisma client permanently locked to a single `tenantId`.
+ */
+export function prismaForTenant(tenantId: string, kind: TenantScopeKind = "SALON") {
+  return createTenantPrisma(unscopedPrisma, tenantId, kind);
+}
 
 if (process.env.NODE_ENV !== "production") {
+  globalForPrisma.prismaBase = currentBase;
   globalForPrisma.prisma = prisma;
 }

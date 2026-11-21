@@ -5,7 +5,7 @@ import { revalidatePath } from "next/cache";
 import { addDays } from "date-fns";
 import { prisma } from "@/lib/db";
 import { hashPassword, homePath, setSessionCookie } from "@/lib/auth";
-import { requirePlatformAdmin, requireSession } from "@/lib/tenant";
+import { requirePlatformAdmin, requireSession, withoutTenantScope } from "@/lib/tenant";
 import { slugify } from "@/lib/utils";
 import { ensureFinanceCatalog } from "@/lib/finance-catalog";
 import { ensureAnamnesisForms } from "@/lib/anamnesis";
@@ -170,7 +170,9 @@ export async function impersonateTenant(formData: FormData) {
 export async function stopImpersonation() {
   const session = await requireSession();
   if (!session.impersonatorId) redirect("/plataforma");
-  const admin = await prisma.user.findUnique({ where: { id: session.impersonatorId } });
+  const admin = await withoutTenantScope(() =>
+    prisma.user.findUnique({ where: { id: session.impersonatorId } }),
+  );
   if (!admin || admin.role !== "SUPER_ADMIN" || !admin.active) {
     redirect("/login");
   }

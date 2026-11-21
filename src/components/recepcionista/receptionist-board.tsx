@@ -312,7 +312,7 @@ export function ReceptionistBoard({
             <Textarea
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
-              placeholder="Ex.: tem horário de escova amanhã?"
+              placeholder="Ex.: tem vaga para luzes sexta que vem ou dia 28?"
               className="min-h-16"
             />
             <Button type="button" disabled={testing || !draft.trim()} onClick={sendTest}>

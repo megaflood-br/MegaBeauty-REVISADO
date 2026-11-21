@@ -7,7 +7,7 @@ import { Badge, Button, Input } from "@/components/ui";
 import { PlanDrawer } from "@/components/plataforma/plan-drawer";
 import { deletePlatformPlan, setPlatformPlanActive } from "@/app/actions/plans";
 import { useConfirm } from "@/components/confirm-dialog";
-import { formatPlanPrice } from "@/lib/plans";
+import { formatPlanPrice } from "@/lib/plan-format";
 import { cn } from "@/lib/utils";
 import type { PlatformPlanRow } from "@/components/plataforma/plan-types";
 

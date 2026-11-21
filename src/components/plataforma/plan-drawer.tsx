@@ -6,7 +6,7 @@ import { X } from "lucide-react";
 import { Button, Field, Input, Select, Textarea } from "@/components/ui";
 import { savePlatformPlan } from "@/app/actions/plans";
 import { formatBRL } from "@/lib/money";
-import { PLAN_INTERVALS, PLAN_INTERVAL_LABEL } from "@/lib/plans";
+import { PLAN_INTERVALS, PLAN_INTERVAL_LABEL } from "@/lib/plan-format";
 import type { PlatformPlanRow } from "@/components/plataforma/plan-types";
 
 export function PlanDrawer({

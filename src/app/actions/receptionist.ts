@@ -88,6 +88,7 @@ export async function testReceptionist(formData: FormData) {
     instructions: String(formData.get("instructions") ?? config.instructions),
   });
   const reply = await generateReceptionistReply({
+    tenantId: session.tenantId,
     config: live,
     catalog,
     incoming,

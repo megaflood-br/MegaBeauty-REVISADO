@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/db";
+import { withoutTenantScope } from "@/lib/tenant-context";
 import {
   SUPPORT_CATEGORIES,
   SUPPORT_PRIORITIES,
@@ -221,24 +222,31 @@ export async function buildSupportLive(session: SessionUser, ticketId?: string |
   await expireStaleCalls();
 
   const since = new Date(Date.now() - 45_000);
-  const presences = await prisma.supportPresence.findMany({
-    where: { lastSeenAt: { gte: since } },
-    include: { user: true, tenant: true },
-  });
+  const presences = await withoutTenantScope(() =>
+    prisma.supportPresence.findMany({
+      where: {
+        lastSeenAt: { gte: since },
+        ...(side === "SALON" ? { side: "PLATFORM" } : {}),
+      },
+      include: { user: true, tenant: true },
+    }),
+  );
   const online = presences.filter((row) => isPresenceOnline(row.lastSeenAt));
 
   const adminOnline = online.some((row) => row.side === "PLATFORM");
   const salonGroups = new Map<string, SupportLiveState["onlineSalons"][number]>();
-  for (const row of online) {
-    if (row.side !== "SALON" || row.tenant.isPlatform) continue;
-    const current = salonGroups.get(row.tenantId) ?? {
-      tenantId: row.tenantId,
-      name: row.tenant.name,
-      slug: row.tenant.slug,
-      users: [],
-    };
-    current.users.push({ id: row.userId, name: row.user.name });
-    salonGroups.set(row.tenantId, current);
+  if (side === "PLATFORM") {
+    for (const row of online) {
+      if (row.side !== "SALON" || row.tenant.isPlatform) continue;
+      const current = salonGroups.get(row.tenantId) ?? {
+        tenantId: row.tenantId,
+        name: row.tenant.name,
+        slug: row.tenant.slug,
+        users: [],
+      };
+      current.users.push({ id: row.userId, name: row.user.name });
+      salonGroups.set(row.tenantId, current);
+    }
   }
 
   const callWhere =

@@ -1,16 +1,30 @@
+import type OpenAI from "openai";
 import { prisma } from "@/lib/db";
-import { calendarDate, formatTime, rangeOfCalendarDate, shiftCalendarDate } from "@/lib/dates";
+import { calendarDate, formatDayLabel, formatTime, rangeOfCalendarDate, shiftCalendarDate } from "@/lib/dates";
 import { resolvePlatformIntegrations } from "@/lib/integrations";
 import { sendSalonWhatsApp } from "@/lib/whatsapp-send";
 import { isConfirmReply, isConversationBotPaused, looksLikeReminderPrompt, spin } from "@/lib/whatsapp-copy";
 import { chatAsReceptionist } from "@/lib/openai";
-import { freeSlotsForProfessional } from "@/lib/assistant";
+import {
+  MAX_LOOKAHEAD_DAYS,
+  calendarDayDiff,
+  clampDurationMin,
+  contiguousSlotsForDuration,
+  formatAvailabilityForPrompt,
+  formatAvailabilitySlots,
+  isValidCalendarDate,
+  parseRequestedDate,
+  type AvailabilityDayResult,
+} from "@/lib/receptionist-availability";
 import {
   DEFAULT_RECEPTIONIST,
   buildReceptionistSystemPrompt,
   formatServicePrice,
   localReceptionistReply,
+  matchCatalogProfessional,
+  matchCatalogService,
   normalizeReceptionist,
+  resolveAvailabilityIntentFromMessages,
   wantsHumanHandover,
   type ReceptionistCatalog,
   type ReceptionistConfig,
@@ -46,14 +60,17 @@ export async function ensureReceptionist(tenantId: string) {
   });
 }
 
-function slotList(input: {
-  openTime: string;
-  closeTime: string;
-  slotMinutes: number;
-  nowHHmm?: string;
-  busy: { start: string; end: string }[];
-}) {
-  return freeSlotsForProfessional(input).filter((_, index) => index % 2 === 0).slice(0, 8);
+function busyForDayRange(
+  appointments: { professionalId: string; startAt: Date; endAt: Date }[],
+  professionalId: string,
+  dayRange: { start: Date; end: Date },
+) {
+  return appointments
+    .filter((item) => item.professionalId === professionalId && item.startAt < dayRange.end && item.endAt > dayRange.start)
+    .map((item) => ({
+      start: item.startAt <= dayRange.start ? "00:00" : formatTime(item.startAt),
+      end: item.endAt >= dayRange.end ? "24:00" : formatTime(item.endAt),
+    }));
 }
 
 export async function loadReceptionistCatalog(tenantId: string): Promise<ReceptionistCatalog> {
@@ -91,7 +108,8 @@ export async function loadReceptionistCatalog(tenantId: string): Promise<Recepti
       where: {
         tenantId,
         status: { not: "CANCELLED" },
-        startAt: { gte: todayRange.start, lt: tomorrowRange.end },
+        startAt: { lt: tomorrowRange.end },
+        endAt: { gt: todayRange.start },
       },
       select: { professionalId: true, startAt: true, endAt: true },
     }),
@@ -101,6 +119,9 @@ export async function loadReceptionistCatalog(tenantId: string): Promise<Recepti
     salon: tenant.name,
     city: tenant.city,
     hours: `${tenant.openTime} às ${tenant.closeTime}`,
+    todayDate: today,
+    todayLabel: formatDayLabel(today),
+    slotMinutes: tenant.slotMinutes,
     services: services.map((service) => ({
       name: service.name,
       durationMin: service.durationMin,
@@ -112,27 +133,25 @@ export async function loadReceptionistCatalog(tenantId: string): Promise<Recepti
     professionals: professionals.map((row) => {
       const openTime = row.workStart || tenant.openTime;
       const closeTime = row.workEnd || tenant.closeTime;
-      const todayBusy = appointments
-        .filter((item) => item.professionalId === row.id && item.startAt >= todayRange.start && item.startAt < todayRange.end)
-        .map((item) => ({ start: formatTime(item.startAt), end: formatTime(item.endAt) }));
-      const tomorrowBusy = appointments
-        .filter((item) => item.professionalId === row.id && item.startAt >= tomorrowRange.start && item.startAt < tomorrowRange.end)
-        .map((item) => ({ start: formatTime(item.startAt), end: formatTime(item.endAt) }));
+      const todayBusy = busyForDayRange(appointments, row.id, todayRange);
+      const tomorrowBusy = busyForDayRange(appointments, row.id, tomorrowRange);
       return {
         name: row.name,
         nickname: row.nickname,
         specialty: row.specialty,
-        today: slotList({
+        today: contiguousSlotsForDuration({
           openTime,
           closeTime,
           slotMinutes: tenant.slotMinutes,
+          durationMin: tenant.slotMinutes,
           nowHHmm,
           busy: todayBusy,
         }),
-        tomorrow: slotList({
+        tomorrow: contiguousSlotsForDuration({
           openTime,
           closeTime,
           slotMinutes: tenant.slotMinutes,
+          durationMin: tenant.slotMinutes,
           busy: tomorrowBusy,
         }),
       };
@@ -140,7 +159,184 @@ export async function loadReceptionistCatalog(tenantId: string): Promise<Recepti
   };
 }
 
+export async function queryReceptionistAvailability(input: {
+  tenantId: string;
+  date: string;
+  serviceName?: string | null;
+  professionalName?: string | null;
+  durationMin?: number | null;
+  referenceDate?: string;
+  nowHHmm?: string;
+}): Promise<AvailabilityDayResult> {
+  const today = input.referenceDate && isValidCalendarDate(input.referenceDate) ? input.referenceDate : calendarDate();
+  const parsed = isValidCalendarDate(input.date)
+    ? {
+        date: input.date,
+        label: formatDayLabel(input.date),
+        isPast: calendarDayDiff(today, input.date) < 0,
+        outOfRange: calendarDayDiff(today, input.date) > MAX_LOOKAHEAD_DAYS,
+      }
+    : parseRequestedDate(input.date, today);
+
+  const targetDate = parsed?.date ?? today;
+  const targetLabel = parsed?.label ?? formatDayLabel(targetDate);
+  const diff = calendarDayDiff(today, targetDate);
+  const isPast = diff < 0;
+  const outOfRange = diff > MAX_LOOKAHEAD_DAYS;
+
+  const tenant = await prisma.tenant.findUnique({
+    where: { id: input.tenantId },
+    select: { openTime: true, closeTime: true, slotMinutes: true },
+  });
+  const slotMinutes = tenant?.slotMinutes ?? 15;
+  const fallbackDuration = clampDurationMin(input.durationMin, slotMinutes);
+
+  if (!tenant || isPast || outOfRange) {
+    return {
+      date: targetDate,
+      label: targetLabel,
+      durationMin: fallbackDuration,
+      serviceName: input.serviceName ?? null,
+      slotMinutes,
+      isPast,
+      outOfRange,
+      professionals: [],
+    };
+  }
+
+  const dayRange = rangeOfCalendarDate(targetDate);
+  const [services, professionals, appointments] = await Promise.all([
+    prisma.service.findMany({
+      where: { tenantId: input.tenantId, active: true },
+      orderBy: { name: "asc" },
+      select: {
+        name: true,
+        durationMin: true,
+        priceCents: true,
+        professionals: { select: { professional: { select: { id: true, name: true, active: true } } } },
+      },
+    }),
+    prisma.professional.findMany({
+      where: { tenantId: input.tenantId, active: true, generateAgenda: true },
+      orderBy: { name: "asc" },
+      select: { id: true, name: true, nickname: true, specialty: true, workStart: true, workEnd: true },
+    }),
+    prisma.appointment.findMany({
+      where: {
+        tenantId: input.tenantId,
+        status: { not: "CANCELLED" },
+        startAt: { lt: dayRange.end },
+        endAt: { gt: dayRange.start },
+      },
+      select: { professionalId: true, startAt: true, endAt: true },
+    }),
+  ]);
+
+  const catalogServices = services.map((service) => ({
+    name: service.name,
+    durationMin: service.durationMin,
+    price: formatServicePrice(service.priceCents),
+    professionals: service.professionals.filter((p) => p.professional.active).map((p) => p.professional.name),
+    professionalIds: service.professionals.filter((p) => p.professional.active).map((p) => p.professional.id),
+  }));
+
+  const matchedService = input.serviceName
+    ? matchCatalogService(input.serviceName, catalogServices)
+    : null;
+  const matchedServiceFull = matchedService
+    ? catalogServices.find((item) => item.name === matchedService.name) ?? null
+    : null;
+
+  const durationMin = matchedServiceFull
+    ? clampDurationMin(matchedServiceFull.durationMin, slotMinutes)
+    : clampDurationMin(input.durationMin, slotMinutes);
+
+  let eligible = professionals;
+  if (matchedServiceFull && matchedServiceFull.professionalIds.length > 0) {
+    const allowedIds = new Set(matchedServiceFull.professionalIds);
+    eligible = eligible.filter((prof) => allowedIds.has(prof.id));
+  }
+
+  if (input.professionalName) {
+    const matchedProf = matchCatalogProfessional(
+      input.professionalName,
+      professionals.map((row) => ({
+        name: row.name,
+        nickname: row.nickname,
+        specialty: row.specialty,
+        today: [],
+        tomorrow: [],
+      })),
+    );
+    eligible = matchedProf ? eligible.filter((row) => row.name === matchedProf.name) : [];
+  }
+
+  const effectiveNow = targetDate === today ? (input.nowHHmm ?? formatTime(new Date())) : undefined;
+
+  return {
+    date: targetDate,
+    label: targetLabel,
+    durationMin,
+    serviceName: matchedServiceFull?.name ?? null,
+    slotMinutes,
+    isPast: false,
+    outOfRange: false,
+    professionals: eligible.map((row) => {
+      const openTime = row.workStart || tenant.openTime;
+      const closeTime = row.workEnd || tenant.closeTime;
+      const busy = busyForDayRange(appointments, row.id, dayRange);
+      const startTimes = contiguousSlotsForDuration({
+        openTime,
+        closeTime,
+        slotMinutes,
+        durationMin,
+        busy,
+        nowHHmm: effectiveNow,
+      });
+      return {
+        name: row.name,
+        nickname: row.nickname,
+        specialty: row.specialty,
+        startTimes,
+        summary: formatAvailabilitySlots(startTimes, slotMinutes),
+      };
+    }),
+  };
+}
+
+const CHECK_AVAILABILITY_TOOL: OpenAI.Chat.Completions.ChatCompletionTool = {
+  type: "function",
+  function: {
+    name: "check_availability",
+    description:
+      "Consulta a agenda real do salão para uma data (hoje até 60 dias à frente) calculando horários de início exatos em bloco contínuo para a duração completa do serviço.",
+    parameters: {
+      type: "object",
+      properties: {
+        date: {
+          type: "string",
+          description: "Data desejada no formato YYYY-MM-DD (ex.: 2026-11-28) ou expressão em português (ex.: sexta que vem, dia 28).",
+        },
+        serviceName: {
+          type: "string",
+          description: "Nome do serviço do catálogo (usado para filtrar profissionais habilitadas e duração exata).",
+        },
+        professionalName: {
+          type: "string",
+          description: "Nome ou apelido da profissional, se a cliente pediu alguém específico.",
+        },
+        durationMin: {
+          type: "integer",
+          description: "Duração em minutos (5 a 600), caso a cliente não tenha informado um serviço do catálogo.",
+        },
+      },
+      required: ["date"],
+    },
+  },
+};
+
 export async function generateReceptionistReply(input: {
+  tenantId?: string;
   config: ReceptionistConfig;
   catalog: ReceptionistCatalog;
   incoming: string;
@@ -148,19 +344,91 @@ export async function generateReceptionistReply(input: {
   apiKey?: string | null;
 }) {
   const handover = wantsHumanHandover(input.incoming);
+  if (handover) {
+    const local = localReceptionistReply({
+      config: input.config,
+      catalog: input.catalog,
+      incoming: input.incoming,
+    });
+    return { text: local.text, handover: true, source: "local" as const };
+  }
+
+  let precomputedAvailability: AvailabilityDayResult | null = null;
+  if (input.tenantId) {
+    const intent = resolveAvailabilityIntentFromMessages({
+      incoming: input.incoming,
+      history: input.history,
+      catalog: input.catalog,
+      referenceDate: input.catalog.todayDate,
+    });
+
+    const shouldQueryAvailability =
+      Boolean(intent.dateMatch) ||
+      (intent.asksForSlots && Boolean(intent.service || intent.professional || intent.explicitDurationMin));
+
+    if (shouldQueryAvailability) {
+      const today = input.catalog.todayDate ?? calendarDate();
+      const requestedDate = intent.dateMatch?.date ?? today;
+      let result = await queryReceptionistAvailability({
+        tenantId: input.tenantId,
+        date: requestedDate,
+        serviceName: intent.service?.name ?? null,
+        professionalName: intent.professional?.name ?? null,
+        durationMin: intent.service?.durationMin ?? intent.explicitDurationMin ?? null,
+        referenceDate: today,
+      });
+
+      // If client asked generally ("tem vaga para luzes?") without naming a date and today has no contiguous block, check tomorrow automatically
+      const hasAnySlot = result.professionals.some((row) => row.startTimes.length > 0);
+      if (!intent.dateMatch && !hasAnySlot) {
+        const tomorrowResult = await queryReceptionistAvailability({
+          tenantId: input.tenantId,
+          date: shiftCalendarDate(today, 1),
+          serviceName: intent.service?.name ?? null,
+          professionalName: intent.professional?.name ?? null,
+          durationMin: intent.service?.durationMin ?? intent.explicitDurationMin ?? null,
+          referenceDate: today,
+        });
+        if (tomorrowResult.professionals.some((row) => row.startTimes.length > 0)) {
+          result = tomorrowResult;
+        }
+      }
+      precomputedAvailability = result;
+    }
+  }
+
   const local = localReceptionistReply({
     config: input.config,
     catalog: input.catalog,
     incoming: input.incoming,
+    availability: precomputedAvailability,
   });
-  if (handover) return { text: local.text, handover: true, source: "local" as const };
 
   try {
     const openai = await chatAsReceptionist({
       apiKey: input.apiKey,
-      system: buildReceptionistSystemPrompt(input.config, input.catalog),
+      system: buildReceptionistSystemPrompt(input.config, input.catalog, precomputedAvailability),
       incoming: input.incoming,
       history: input.history,
+      tools: input.tenantId ? [CHECK_AVAILABILITY_TOOL] : undefined,
+      onToolCall: input.tenantId
+        ? async (name, args) => {
+            if (name !== "check_availability") return "Ferramenta desconhecida.";
+            const rawDate = typeof args.date === "string" ? args.date.trim() : "";
+            const refDate = input.catalog.todayDate ?? calendarDate();
+            const resolvedDate = isValidCalendarDate(rawDate) ? rawDate : parseRequestedDate(rawDate, refDate)?.date ?? "";
+            if (!resolvedDate) return "Data inválida. Peça à cliente uma data válida (ex.: 28/11 ou sexta que vem).";
+            const result = await queryReceptionistAvailability({
+              tenantId: input.tenantId!,
+              date: resolvedDate,
+              serviceName: typeof args.serviceName === "string" ? args.serviceName.trim() : null,
+              professionalName: typeof args.professionalName === "string" ? args.professionalName.trim() : null,
+              durationMin: typeof args.durationMin === "number" ? args.durationMin : null,
+              referenceDate: refDate,
+            });
+            return formatAvailabilityForPrompt(result);
+          }
+        : undefined,
     });
     if (openai) return { text: openai.slice(0, 700), handover: false, source: "openai" as const };
   } catch {
@@ -212,6 +480,7 @@ export async function maybeReplyAsReceptionist(input: {
       text: row.body,
     }));
   const reply = await generateReceptionistReply({
+    tenantId: input.tenantId,
     config,
     catalog,
     incoming: input.incoming,

@@ -1,32 +1,41 @@
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/db";
 import { BookingWizard } from "@/components/booking-wizard";
-import { addDays } from "date-fns";
 import { loadPromoRules } from "@/lib/promo-load";
+import { withTenantContext } from "@/lib/tenant-context";
+import { PUBLIC_BOOKING_MAX_DAYS, publicBookingRange } from "@/lib/booking-availability";
 
 export default async function PublicBookingPage({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
   const tenant = await prisma.tenant.findUnique({
     where: { slug },
     include: {
-      services: { where: { active: true } },
+      services: { where: { active: true }, orderBy: { name: "asc" } },
       professionals: {
-        where: { active: true },
+        where: { active: true, generateAgenda: true },
+        orderBy: { name: "asc" },
         include: { serviceLinks: true },
       },
     },
   });
   if (!tenant) notFound();
 
-  const promotions = await loadPromoRules(tenant.id);
-  const busy = await prisma.appointment.findMany({
-    where: {
-      tenantId: tenant.id,
-      status: { notIn: ["CANCELLED"] },
-      startAt: { gte: new Date(), lt: addDays(new Date(), 14) },
-    },
-    select: { professionalId: true, startAt: true, endAt: true },
-  });
+  const horizon = publicBookingRange(undefined, PUBLIC_BOOKING_MAX_DAYS);
+
+  const [promotions, busy] = await withTenantContext(tenant.id, () =>
+    Promise.all([
+      loadPromoRules(tenant.id),
+      prisma.appointment.findMany({
+        where: {
+          tenantId: tenant.id,
+          status: { notIn: ["CANCELLED"] },
+          startAt: { lt: horizon.end },
+          endAt: { gt: horizon.start },
+        },
+        select: { professionalId: true, startAt: true, endAt: true },
+      }),
+    ]),
+  );
 
   return (
     <main className="mx-auto min-h-screen max-w-xl px-4 py-10">
@@ -40,12 +49,16 @@ export default async function PublicBookingPage({ params }: { params: Promise<{ 
           openTime={tenant.openTime}
           closeTime={tenant.closeTime}
           slotMinutes={tenant.slotMinutes}
+          today={horizon.today}
+          maxDays={PUBLIC_BOOKING_MAX_DAYS}
           promotions={promotions}
           services={tenant.services}
           professionals={tenant.professionals.map((p) => ({
             id: p.id,
             name: p.name,
             color: p.color,
+            workStart: p.workStart,
+            workEnd: p.workEnd,
             serviceIds: p.serviceLinks.map((l) => l.serviceId),
           }))}
           busy={busy.map((b) => ({

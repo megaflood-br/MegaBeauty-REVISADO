@@ -16,21 +16,27 @@ import { ensureFinanceCatalog } from "@/lib/finance-catalog";
 import { ensureAnamnesisForms } from "@/lib/anamnesis";
 import { resolveSignupPlan } from "@/lib/plans";
 import { firstTouchPartnerId, PARTNER_REF_COOKIE, partnerHostCandidates, sanitizePartnerSlug } from "@/lib/partners";
+import { getDetectedTenantHeaders } from "@/lib/tenant-headers";
+import { withoutTenantScope } from "@/lib/tenant-context";
 
 async function resolveSignupPartner() {
   const jar = await cookies();
   const headerList = await headers();
   const ref = sanitizePartnerSlug(headerList.get("x-partner-ref") || jar.get(PARTNER_REF_COOKIE)?.value);
   if (ref) {
-    const bySlug = await prisma.partner.findUnique({ where: { slug: ref }, select: { id: true, status: true } });
+    const bySlug = await withoutTenantScope(() =>
+      prisma.partner.findUnique({ where: { slug: ref }, select: { id: true, status: true } }),
+    );
     if (bySlug) return bySlug;
   }
   const candidates = partnerHostCandidates(headerList.get("x-forwarded-host") || headerList.get("host"));
   if (!candidates.length) return null;
-  const byHost = await prisma.partnerBrand.findFirst({
-    where: { customHost: { in: candidates } },
-    select: { partner: { select: { id: true, status: true } } },
-  });
+  const byHost = await withoutTenantScope(() =>
+    prisma.partnerBrand.findFirst({
+      where: { customHost: { in: candidates } },
+      select: { partner: { select: { id: true, status: true } } },
+    }),
+  );
   return byHost?.partner ?? null;
 }
 
@@ -41,7 +47,9 @@ export async function loginAction(formData: FormData) {
   const password = String(formData.get("password") ?? "");
   const next = String(formData.get("next") ?? "/dashboard");
 
-  const user = await prisma.user.findUnique({ where: { email }, include: { tenant: true } });
+  const user = await withoutTenantScope(() =>
+    prisma.user.findUnique({ where: { email }, include: { tenant: true } }),
+  );
   if (!user || !user.active) {
     return { error: "E-mail ou senha inválidos." };
   }
@@ -49,6 +57,20 @@ export async function loginAction(formData: FormData) {
   if (!ok) return { error: "E-mail ou senha inválidos." };
   if (user.tenant.status === "SUSPENDED" && user.role !== "SUPER_ADMIN") {
     return { error: "Esta conta está suspensa. Fale com o suporte MegaBeauty." };
+  }
+
+  // If signing in through a specific salon subdomain or `/t/[slug]/login`, ensure the account belongs to that salon.
+  const detected = await getDetectedTenantHeaders();
+  if (detected.slug && user.role !== "SUPER_ADMIN" && (detected.source === "domain" || detected.source === "path")) {
+    const targetSalon = await withoutTenantScope(() =>
+      prisma.tenant.findFirst({
+        where: { slug: detected.slug, kind: "SALON", isPlatform: false },
+        select: { id: true },
+      }),
+    );
+    if (targetSalon && user.tenantId !== targetSalon.id) {
+      return { error: "Esta conta não pertence ao salão acessado neste endereço." };
+    }
   }
 
   await setSessionCookie({
@@ -76,11 +98,11 @@ export async function registerAction(formData: FormData) {
     return { error: "Preencha todos os campos. A senha precisa ter 6+ caracteres." };
   }
 
-  const exists = await prisma.user.findUnique({ where: { email } });
+  const exists = await withoutTenantScope(() => prisma.user.findUnique({ where: { email } }));
   if (exists) return { error: "Já existe uma conta com este e-mail." };
 
   let slug = slugify(salon);
-  const slugTaken = await prisma.tenant.findUnique({ where: { slug } });
+  const slugTaken = await withoutTenantScope(() => prisma.tenant.findUnique({ where: { slug } }));
   if (slugTaken) slug = `${slug}-${Math.random().toString(36).slice(2, 6)}`;
 
   const signupPlan = await resolveSignupPlan();
