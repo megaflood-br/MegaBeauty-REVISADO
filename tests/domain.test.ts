@@ -8,7 +8,17 @@ import { allocatePayments, comandaTotal, paymentChange } from "@/lib/comandas";
 import { calendarDate, daysBetween, eachCalendarDate, formatTime, minutesInTz, minutesToLabel, parseHHmm, shiftCalendarDate, zonedDateTime } from "@/lib/dates";
 import { buildClientMetrics } from "@/lib/client-metrics";
 import { financeOrigin, financeTitular } from "@/lib/finance";
-import { averageTicket, bucketAppointmentStatus, conversionRate, percentDelta, previousPeriod, rankProfessionals } from "@/lib/dashboard";
+import {
+  averageTicket,
+  bucketAppointmentStatus,
+  buildLast7DaysRevenue,
+  buildProfessionalOfTheDay,
+  buildTodayOverview,
+  conversionRate,
+  percentDelta,
+  previousPeriod,
+  rankProfessionals,
+} from "@/lib/dashboard";
 import { accountBalanceDelta, availableAt, feeCents, netAmountCents, settlementLabel, summarizeAccountBalances } from "@/lib/ledger";
 import { collectAlerts, DEFAULT_ANAMNESIS_FORMS, missingRequired, parseQuestions, serializeQuestions } from "@/lib/anamnesis";
 
@@ -285,6 +295,122 @@ describe("painel", () => {
     ]);
     expect(ranking[0]).toMatchObject({ name: "Camila", services: 2, place: 1, avgCents: 23000 });
     expect(previousPeriod("2026-08-12", "2026-08-26")).toEqual({ from: "2026-07-28", to: "2026-08-11" });
+  });
+
+  it("calcula KPIs do dia atual sem duplicar receita de agendamentos com comanda", () => {
+    const overview = buildTodayOverview({
+      today: "2026-11-20",
+      todayIncomeCents: 15000,
+      appointments: [
+        { status: "CONFIRMED", hasComanda: false, items: [{ priceCents: 12000 }] },
+        { status: "PENDING", hasComanda: true, items: [{ priceCents: 8000 }] },
+        { status: "COMPLETED", hasComanda: true, items: [{ priceCents: 15000 }] },
+        { status: "CANCELLED", hasComanda: false, items: [{ priceCents: 9000 }] },
+      ],
+      openComandas: [
+        {
+          discountCents: 1000,
+          creditCents: 0,
+          cashbackCents: 0,
+          items: [{ quantity: 1, priceCents: 8000, discountCents: 0 }],
+        },
+      ],
+    });
+    expect(overview).toMatchObject({
+      appointmentsTotal: 3,
+      appointmentsConfirmed: 1,
+      appointmentsPending: 1,
+      appointmentsCompleted: 1,
+      appointmentsCancelled: 1,
+      openComandasCount: 1,
+      openComandasCents: 7000,
+      realizedRevenueCents: 15000,
+      scheduledRemainingCents: 12000,
+      expectedRevenueCents: 34000,
+      realizedPct: 44,
+    });
+  });
+
+  it("monta série diária de receita dos últimos 7 dias com média, pico e variação", () => {
+    const result = buildLast7DaysRevenue({
+      today: "2026-11-20",
+      prevTotalCents: 50000,
+      income: [
+        { date: "2026-11-10", amountCents: 99900 }, // fora da janela
+        { date: "2026-11-14", amountCents: 10000 },
+        { date: "2026-11-18", amountCents: 25000 },
+        { date: "2026-11-18", amountCents: 15000 },
+        { date: "2026-11-20", amountCents: 20000 },
+      ],
+    });
+
+    expect(result.from).toBe("2026-11-14");
+    expect(result.to).toBe("2026-11-20");
+    expect(result.days).toHaveLength(7);
+    expect(result.totalCents).toBe(70000);
+    expect(result.averageCents).toBe(10000);
+    expect(result.deltaPct).toBe(40);
+    expect(result.peakDay).toMatchObject({
+      date: "2026-11-18",
+      revenueCents: 40000,
+      revenueBRL: 400,
+      transactionsCount: 2,
+      isPeak: true,
+    });
+    expect(result.days.find((d) => d.date === "2026-11-15")).toMatchObject({
+      revenueCents: 0,
+      transactionsCount: 0,
+    });
+    expect(result.days.at(-1)).toMatchObject({
+      date: "2026-11-20",
+      isToday: true,
+      revenueCents: 20000,
+    });
+  });
+
+  it("identifica o Profissional do Dia por atendimentos e por comissões nas últimas 24h", () => {
+    const result = buildProfessionalOfTheDay({
+      attendances: [
+        { professionalId: "p1", name: "Ana Silva", specialty: "Cabelo", color: "#2563EB", priceCents: 8000 },
+        { professionalId: "p1", name: "Ana Silva", specialty: "Cabelo", color: "#2563EB", priceCents: 9000 },
+        { professionalId: "p1", name: "Ana Silva", specialty: "Cabelo", color: "#2563EB", priceCents: 7000 },
+        { professionalId: "p2", name: "Bruno Costa", specialty: "Coloração", color: "#8B5CF6", priceCents: 45000 },
+      ],
+      commissions: [
+        { professionalId: "p1", name: "Ana Silva", specialty: "Cabelo", color: "#2563EB", amountCents: 9600 },
+        { professionalId: "p2", name: "Bruno Costa", specialty: "Coloração", color: "#8B5CF6", amountCents: 22500 },
+      ],
+    });
+
+    expect(result.defaultCriterion).toBe("attendances");
+    expect(result.activeProfessionalsCount).toBe(2);
+    expect(result.byAttendances).toMatchObject({
+      professionalId: "p1",
+      name: "Ana Silva",
+      attendances: 3,
+      commissionCents: 9600,
+    });
+    expect(result.byCommissions).toMatchObject({
+      professionalId: "p2",
+      name: "Bruno Costa",
+      attendances: 1,
+      commissionCents: 22500,
+    });
+
+    const onlyCommissions = buildProfessionalOfTheDay({
+      attendances: [],
+      commissions: [
+        { professionalId: "p3", name: "Carla Dias", amountCents: 12000 },
+      ],
+    });
+    expect(onlyCommissions.byAttendances).toBeNull();
+    expect(onlyCommissions.byCommissions).toMatchObject({ professionalId: "p3", commissionCents: 12000 });
+    expect(onlyCommissions.defaultCriterion).toBe("commissions");
+
+    const empty = buildProfessionalOfTheDay({ attendances: [], commissions: [] });
+    expect(empty.byAttendances).toBeNull();
+    expect(empty.byCommissions).toBeNull();
+    expect(empty.activeProfessionalsCount).toBe(0);
   });
 });
 

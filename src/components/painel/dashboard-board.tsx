@@ -5,8 +5,17 @@ import { Filter, Info, RefreshCw } from "lucide-react";
 import { Button, Card, Input } from "@/components/ui";
 import { formatBRL } from "@/lib/money";
 import { formatMediumDate, zonedDateTime } from "@/lib/dates";
-import { firstName, type DashboardMetrics } from "@/lib/dashboard";
+import {
+  firstName,
+  type DashboardMetrics,
+  type Last7DaysRevenueMetrics,
+  type ProfessionalOfTheDayMetrics,
+  type TodayOverviewMetrics,
+} from "@/lib/dashboard";
 import { BarChart, CompareBars, DonutChart, Sparkline } from "@/components/painel/charts";
+import { ProfessionalOfTheDay } from "@/components/painel/professional-of-the-day";
+import { RevenueBarChart } from "@/components/painel/revenue-bar-chart";
+import { TodayOverview } from "@/components/painel/today-overview";
 import { cn } from "@/lib/utils";
 
 function dateLabel(date: string) {
@@ -44,9 +53,15 @@ function TrendBadge({
 export function DashboardBoard({
   userName,
   metrics,
+  todayOverview,
+  last7DaysRevenue,
+  professionalOfTheDay,
 }: {
   userName: string;
   metrics: DashboardMetrics;
+  todayOverview: TodayOverviewMetrics;
+  last7DaysRevenue: Last7DaysRevenueMetrics;
+  professionalOfTheDay: ProfessionalOfTheDayMetrics;
 }) {
   const [filterOpen, setFilterOpen] = useState(false);
   const [tab, setTab] = useState<"appointments" | "comandas">("appointments");
@@ -83,6 +98,17 @@ export function DashboardBoard({
           </Button>
         </form>
       </div>
+
+      <div className="grid items-stretch gap-5 xl:grid-cols-12">
+        <div className="xl:col-span-8">
+          <TodayOverview overview={todayOverview} />
+        </div>
+        <div className="xl:col-span-4">
+          <ProfessionalOfTheDay data={professionalOfTheDay} />
+        </div>
+      </div>
+
+      <RevenueBarChart data={last7DaysRevenue} />
 
       <p className="flex items-center justify-center gap-1.5 text-sm text-ink-soft">
         {dateLabel(metrics.from)} → {dateLabel(metrics.to)}
