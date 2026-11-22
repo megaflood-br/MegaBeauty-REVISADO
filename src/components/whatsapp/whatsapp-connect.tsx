@@ -349,7 +349,18 @@ function EvolutionPanel({
       {diagnostic ? (
         <div className="space-y-2 rounded-xl border border-line bg-sand/50 p-3 text-xs text-ink">
           <p className="font-semibold">Diagnóstico do recebimento ({diagnostic.instance})</p>
+          <p className={diagnostic.testReport.ok ? "font-medium text-emerald-700" : "font-medium text-amber-800"}>
+            {diagnostic.testReport.summary}
+          </p>
           <ul className="space-y-1 text-ink-soft">
+            <li>
+              Autenticação do token Evolution:{" "}
+              <strong className={diagnostic.authOk ? "text-emerald-700" : "text-red-600"}>
+                {diagnostic.authOk
+                  ? `Autenticado (HTTP ${diagnostic.authHttpStatus ?? 200})`
+                  : `Recusado / inacessível${diagnostic.authHttpStatus ? ` (HTTP ${diagnostic.authHttpStatus})` : ""}`}
+              </strong>
+            </li>
             <li>
               Estado real na Evolution:{" "}
               <strong className="text-ink">

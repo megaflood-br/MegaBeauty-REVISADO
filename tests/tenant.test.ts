@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { prisma, prismaForTenant, unscopedPrisma } from "@/lib/db";
 import { withTenantContext, withoutTenantScope } from "@/lib/tenant-context";
 import { TenantIsolationError } from "@/lib/prisma-tenant";
@@ -15,6 +15,7 @@ import { calendarDate, shiftCalendarDate, zonedDateTime } from "@/lib/dates";
 import { handleEvolutionWebhookRequest } from "@/lib/evolution-webhook-http";
 import { evolutionWebhookToken } from "@/lib/evolution-webhook-auth";
 import { ingestOutboundFromDevice } from "@/lib/whatsapp-inbound";
+import { testEvolutionAuthAndWebhook } from "@/lib/whatsapp-live";
 
 describe("detecção de tenant por domínio e path", () => {
   it("detecta subdomínio em produção e localhost, rejeitando reservados", () => {
@@ -463,6 +464,106 @@ describe("isolamento multi-tenant automático no Prisma", () => {
         where: { id: aurora!.id },
         data: originalState,
       });
+    }
+  });
+
+  it("testEvolutionAuthAndWebhook valida autenticação do token Evolution e apontamento exato da URL do webhook", async () => {
+    const hq = await unscopedPrisma.tenant.findFirst({ where: { isPlatform: true } });
+    const aurora = await unscopedPrisma.tenant.findUnique({ where: { slug: "studio-aurora" } });
+    expect(hq).toBeTruthy();
+    expect(aurora).toBeTruthy();
+
+    const originalHq = {
+      evolutionUrl: hq!.evolutionUrl,
+      evolutionApiKey: hq!.evolutionApiKey,
+      publicAppUrl: hq!.publicAppUrl,
+    };
+    const originalAurora = {
+      evolutionInstance: aurora!.evolutionInstance,
+      evolutionApiKey: aurora!.evolutionApiKey,
+    };
+
+    const apiKey = "evo-live-verify-key-999";
+    const appOrigin = "https://beauty.megaflood.cloud";
+    const expectedToken = evolutionWebhookToken(apiKey, "studio-aurora");
+    const expectedUrl = `${appOrigin}/api/webhooks/evolution?tenant=studio-aurora&token=${expectedToken}`;
+
+    await unscopedPrisma.tenant.update({
+      where: { id: hq!.id },
+      data: {
+        evolutionUrl: "https://evo.example.test",
+        evolutionApiKey: apiKey,
+        publicAppUrl: appOrigin,
+      },
+    });
+    await unscopedPrisma.tenant.update({
+      where: { id: aurora!.id },
+      data: {
+        evolutionInstance: "mb-studio-aurora",
+        evolutionApiKey: null,
+      },
+    });
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    try {
+      // Caso 1: Token válido (200) + webhook ativo apontado para nossa URL assinada + MESSAGES_UPSERT
+      fetchSpy.mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.includes("/instance/connectionState/")) {
+          return new Response(JSON.stringify({ instance: { state: "open" } }), { status: 200 });
+        }
+        if (url.includes("/webhook/find/")) {
+          return new Response(
+            JSON.stringify({
+              enabled: true,
+              url: expectedUrl,
+              byEvents: false,
+              events: ["MESSAGES_UPSERT", "CONNECTION_UPDATE"],
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response("not found", { status: 404 });
+      });
+
+      const okReport = await testEvolutionAuthAndWebhook(aurora!.id);
+      expect(okReport.ok).toBe(true);
+      expect(okReport.authOk).toBe(true);
+      expect(okReport.authHttpStatus).toBe(200);
+      expect(okReport.webhookPointedCorrectly).toBe(true);
+      expect(okReport.expectedWebhookUrlMasked).not.toContain(expectedToken);
+
+      // Caso 2: Token recusado pela Evolution (401)
+      fetchSpy.mockImplementation(async () => new Response(JSON.stringify({ message: "Unauthorized" }), { status: 401 }));
+      const badAuth = await testEvolutionAuthAndWebhook(aurora!.id);
+      expect(badAuth.ok).toBe(false);
+      expect(badAuth.authOk).toBe(false);
+      expect(badAuth.authHttpStatus).toBe(401);
+
+      // Caso 3: Token autenticado (200), mas webhook aponta para URL antiga / errada
+      fetchSpy.mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.includes("/instance/connectionState/")) {
+          return new Response(JSON.stringify({ instance: { state: "open" } }), { status: 200 });
+        }
+        return new Response(
+          JSON.stringify({
+            enabled: true,
+            url: "https://outro-dominio.example.com/webhook",
+            byEvents: false,
+            events: ["MESSAGES_UPSERT"],
+          }),
+          { status: 200 },
+        );
+      });
+      const wrongUrl = await testEvolutionAuthAndWebhook(aurora!.id);
+      expect(wrongUrl.ok).toBe(false);
+      expect(wrongUrl.authOk).toBe(true);
+      expect(wrongUrl.webhookPointedCorrectly).toBe(false);
+    } finally {
+      fetchSpy.mockRestore();
+      await unscopedPrisma.tenant.update({ where: { id: hq!.id }, data: originalHq });
+      await unscopedPrisma.tenant.update({ where: { id: aurora!.id }, data: originalAurora });
     }
   });
 });

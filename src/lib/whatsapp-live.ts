@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/db";
 import { evolutionWebhookUrl, instanceNameForTenant, maskSecret, metaWebhookUrl, resolvePlatformIntegrations } from "@/lib/integrations";
-import { evolutionWebhookToken } from "@/lib/evolution-webhook-auth";
+import { evolutionWebhookToken, verifyEvolutionWebhookAuth } from "@/lib/evolution-webhook-auth";
 import { listEvolutionWebhookTraces, maskWebhookUrlToken, type WebhookTraceEntry } from "@/lib/evolution-webhook-log";
 import {
   connectEvolutionInstance,
@@ -10,6 +10,7 @@ import {
   findEvolutionWebhook,
   getConnectionState,
   parseEvolutionState,
+  probeEvolutionAuth,
   setEvolutionWebhook,
   type EvolutionConfig,
 } from "@/lib/evolution";
@@ -244,8 +245,247 @@ export async function syncEvolutionWebhookAndState(tenantId: string) {
   };
 }
 
+export type EvolutionWebhookTestCheck = {
+  id: "credentials" | "token_auth" | "instance_state" | "webhook_enabled" | "webhook_url" | "webhook_events";
+  label: string;
+  ok: boolean;
+  detail: string;
+};
+
+export type EvolutionWebhookTestReport = {
+  ok: boolean;
+  tenantId: string;
+  tenantSlug: string;
+  instance: string;
+  evolutionOrigin: string;
+  authOk: boolean;
+  authHttpStatus: number | null;
+  instanceState: "open" | "connecting" | "close" | "unknown";
+  webhookPointedCorrectly: boolean;
+  expectedWebhookUrlMasked: string;
+  remoteWebhookUrlMasked: string;
+  checks: EvolutionWebhookTestCheck[];
+  summary: string;
+};
+
+function safeOrigin(url: string) {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return url.trim();
+  }
+}
+
+function compareWebhookUrls(remoteUrl: string, expectedUrl: string, tenantSlug: string) {
+  const cleanRemote = remoteUrl.trim().replace(/\/$/, "");
+  const cleanExpected = expectedUrl.trim().replace(/\/$/, "");
+  if (!cleanRemote || !cleanExpected) {
+    return { exactMatch: false, sameEndpoint: false, hasSignedToken: false };
+  }
+  if (cleanRemote === cleanExpected) {
+    return { exactMatch: true, sameEndpoint: true, hasSignedToken: true };
+  }
+  try {
+    const remoteParsed = new URL(cleanRemote);
+    const expectedParsed = new URL(cleanExpected);
+    const sameOriginAndPath =
+      remoteParsed.origin.toLowerCase() === expectedParsed.origin.toLowerCase() &&
+      remoteParsed.pathname.replace(/\/$/, "") === expectedParsed.pathname.replace(/\/$/, "");
+    const remoteTenant = (remoteParsed.searchParams.get("tenant") ?? "").split("/")[0].trim().toLowerCase();
+    const sameEndpoint = sameOriginAndPath && (!remoteTenant || remoteTenant === tenantSlug.toLowerCase());
+    const hasSignedToken = Boolean(remoteParsed.searchParams.get("token")?.trim());
+    return { exactMatch: false, sameEndpoint, hasSignedToken };
+  } catch {
+    return { exactMatch: false, sameEndpoint: false, hasSignedToken: false };
+  }
+}
+
+/**
+ * Script/rotina de teste que valida se:
+ * 1) O token da Evolution API autentica com sucesso no servidor Evolution;
+ * 2) A instância existe e está conectada;
+ * 3) O webhook de mensagens na Evolution está ativo, com MESSAGES_UPSERT e apontado para a URL assinada correta.
+ */
+export async function testEvolutionAuthAndWebhook(tenantId: string): Promise<EvolutionWebhookTestReport> {
+  const [tenant, server] = await Promise.all([
+    prisma.tenant.findUnique({ where: { id: tenantId } }),
+    resolvePlatformIntegrations(),
+  ]);
+  if (!tenant) throw new Error("Salão não encontrado.");
+
+  const instance = tenant.evolutionInstance || instanceNameForTenant(tenant.slug);
+  const evolutionOrigin = server.evolutionUrl ? safeOrigin(server.evolutionUrl) : "";
+  const { webhookUrl: expectedUrl } = signedEvolutionWebhook(server, tenant);
+  const expectedWebhookUrlMasked = maskWebhookUrlToken(expectedUrl);
+  const checks: EvolutionWebhookTestCheck[] = [];
+
+  if (!server.hasEvolution) {
+    checks.push({
+      id: "credentials",
+      label: "Credenciais da Evolution API",
+      ok: false,
+      detail: "EVOLUTION_API_URL e/ou EVOLUTION_API_KEY não estão configuradas na plataforma.",
+    });
+    return {
+      ok: false,
+      tenantId: tenant.id,
+      tenantSlug: tenant.slug,
+      instance,
+      evolutionOrigin,
+      authOk: false,
+      authHttpStatus: null,
+      instanceState: "unknown",
+      webhookPointedCorrectly: false,
+      expectedWebhookUrlMasked,
+      remoteWebhookUrlMasked: "",
+      checks,
+      summary: "Configure a URL e a API Key da Evolution em Integrações antes de testar.",
+    };
+  }
+
+  const secret = (tenant.evolutionApiKey || server.evolutionApiKey || "").trim();
+  const expectedToken = evolutionWebhookToken(secret, tenant.slug);
+  const localTokenValid = verifyEvolutionWebhookAuth({
+    expectedSecret: secret,
+    slug: tenant.slug,
+    queryToken: expectedToken,
+  });
+
+  checks.push({
+    id: "credentials",
+    label: "Credenciais e assinatura do webhook",
+    ok: Boolean(expectedUrl && localTokenValid),
+    detail: expectedUrl
+      ? `Servidor ${evolutionOrigin} · chave ${maskSecret(server.evolutionApiKey)} · assinatura HMAC válida.`
+      : "URL pública da plataforma (APP_URL) não está configurada.",
+  });
+
+  const config = salonConfig(server, instance);
+  const probe = await probeEvolutionAuth(config);
+
+  checks.push({
+    id: "token_auth",
+    label: "Autenticação do token na Evolution API",
+    ok: probe.authOk,
+    detail: probe.authOk
+      ? `Token autenticado com sucesso (HTTP ${probe.status ?? 200}).`
+      : probe.reachable
+        ? `Falha de autenticação (HTTP ${probe.status ?? "erro"}): ${probe.error || "API key recusada pela Evolution."}`
+        : `Servidor Evolution inacessível: ${probe.error || "sem resposta."}`,
+  });
+
+  checks.push({
+    id: "instance_state",
+    label: "Estado da instância na Evolution",
+    ok: probe.instanceFound && probe.state === "open",
+    detail: !probe.authOk
+      ? "Não verificado porque o token não autenticou."
+      : !probe.instanceFound
+        ? `Instância "${instance}" não existe na Evolution.`
+        : probe.state === "open"
+          ? `Instância "${instance}" conectada (open).`
+          : `Instância "${instance}" encontrada, porém no estado "${probe.state}" (esperado: open).`,
+  });
+
+  const remote = probe.authOk ? await findEvolutionWebhook(config) : null;
+  const remoteWebhookUrlMasked = remote?.url ? maskWebhookUrlToken(remote.url) : "";
+  const urlCheck = compareWebhookUrls(remote?.url ?? "", expectedUrl, tenant.slug);
+  const normalizedEvents = (remote?.events ?? []).map((event) => event.toUpperCase().replace(/\./g, "_"));
+  const hasMessagesUpsert = normalizedEvents.includes("MESSAGES_UPSERT");
+
+  checks.push({
+    id: "webhook_enabled",
+    label: "Webhook habilitado na Evolution",
+    ok: Boolean(remote?.enabled),
+    detail: !probe.authOk
+      ? "Não verificado porque o token não autenticou."
+      : !remote
+        ? "Nenhum webhook retornado pela Evolution para esta instância."
+        : remote.enabled
+          ? `Webhook ativo${remote.byEvents ? " (byEvents: true)" : " (byEvents: false)"}.`
+          : "Webhook existe na Evolution, mas está desativado (enabled: false).",
+  });
+
+  checks.push({
+    id: "webhook_url",
+    label: "URL do webhook apontada para o MegaBeauty",
+    ok: Boolean(remote?.enabled && urlCheck.exactMatch),
+    detail: !remote?.url
+      ? "Nenhuma URL configurada na Evolution. Clique em Sincronizar webhook."
+      : urlCheck.exactMatch
+        ? `URL corresponde exatamente ao endpoint assinado (${remoteWebhookUrlMasked}).`
+        : urlCheck.sameEndpoint && !urlCheck.hasSignedToken
+          ? `Aponta para o nosso domínio (${remoteWebhookUrlMasked}), mas sem o token assinado atualizado. Clique em Sincronizar webhook.`
+          : `URL divergente na Evolution (${remoteWebhookUrlMasked}) — esperado: ${expectedWebhookUrlMasked}.`,
+  });
+
+  checks.push({
+    id: "webhook_events",
+    label: "Evento MESSAGES_UPSERT inscrito",
+    ok: hasMessagesUpsert,
+    detail: !remote
+      ? "Sem eventos cadastrados na Evolution."
+      : hasMessagesUpsert
+        ? `Eventos ativos: ${remote.events.join(", ")}.`
+        : `MESSAGES_UPSERT não está na lista (${remote.events.join(", ") || "vazia"}).`,
+  });
+
+  const webhookPointedCorrectly = Boolean(remote?.enabled && urlCheck.exactMatch && hasMessagesUpsert);
+  const ok = Boolean(expectedUrl && localTokenValid && probe.authOk && webhookPointedCorrectly);
+
+  const summary = !probe.authOk
+    ? `Falha na autenticação do token da Evolution API (${probe.status ? `HTTP ${probe.status}` : "sem conexão"}).`
+    : !webhookPointedCorrectly
+      ? "Token autenticado com sucesso, mas o webhook na Evolution não está apontado corretamente para nossa URL/eventos."
+      : probe.state !== "open"
+        ? `Token autenticado e webhook apontado corretamente, porém a instância está em "${probe.state}".`
+        : "Tudo certo: token autenticado na Evolution API e webhook de mensagens apontado corretamente para nossa URL.";
+
+  return {
+    ok,
+    tenantId: tenant.id,
+    tenantSlug: tenant.slug,
+    instance,
+    evolutionOrigin,
+    authOk: probe.authOk,
+    authHttpStatus: probe.status,
+    instanceState: probe.state,
+    webhookPointedCorrectly,
+    expectedWebhookUrlMasked,
+    remoteWebhookUrlMasked,
+    checks,
+    summary,
+  };
+}
+
+/**
+ * Helper conveniente para execução em linha de comando ou diagnósticos por slug.
+ */
+export async function testEvolutionAuthAndWebhookBySlug(slug?: string): Promise<EvolutionWebhookTestReport> {
+  const cleanSlug = (slug ?? "").trim();
+  const tenant = cleanSlug
+    ? await prisma.tenant.findUnique({ where: { slug: cleanSlug }, select: { id: true } })
+    : (await prisma.tenant.findFirst({
+        where: { isPlatform: false, evolutionInstance: { not: null } },
+        orderBy: { createdAt: "asc" },
+        select: { id: true },
+      })) ??
+      (await prisma.tenant.findFirst({
+        where: { isPlatform: false },
+        orderBy: { createdAt: "asc" },
+        select: { id: true },
+      }));
+
+  if (!tenant) {
+    throw new Error(cleanSlug ? `Salão "${cleanSlug}" não encontrado.` : "Nenhum salão cadastrado encontrado.");
+  }
+  return testEvolutionAuthAndWebhook(tenant.id);
+}
+
 export type EvolutionDiagnostic = {
   instance: string;
+  authOk: boolean;
+  authHttpStatus: number | null;
   evolutionState: "open" | "connecting" | "close" | "unreachable";
   evolutionError: string | null;
   expectedWebhookUrlMasked: string;
@@ -259,13 +499,15 @@ export type EvolutionDiagnostic = {
   } | null;
   receptionistEnabled: boolean;
   recentWebhooks: WebhookTraceEntry[];
+  testReport: EvolutionWebhookTestReport;
 };
 
 export async function diagnoseEvolutionWhatsApp(tenantId: string): Promise<EvolutionDiagnostic> {
-  const [tenant, server, receptionist] = await Promise.all([
+  const [tenant, server, receptionist, testReport] = await Promise.all([
     prisma.tenant.findUnique({ where: { id: tenantId } }),
     resolvePlatformIntegrations(),
     prisma.receptionist.findUnique({ where: { tenantId }, select: { enabled: true } }),
+    testEvolutionAuthAndWebhook(tenantId),
   ]);
   if (!tenant) throw new Error("Salão não encontrado.");
   if (!server.hasEvolution) throw new Error("O servidor WhatsApp ainda não foi configurado na plataforma.");
@@ -274,30 +516,26 @@ export async function diagnoseEvolutionWhatsApp(tenantId: string): Promise<Evolu
   const config = salonConfig(server, instance);
   const { webhookUrl: expectedUrl } = signedEvolutionWebhook(server, tenant);
 
-  let evolutionState: EvolutionDiagnostic["evolutionState"] = "unreachable";
-  let evolutionError: string | null = null;
-  try {
-    const statePayload = await getConnectionState(config);
-    evolutionState = parseEvolutionState(statePayload);
-  } catch (error) {
-    evolutionError = error instanceof Error ? error.message : "Não foi possível consultar o estado na Evolution.";
-  }
-
-  const remote = await findEvolutionWebhook(config);
-  const cleanExpected = expectedUrl.replace(/\/$/, "");
-  const cleanRemote = (remote?.url ?? "").replace(/\/$/, "");
+  const remote = testReport.authOk ? await findEvolutionWebhook(config) : null;
+  const urlCheck = compareWebhookUrls(remote?.url ?? "", expectedUrl, tenant.slug);
   const normalizedEvents = (remote?.events ?? []).map((e) => e.toUpperCase().replace(/\./g, "_"));
+  const authCheck = testReport.checks.find((c) => c.id === "token_auth");
 
   return {
     instance,
-    evolutionState,
-    evolutionError,
-    expectedWebhookUrlMasked: maskWebhookUrlToken(expectedUrl),
+    authOk: testReport.authOk,
+    authHttpStatus: testReport.authHttpStatus,
+    evolutionState:
+      testReport.instanceState === "unknown"
+        ? "unreachable"
+        : testReport.instanceState,
+    evolutionError: testReport.authOk ? null : authCheck?.detail ?? null,
+    expectedWebhookUrlMasked: testReport.expectedWebhookUrlMasked,
     remoteWebhook: remote
       ? {
           enabled: remote.enabled,
           urlMasked: maskWebhookUrlToken(remote.url),
-          urlMatches: Boolean(cleanExpected && cleanRemote === cleanExpected),
+          urlMatches: urlCheck.exactMatch,
           byEvents: remote.byEvents,
           hasMessagesUpsert: normalizedEvents.includes("MESSAGES_UPSERT"),
           events: remote.events,
@@ -305,5 +543,6 @@ export async function diagnoseEvolutionWhatsApp(tenantId: string): Promise<Evolu
       : null,
     receptionistEnabled: Boolean(receptionist?.enabled),
     recentWebhooks: listEvolutionWebhookTraces(tenant.id, tenant.slug, 8),
+    testReport,
   };
 }

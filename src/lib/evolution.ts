@@ -230,6 +230,109 @@ export async function getConnectionState(config: EvolutionConfig) {
   return evoFetch(config, `/instance/connectionState/${config.instance}`);
 }
 
+export type EvolutionAuthProbe = {
+  reachable: boolean;
+  authOk: boolean;
+  status: number | null;
+  instanceFound: boolean;
+  state: "open" | "connecting" | "close" | "unknown";
+  error: string | null;
+};
+
+/**
+ * Tests whether the Evolution API token authenticates cleanly and checks the
+ * instance connection state, distinguishing 401/403 auth failures from 404
+ * missing instances and network errors.
+ */
+export async function probeEvolutionAuth(
+  config: Pick<EvolutionConfig, "url" | "apiKey"> & { instance?: string },
+): Promise<EvolutionAuthProbe> {
+  const baseUrl = config.url.replace(/\/$/, "");
+  const tryRequest = async (path: string) => {
+    const response = await fetch(`${baseUrl}${path}`, {
+      method: "GET",
+      headers: headers(config.apiKey),
+      signal: AbortSignal.timeout(8000),
+    });
+    const text = await response.text();
+    let json: unknown = null;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      json = { raw: text };
+    }
+    return { ok: response.ok, status: response.status, json, text };
+  };
+
+  try {
+    if (config.instance) {
+      const res = await tryRequest(`/instance/connectionState/${encodeURIComponent(config.instance)}`);
+      if (res.ok) {
+        return {
+          reachable: true,
+          authOk: true,
+          status: res.status,
+          instanceFound: true,
+          state: parseEvolutionState(res.json),
+          error: null,
+        };
+      }
+      if (res.status === 401 || res.status === 403) {
+        return {
+          reachable: true,
+          authOk: false,
+          status: res.status,
+          instanceFound: false,
+          state: "unknown",
+          error: evolutionErrorMessage(res.json, res.text, res.status),
+        };
+      }
+      if (res.status === 404) {
+        // Instance not found yet; check /instance/fetchInstances to confirm token auth independently
+        const listRes = await tryRequest("/instance/fetchInstances");
+        const authOk = listRes.ok;
+        return {
+          reachable: true,
+          authOk,
+          status: listRes.status,
+          instanceFound: false,
+          state: "close",
+          error: authOk
+            ? `Instância "${config.instance}" não encontrada na Evolution.`
+            : evolutionErrorMessage(listRes.json, listRes.text, listRes.status),
+        };
+      }
+      return {
+        reachable: true,
+        authOk: false,
+        status: res.status,
+        instanceFound: false,
+        state: "unknown",
+        error: evolutionErrorMessage(res.json, res.text, res.status),
+      };
+    }
+
+    const listRes = await tryRequest("/instance/fetchInstances");
+    return {
+      reachable: true,
+      authOk: listRes.ok,
+      status: listRes.status,
+      instanceFound: false,
+      state: "unknown",
+      error: listRes.ok ? null : evolutionErrorMessage(listRes.json, listRes.text, listRes.status),
+    };
+  } catch (error) {
+    return {
+      reachable: false,
+      authOk: false,
+      status: null,
+      instanceFound: false,
+      state: "unknown",
+      error: error instanceof Error ? error.message : "Falha de conexão com a Evolution API.",
+    };
+  }
+}
+
 export async function createEvolutionInstance(
   server: Pick<EvolutionConfig, "url" | "apiKey">,
   params: { instance: string; webhookUrl?: string; webhookHeaders?: Record<string, string> },
