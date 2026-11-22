@@ -151,10 +151,13 @@ import {
 } from "@/lib/receptionist";
 import {
   contiguousSlotsForDuration,
+  formatAvailabilityForPrompt,
   formatAvailabilitySlots,
   parseExplicitDurationMin,
   parseRequestedDate,
+  parseRequestedTime,
 } from "@/lib/receptionist-availability";
+import { buildReceptionistHistory } from "@/lib/receptionist-runtime";
 import {
   PUBLIC_BOOKING_MAX_DAYS,
   buildUpcomingBookingDays,
@@ -1838,6 +1841,138 @@ describe("recepcionista virtual", () => {
       },
     });
     expect(outOfRange.text).toContain("60 dias");
+  });
+
+  it("interpreta horário específico sem confundir com data/duração e informa 14:00 como livre em agenda vazia a partir de 13:30", () => {
+    expect(parseRequestedTime("a Ana tem horário hoje às 14:00?")).toBe("14:00");
+    expect(parseRequestedTime("tem vaga às 14h?")).toBe("14:00");
+    expect(parseRequestedTime("pode ser 14h30?")).toBe("14:30");
+    expect(parseRequestedTime("tem às 14?")).toBe("14:00");
+    expect(parseRequestedTime("tem vaga às 9h?")).toBe("09:00");
+    expect(parseRequestedTime("às 2 da tarde")).toBe("14:00");
+    expect(parseRequestedTime("3 e meia da tarde")).toBe("15:30");
+    expect(parseRequestedTime("meio-dia")).toBe("12:00");
+
+    // Não deve confundir data, preço ou duração com horário do relógio
+    expect(parseRequestedTime("tem vaga dia 14?")).toBeNull();
+    expect(parseRequestedTime("no dia 28")).toBeNull();
+    expect(parseRequestedTime("14/11")).toBeNull();
+    expect(parseRequestedTime("preciso de 3 horas livres")).toBeNull();
+    expect(parseRequestedTime("bloco de 2h30")).toBeNull();
+    expect(parseRequestedTime("R$ 14,00")).toBeNull();
+
+    // Horários do relógio não podem ser confundidos com duração de serviço
+    expect(parseExplicitDurationMin("a Ana tem vaga às 9h30?")).toBeNull();
+    expect(parseExplicitDurationMin("tem horário às 2 horas da tarde?")).toBeNull();
+    expect(parseExplicitDurationMin("preciso de 2h30 livres")).toBe(150);
+
+    expect(asksAvailability("a Ana tem às 14h?")).toBe(true);
+
+    // Cenário real: agenda da Ana Clara vazia às 13:25, faixas livres 13:30..18:00
+    const slotsToday = contiguousSlotsForDuration({
+      openTime: "09:00",
+      closeTime: "18:15",
+      slotMinutes: 15,
+      durationMin: 15,
+      busy: [],
+      nowHHmm: "13:25",
+    });
+    expect(slotsToday[0]).toBe("13:30");
+    expect(slotsToday).toContain("14:00");
+    expect(slotsToday[slotsToday.length - 1]).toBe("18:00");
+
+    const emptyAgendaAt14 = {
+      date: "2026-11-22",
+      label: "domingo, 22 de novembro",
+      durationMin: 15,
+      serviceName: null,
+      slotMinutes: 15,
+      isPast: false,
+      outOfRange: false,
+      requestedTime: "14:00",
+      currentTimeHHmm: "13:25",
+      professionals: [
+        {
+          name: "Ana Clara",
+          nickname: "Ana",
+          specialty: null,
+          startTimes: slotsToday,
+          summary: formatAvailabilitySlots(slotsToday, 15),
+          busy: [],
+          workStart: "09:00",
+          workEnd: "18:15",
+        },
+      ],
+    };
+
+    const promptBlock = formatAvailabilityForPrompt(emptyAgendaAt14);
+    expect(promptBlock).toContain("Horário atual agora no salão: 13:25");
+    expect(promptBlock).toContain("14:00");
+    expect(promptBlock).toContain("agenda livre (nenhum agendamento neste dia)");
+    expect(promptBlock).toContain("HORÁRIO PERGUNTADO 14:00: DISPONÍVEL (LIVRE)");
+
+    const config = normalizeReceptionist({ name: "Luna", emoji: "nenhum" });
+    const anaCatalog = {
+      ...catalog,
+      todayDate: "2026-11-22",
+      nowHHmm: "13:25",
+      professionals: [
+        { name: "Ana Clara", nickname: "Ana", specialty: null, today: slotsToday, tomorrow: [] },
+      ],
+    };
+    const systemPrompt = buildReceptionistSystemPrompt(config, anaCatalog, emptyAgendaAt14);
+    expect(systemPrompt).toContain("NUNCA diga que um horário dentro de uma faixa livre está indisponível");
+    expect(systemPrompt).toContain("HORÁRIO PERGUNTADO 14:00: DISPONÍVEL (LIVRE)");
+
+    const localOk = localReceptionistReply({
+      config,
+      catalog: anaCatalog,
+      incoming: "a Ana tem horário hoje às 14:00?",
+      availability: emptyAgendaAt14,
+    });
+    expect(localOk.text).toMatch(/Sim!.*14:00 está disponível/i);
+    expect(localOk.text).toContain("Ana Clara");
+    expect(localOk.text).not.toMatch(/não às 14:00|14:00 não/i);
+
+    // Quando 14:00–15:00 está realmente ocupado, deve marcar INDISPONÍVEL e apontar próximos livres
+    const busySlots = contiguousSlotsForDuration({
+      openTime: "09:00",
+      closeTime: "18:15",
+      slotMinutes: 15,
+      durationMin: 15,
+      busy: [{ start: "14:00", end: "15:00" }],
+      nowHHmm: "13:25",
+    });
+    const busyBlock = formatAvailabilityForPrompt({
+      ...emptyAgendaAt14,
+      professionals: [
+        {
+          name: "Ana Clara",
+          nickname: "Ana",
+          specialty: null,
+          startTimes: busySlots,
+          summary: formatAvailabilitySlots(busySlots, 15),
+          busy: [{ start: "14:00", end: "15:00" }],
+        },
+      ],
+    });
+    expect(busyBlock).toContain("horários ocupados: 14:00–15:00");
+    expect(busyBlock).toContain("HORÁRIO PERGUNTADO 14:00: INDISPONÍVEL");
+    expect(busyBlock).toContain("15:00");
+
+    // Deduplicação de histórico evita enviar a última mensagem da cliente duas vezes para a IA
+    const deduped = buildReceptionistHistory(
+      [
+        { direction: "IN", body: "a Ana tem horário hoje às 14:00?" },
+        { direction: "OUT", body: "Oi! Como posso ajudar?" },
+        { direction: "IN", body: "Oi" },
+      ],
+      "a Ana tem horário hoje às 14:00?",
+    );
+    expect(deduped).toEqual([
+      { role: "user", text: "Oi" },
+      { role: "assistant", text: "Oi! Como posso ajudar?" },
+    ]);
   });
 
   it("gera janela de 30 dias no agendamento online e valida encaixe completo por duração e expediente", () => {

@@ -7,6 +7,7 @@ import {
   formatDurationPt,
   parseExplicitDurationMin,
   parseRequestedDate,
+  parseRequestedTime,
   type AvailabilityDayResult,
   type RequestedDateMatch,
 } from "@/lib/receptionist-availability";
@@ -54,6 +55,7 @@ export type ReceptionistCatalog = {
   hours: string;
   todayDate?: string;
   todayLabel?: string;
+  nowHHmm?: string;
   slotMinutes?: number;
   services: { name: string; durationMin: number; price: string; professionals: string[] }[];
   professionals: { name: string; nickname: string | null; specialty: string | null; today: string[]; tomorrow: string[] }[];
@@ -65,6 +67,7 @@ export type ReceptionistAvailabilityIntent = {
   asksForSlots: boolean;
   asksForPrices: boolean;
   dateMatch: RequestedDateMatch | null;
+  requestedTime: string | null;
   service: ReceptionistCatalog["services"][number] | null;
   professional: ReceptionistCatalog["professionals"][number] | null;
   explicitDurationMin: number | null;
@@ -136,7 +139,7 @@ export function asksAvailability(text: string) {
   if (/(horario|horarios|agenda|vaga|vagas|encaixe|disponivel|disponibilidade|livre|livres|marcar|agendar|hoje|amanha|semana que vem|proxima semana)/.test(q)) {
     return true;
   }
-  return parseRequestedDate(text) !== null;
+  return parseRequestedDate(text) !== null || parseRequestedTime(text) !== null;
 }
 
 export function asksPrices(text: string) {
@@ -179,12 +182,14 @@ export function resolveAvailabilityIntentFromMessages(input: {
 }): ReceptionistAvailabilityIntent {
   const refDate = input.referenceDate ?? input.catalog.todayDate;
   const incomingDate = parseRequestedDate(input.incoming, refDate);
+  const incomingTime = parseRequestedTime(input.incoming);
   let service = matchCatalogService(input.incoming, input.catalog.services);
   let professional = matchCatalogProfessional(input.incoming, input.catalog.professionals);
   let explicitDurationMin = parseExplicitDurationMin(input.incoming);
   let dateMatch = incomingDate;
+  let requestedTime = incomingTime;
 
-  const asksForSlots = asksAvailability(input.incoming) || incomingDate !== null;
+  const asksForSlots = asksAvailability(input.incoming) || incomingDate !== null || incomingTime !== null;
   const asksForPrices = asksPrices(input.incoming);
 
   const recentUserMessages = (input.history ?? [])
@@ -204,8 +209,11 @@ export function resolveAvailabilityIntentFromMessages(input: {
       if (!explicitDurationMin && !service) {
         explicitDurationMin = parseExplicitDurationMin(msg.text);
       }
-      if (!dateMatch && (service || professional) && !asksForPrices) {
+      if (!dateMatch && (service || professional || requestedTime) && !asksForPrices) {
         dateMatch = parseRequestedDate(msg.text, refDate);
+      }
+      if (!requestedTime && (incomingDate || professional || service) && !asksForPrices) {
+        requestedTime = parseRequestedTime(msg.text);
       }
     }
   }
@@ -214,6 +222,7 @@ export function resolveAvailabilityIntentFromMessages(input: {
     asksForSlots,
     asksForPrices,
     dateMatch,
+    requestedTime,
     service,
     professional,
     explicitDurationMin,
@@ -249,7 +258,7 @@ export function buildReceptionistSystemPrompt(
         : "No máximo um emoji, só se ficar natural.";
   const extra = config.instructions ? `Instruções do salão: ${config.instructions}` : "";
   const todayLine = catalog.todayDate
-    ? `Data de hoje: ${catalog.todayLabel ? `${catalog.todayLabel} ` : ""}(${catalog.todayDate}). Você pode consultar qualquer data até ${MAX_LOOKAHEAD_DAYS} dias à frente.`
+    ? `Data de hoje: ${catalog.todayLabel ? `${catalog.todayLabel} ` : ""}(${catalog.todayDate})${catalog.nowHHmm ? ` · Horário atual agora no salão: ${catalog.nowHHmm}` : ""}. Você pode consultar qualquer data até ${MAX_LOOKAHEAD_DAYS} dias à frente.`
     : "";
   const availabilityBlock = availability ? `\n${formatAvailabilityForPrompt(availability)}` : "";
   return [
@@ -260,8 +269,10 @@ export function buildReceptionistSystemPrompt(
     "Varie as palavras a cada resposta. Não copie a mensagem anterior da conversa.",
     "Só responda porque a cliente escreveu agora. Não comece conversa nem faça propaganda sozinha.",
     "Nunca invente horário, preço ou profissional. Use só o catálogo abaixo e a ferramenta check_availability.",
-    "Quando a cliente perguntar sobre qualquer data específica (incluindo dias da semana, semana que vem, dia do mês) ou sobre um serviço com duração específica (especialmente procedimentos longos como 2h ou 3h), consulte check_availability com a data exata e o serviço para validar encaixe contínuo real.",
+    "Quando a cliente perguntar sobre qualquer data específica (incluindo dias da semana, semana que vem, dia do mês), um horário específico (ex.: 14:00) ou um serviço com duração específica (especialmente procedimentos longos como 2h ou 3h), consulte check_availability com a data exata, o horário (se mencionado) e o serviço para validar encaixe contínuo real.",
     "Os horários retornados por check_availability são horários de INÍCIO onde o procedimento cabe inteiro sem conflito.",
+    "IMPORTANTE SOBRE FAIXAS DE HORÁRIOS: uma faixa contínua como '13:30 até 18:00' significa que TODOS os horários de início dentro desse intervalo (ex.: 13:30, 14:00, 14:30, 15:00, ..., 18:00) estão LIVRES. NUNCA diga que um horário dentro de uma faixa livre está indisponível e NUNCA se contradiga.",
+    "Se a consulta mostrar 'HORÁRIO PERGUNTADO HH:mm: DISPONÍVEL', confirme claramente que esse horário está livre (lembrando que a recepção faz a confirmação final). Só diga que um horário está indisponível se a consulta mostrar explicitamente que ele está ocupado ou indisponível.",
     "Nunca confirme, crie ou altere agendamento. Se a cliente quiser marcar, ofereça horários reais e diga que a recepção confirma.",
     "Não revele dados de outras clientes, faturamento, estoque ou informações internas.",
     "Se pedirem uma pessoa da equipe, diga que vai chamar a recepção.",
@@ -305,7 +316,7 @@ export function formatReceptionistCatalog(catalog: ReceptionistCatalog) {
     `Horário: ${catalog.hours}`,
     "Serviços:",
     services,
-    "Profissionais e resumo de horários livres (hoje e amanhã — use check_availability para outras datas ou encaixe exato por duração):",
+    `Profissionais e faixas contínuas de horários de início livres (cada faixa 'A até B' inclui TODOS os horários a cada ${slotMinutes} min de A até B; use check_availability para outras datas, horários específicos ou encaixe exato por duração):`,
     team,
   ].join("\n");
 }
@@ -347,6 +358,31 @@ function formatComputedAvailabilityReply(availability: AvailabilityDayResult, em
     const who = availability.professionals.map((row) => row.name).slice(0, 3).join(", ");
     return spin(
       `Em ${availability.label} não há encaixe contínuo ${servicePhrase} com ${who}.${emoji} Quer que eu olhe outra data para você?`,
+    );
+  }
+
+  if (availability.requestedTime) {
+    const requestedTime = availability.requestedTime;
+    const freeAtRequested = available.filter((row) => row.startTimes.includes(requestedTime));
+    if (freeAtRequested.length) {
+      const who = freeAtRequested
+        .slice(0, 3)
+        .map((row) => row.name)
+        .join(", ");
+      const ranges = freeAtRequested
+        .slice(0, 3)
+        .map((row) => `${row.name} (${row.summary})`)
+        .join("; ");
+      return spin(
+        `Sim! Em ${availability.label}, às ${requestedTime} está disponível ${servicePhrase} com ${who} (horários livres: ${ranges}).${emoji} Eu não marco sozinha: {se quiser esse horário|se ficar bom para você}, a recepção confirma.`,
+      );
+    }
+    const details = available
+      .slice(0, 3)
+      .map((row) => `${row.name} (${row.summary})`)
+      .join("; ");
+    return spin(
+      `Em ${availability.label}, às ${requestedTime} não há encaixe ${servicePhrase}, mas temos horários livres com ${details}.${emoji} Eu não marco sozinha: {se algum encaixar|se algum desses servir}, a recepção confirma para você.`,
     );
   }
 

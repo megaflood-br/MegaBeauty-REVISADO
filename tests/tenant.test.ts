@@ -566,4 +566,62 @@ describe("isolamento multi-tenant automático no Prisma", () => {
       await unscopedPrisma.tenant.update({ where: { id: aurora!.id }, data: originalAurora });
     }
   });
+
+  it("queryReceptionistAvailability reporta agenda livre e horário solicitado (14:00) corretamente no banco real", async () => {
+    const aurora = await unscopedPrisma.tenant.findUnique({ where: { slug: "studio-aurora" } });
+    expect(aurora).toBeTruthy();
+    const prof = await unscopedPrisma.professional.findFirst({
+      where: { tenantId: aurora!.id, active: true, generateAgenda: true },
+      orderBy: { name: "asc" },
+    });
+    const client = await unscopedPrisma.client.findFirst({ where: { tenantId: aurora!.id } });
+    expect(prof).toBeTruthy();
+    expect(client).toBeTruthy();
+
+    const targetDay = shiftCalendarDate(calendarDate(), 18);
+
+    // Sem agendamentos no dia: 14:00 deve estar livre e busy deve estar vazio
+    const freeRes = await queryReceptionistAvailability({
+      tenantId: aurora!.id,
+      date: targetDay,
+      professionalName: prof!.name,
+      requestedTime: "14:00",
+      referenceDate: targetDay,
+      nowHHmm: "13:25",
+    });
+    expect(freeRes.requestedTime).toBe("14:00");
+    expect(freeRes.currentTimeHHmm).toBe("13:25");
+    expect(freeRes.professionals).toHaveLength(1);
+    expect(freeRes.professionals[0].busy).toEqual([]);
+    expect(freeRes.professionals[0].startTimes[0]).toBe("13:30");
+    expect(freeRes.professionals[0].startTimes).toContain("14:00");
+
+    // Com agendamento real 14:00..15:00: 14:00 deixa de estar livre e aparece em busy
+    const created = await unscopedPrisma.appointment.create({
+      data: {
+        tenantId: aurora!.id,
+        clientId: client!.id,
+        professionalId: prof!.id,
+        startAt: zonedDateTime(targetDay, "14:00"),
+        endAt: zonedDateTime(targetDay, "15:00"),
+        status: "CONFIRMED",
+      },
+    });
+    try {
+      const busyRes = await queryReceptionistAvailability({
+        tenantId: aurora!.id,
+        date: targetDay,
+        professionalName: prof!.name,
+        requestedTime: "14:00",
+        referenceDate: targetDay,
+        nowHHmm: "13:25",
+      });
+      expect(busyRes.professionals[0].busy).toEqual([{ start: "14:00", end: "15:00" }]);
+      expect(busyRes.professionals[0].startTimes).not.toContain("14:00");
+      expect(busyRes.professionals[0].startTimes).toContain("13:30");
+      expect(busyRes.professionals[0].startTimes).toContain("15:00");
+    } finally {
+      await unscopedPrisma.appointment.delete({ where: { id: created.id } }).catch(() => null);
+    }
+  });
 });

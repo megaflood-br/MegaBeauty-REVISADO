@@ -126,7 +126,7 @@ export async function chatAsReceptionist(params: {
   if (!hasTools) {
     const completion = await client.chat.completions.create({
       model: "gpt-4o-mini",
-      temperature: 0.5,
+      temperature: 0.2,
       max_tokens: 240,
       messages,
     });
@@ -138,7 +138,7 @@ export async function chatAsReceptionist(params: {
   for (let round = 0; round < maxRounds; round++) {
     const completion = await client.chat.completions.create({
       model: "gpt-4o-mini",
-      temperature: 0.5,
+      temperature: 0.2,
       max_tokens: 260,
       messages,
       tools: params.tools,
@@ -181,7 +181,7 @@ export async function chatAsReceptionist(params: {
 
   const finalCompletion = await client.chat.completions.create({
     model: "gpt-4o-mini",
-    temperature: 0.5,
+    temperature: 0.2,
     max_tokens: 240,
     messages,
   });

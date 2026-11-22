@@ -12,12 +12,20 @@ export type RequestedDateMatch = {
   isWeekReference?: boolean;
 };
 
+export type AvailabilityBusyInterval = {
+  start: string;
+  end: string;
+};
+
 export type AvailabilityProfessionalSlots = {
   name: string;
   nickname: string | null;
   specialty: string | null;
   startTimes: string[];
   summary: string;
+  busy?: AvailabilityBusyInterval[];
+  workStart?: string;
+  workEnd?: string;
 };
 
 export type AvailabilityDayResult = {
@@ -28,6 +36,8 @@ export type AvailabilityDayResult = {
   slotMinutes: number;
   isPast: boolean;
   outOfRange: boolean;
+  requestedTime?: string | null;
+  currentTimeHHmm?: string | null;
   professionals: AvailabilityProfessionalSlots[];
 };
 
@@ -357,24 +367,123 @@ export function parseRequestedDate(text: string, referenceDateStr = calendarDate
   return null;
 }
 
+function isValidHourMinute(hour: number, minute: number) {
+  return Number.isInteger(hour) && Number.isInteger(minute) && hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59;
+}
+
+const TIME_PREFIX_PATTERN = /(?:^|[\s,;(])(?:a\s+partir\s+das?|depois\s+das?|antes\s+das?|por\s+volta\s+das?|perto\s+das?|para\s+as?|pras?|pelas?|as|das)\s*$/;
+const DURATION_PREFIX_PATTERN = /(?:^|[\s,;(])(?:dura(?:cao)?(?:\s+de)?|leva(?:ndo)?|bloco(?:\s+continuo)?\s+de|procedimento\s+de|servico\s+de|preciso\s+de|uns|umas|cerca\s+de|aproximadamente|de)\s*$/;
+
+/**
+ * Parses a specific time-of-day mentioned in Brazilian Portuguese (e.g., "14:00", "14h30",
+ * "às 14h", "às 14", "2 da tarde", "meio-dia") into normalized "HH:mm".
+ * Carefully avoids confusing dates ("dia 14", "14/11"), prices ("R$ 14,00"), or durations ("3 horas").
+ */
+export function parseRequestedTime(text: string): string | null {
+  const q = fold(text);
+  if (!q) return null;
+
+  // 1. "meio-dia" / "meio dia"
+  if (/\bmeio[\s-]dia\b/.test(q)) return "12:00";
+
+  // 2. Explicit HH:mm (with optional "da tarde" / "da noite")
+  const colonMatch = q.match(/(?:^|[^\d/:,])(\d{1,2}):(\d{2})(?!\d)(?:\s*(?:h|hs|hrs|horas?))?(?:\s*da\s*(manha|tarde|noite))?/);
+  if (colonMatch) {
+    let hour = Number(colonMatch[1]);
+    const minute = Number(colonMatch[2]);
+    const period = colonMatch[3];
+    if ((period === "tarde" || period === "noite") && hour >= 1 && hour <= 11) {
+      hour += 12;
+    }
+    if (isValidHourMinute(hour, minute)) {
+      return `${pad(hour)}:${pad(minute)}`;
+    }
+  }
+
+  // 3. Explicit "HHh[mm]" or "HH hs" / "HH horas" with period or time-of-day cue
+  const hRegex = /\b(\d{1,2})\s*(?:h(?:s|rs|oras?)?)(?:\s*e\s*|\s*)?(\d{2})?(?:\s*da\s*(manha|tarde|noite))?\b/g;
+  for (const match of q.matchAll(hRegex)) {
+    const rawHour = Number(match[1]);
+    const minute = match[2] ? Number(match[2]) : 0;
+    const period = match[3];
+    const index = match.index ?? 0;
+    const before = q.slice(Math.max(0, index - 32), index);
+    const fullToken = match[0];
+    const hasTimePrefix = TIME_PREFIX_PATTERN.test(before);
+    const hasDurationPrefix = DURATION_PREFIX_PATTERN.test(before);
+    const hasWrittenHoras = /\bhoras?\b|\bhrs?\b/.test(fullToken);
+
+    // Avoid treating duration phrases like "preciso de 3 horas" or "bloco de 2h30" as clock times
+    if (hasDurationPrefix && !hasTimePrefix && !period) continue;
+    if (hasWrittenHoras && !hasTimePrefix && !period && rawHour <= 10) continue;
+    // Bare "2h" or "3h30" without preposition/period is ambiguous with duration when <= 6
+    if (!hasTimePrefix && !period && rawHour < 7) continue;
+
+    let hour = rawHour;
+    if ((period === "tarde" || period === "noite") && hour >= 1 && hour <= 11) {
+      hour += 12;
+    }
+    if (isValidHourMinute(hour, minute)) {
+      return `${pad(hour)}:${pad(minute)}`;
+    }
+  }
+
+  // 4. Period-qualified number without "h": e.g., "2 da tarde", "3 e meia da tarde", "7 da noite"
+  const periodOnlyMatch = q.match(/\b(\d{1,2})(?:\s+e\s+meia)?\s+da\s+(manha|tarde|noite)\b/);
+  if (periodOnlyMatch) {
+    let hour = Number(periodOnlyMatch[1]);
+    const minute = /\be\s+meia\b/.test(periodOnlyMatch[0]) ? 30 : 0;
+    const period = periodOnlyMatch[2];
+    if ((period === "tarde" || period === "noite") && hour >= 1 && hour <= 11) {
+      hour += 12;
+    }
+    if (isValidHourMinute(hour, minute)) {
+      return `${pad(hour)}:${pad(minute)}`;
+    }
+  }
+
+  // 5. Preposition + bare hour: e.g., "às 14", "as 15", "para as 16", "às 14 e meia"
+  const prepHourMatch = q.match(
+    /(?:^|[\s,;(])(?:a\s+partir\s+das?|depois\s+das?|antes\s+das?|por\s+volta\s+das?|perto\s+das?|para\s+as?|pras?|pelas?|as)\s+(\d{1,2})(?:\s+e\s+meia)?(?!\s*(?:dias?|horas?|hrs?|min|minutos?|reais|%|\/|-|\d))\b/,
+  );
+  if (prepHourMatch) {
+    const hour = Number(prepHourMatch[1]);
+    const minute = /\be\s+meia\b/.test(prepHourMatch[0]) ? 30 : 0;
+    if (hour >= 7 && hour <= 22 && isValidHourMinute(hour, minute)) {
+      return `${pad(hour)}:${pad(minute)}`;
+    }
+  }
+
+  return null;
+}
+
 /**
  * Extracts an explicit duration hint when the client mentions time without a catalog service
- * (e.g. "3 horas", "2h30", "90 min").
+ * (e.g. "3 horas", "2h30", "90 min"), ignoring clock times like "às 9h30" or "às 2 horas".
  */
 export function parseExplicitDurationMin(text: string): number | null {
   const q = fold(text);
   const hhmm = q.match(/\b(\d{1,2})\s*h(?:oras?)?\s*(?:e\s*)?(\d{1,2})\s*(?:min(?:utos?)?)?\b/);
   if (hhmm) {
-    const hours = Number(hhmm[1]);
-    const mins = Number(hhmm[2]);
-    if (hours >= 1 && hours <= 10 && mins > 0 && mins < 60) {
-      return clampDurationMin(hours * 60 + mins);
+    const index = hhmm.index ?? 0;
+    const before = q.slice(Math.max(0, index - 32), index);
+    if (!TIME_PREFIX_PATTERN.test(before)) {
+      const hours = Number(hhmm[1]);
+      const mins = Number(hhmm[2]);
+      if (hours >= 1 && hours <= 6 && mins > 0 && mins < 60) {
+        return clampDurationMin(hours * 60 + mins);
+      }
     }
   }
   const hoursOnly = q.match(/\b(\d{1,2})\s*(?:horas?|hrs?)\b/);
   if (hoursOnly) {
-    const hours = Number(hoursOnly[1]);
-    if (hours >= 1 && hours <= 10) return clampDurationMin(hours * 60);
+    const index = hoursOnly.index ?? 0;
+    const before = q.slice(Math.max(0, index - 32), index);
+    const after = q.slice(index + hoursOnly[0].length, index + hoursOnly[0].length + 18);
+    if (!TIME_PREFIX_PATTERN.test(before) && !/^\s*da\s+(?:manha|tarde|noite)\b/.test(after)) {
+      const hours = Number(hoursOnly[1]);
+      if (hours >= 1 && hours <= 10) return clampDurationMin(hours * 60);
+    }
   }
   const minsOnly = q.match(/\b(\d{2,3})\s*(?:minutos?|min)\b/);
   if (minsOnly) {
@@ -382,6 +491,35 @@ export function parseExplicitDurationMin(text: string): number | null {
     if (mins >= MIN_SERVICE_DURATION_MIN && mins <= MAX_SERVICE_DURATION_MIN) return mins;
   }
   return null;
+}
+
+function explicitStartTimesForPrompt(slots: string[], slotMinutes: number): string {
+  if (!slots.length) return "";
+  if (slots.length <= 24) return slots.join(", ");
+
+  // For very long open days (e.g., 40+ 15-min slots), list every 30-min/hour mark plus exact window bounds
+  const groups = groupContiguousStartWindows(slots, slotMinutes);
+  const endpoints = new Set<string>();
+  for (const g of groups) {
+    endpoints.add(g.from);
+    endpoints.add(g.to);
+  }
+  const sampled = slots.filter((slot) => {
+    if (endpoints.has(slot)) return true;
+    const mins = parseHHmm(slot);
+    return mins % 30 === 0;
+  });
+  return sampled.join(", ");
+}
+
+function nearestAvailableTimes(slots: string[], targetHHmm: string, limit = 4): string[] {
+  if (!slots.length) return [];
+  const targetMin = parseHHmm(targetHHmm);
+  return slots
+    .slice()
+    .sort((a, b) => Math.abs(parseHHmm(a) - targetMin) - Math.abs(parseHHmm(b) - targetMin))
+    .slice(0, limit)
+    .sort((a, b) => parseHHmm(a) - parseHHmm(b));
 }
 
 export function formatAvailabilityForPrompt(result: AvailabilityDayResult): string {
@@ -396,10 +534,40 @@ export function formatAvailabilityForPrompt(result: AvailabilityDayResult): stri
   if (!result.professionals.length) {
     return `Consulta exata de agenda para ${result.label} (${result.date}) · ${servicePart}: nenhuma profissional elegível ativa.`;
   }
-  const lines = result.professionals.map((row) =>
-    row.startTimes.length
-      ? `- ${row.name}: horários de início livres ${row.summary} (${row.startTimes.length} opção(ões) contíguas de ${durationText})`
-      : `- ${row.name}: sem encaixe contínuo de ${durationText} neste dia`,
+
+  const headerLines = [`Consulta exata de agenda para ${result.label} (${result.date}) · ${servicePart}:`];
+  if (result.currentTimeHHmm) {
+    headerLines.push(`Horário atual agora no salão: ${result.currentTimeHHmm} (horários anteriores a este já passaram).`);
+  }
+
+  const lines = result.professionals.map((row) => {
+    const busyPart =
+      row.busy && row.busy.length > 0
+        ? `horários ocupados: ${row.busy.map((b) => `${b.start}–${b.end}`).join(", ")}`
+        : "agenda livre (nenhum agendamento neste dia)";
+
+    let requestedPart = "";
+    if (result.requestedTime) {
+      if (row.startTimes.includes(result.requestedTime)) {
+        requestedPart = ` | HORÁRIO PERGUNTADO ${result.requestedTime}: DISPONÍVEL (LIVRE)`;
+      } else {
+        const nearby = nearestAvailableTimes(row.startTimes, result.requestedTime);
+        const nearbyText = nearby.length ? ` · opções próximas livres: ${nearby.join(", ")}` : "";
+        requestedPart = ` | HORÁRIO PERGUNTADO ${result.requestedTime}: INDISPONÍVEL${nearbyText}`;
+      }
+    }
+
+    if (!row.startTimes.length) {
+      return `- ${row.name}: sem encaixe contínuo de ${durationText} neste dia (${busyPart})${requestedPart}`;
+    }
+
+    const explicitList = explicitStartTimesForPrompt(row.startTimes, result.slotMinutes);
+    return `- ${row.name}: faixa livre ${row.summary} (${row.startTimes.length} horários de início a cada ${result.slotMinutes} min; exemplos/horários exatos livres: ${explicitList}; ${busyPart})${requestedPart}`;
+  });
+
+  lines.push(
+    `Regra de leitura: qualquer horário dentro de uma faixa livre (ex.: 14:00 dentro de 13:30 até 18:00) ESTÁ LIVRE.`,
   );
-  return [`Consulta exata de agenda para ${result.label} (${result.date}) · ${servicePart}:`, ...lines].join("\n");
+
+  return [...headerLines, ...lines].join("\n");
 }

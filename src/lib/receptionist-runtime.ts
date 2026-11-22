@@ -14,6 +14,7 @@ import {
   formatAvailabilitySlots,
   isValidCalendarDate,
   parseRequestedDate,
+  parseRequestedTime,
   type AvailabilityDayResult,
 } from "@/lib/receptionist-availability";
 import {
@@ -121,6 +122,7 @@ export async function loadReceptionistCatalog(tenantId: string): Promise<Recepti
     hours: `${tenant.openTime} às ${tenant.closeTime}`,
     todayDate: today,
     todayLabel: formatDayLabel(today),
+    nowHHmm,
     slotMinutes: tenant.slotMinutes,
     services: services.map((service) => ({
       name: service.name,
@@ -165,6 +167,7 @@ export async function queryReceptionistAvailability(input: {
   serviceName?: string | null;
   professionalName?: string | null;
   durationMin?: number | null;
+  requestedTime?: string | null;
   referenceDate?: string;
   nowHHmm?: string;
 }): Promise<AvailabilityDayResult> {
@@ -183,6 +186,7 @@ export async function queryReceptionistAvailability(input: {
   const diff = calendarDayDiff(today, targetDate);
   const isPast = diff < 0;
   const outOfRange = diff > MAX_LOOKAHEAD_DAYS;
+  const normalizedRequestedTime = input.requestedTime ? parseRequestedTime(input.requestedTime) : null;
 
   const tenant = await prisma.tenant.findUnique({
     where: { id: input.tenantId },
@@ -200,6 +204,8 @@ export async function queryReceptionistAvailability(input: {
       slotMinutes,
       isPast,
       outOfRange,
+      requestedTime: normalizedRequestedTime,
+      currentTimeHHmm: targetDate === today ? (input.nowHHmm ?? formatTime(new Date())) : null,
       professionals: [],
     };
   }
@@ -281,6 +287,8 @@ export async function queryReceptionistAvailability(input: {
     slotMinutes,
     isPast: false,
     outOfRange: false,
+    requestedTime: normalizedRequestedTime,
+    currentTimeHHmm: effectiveNow ?? null,
     professionals: eligible.map((row) => {
       const openTime = row.workStart || tenant.openTime;
       const closeTime = row.workEnd || tenant.closeTime;
@@ -299,6 +307,9 @@ export async function queryReceptionistAvailability(input: {
         specialty: row.specialty,
         startTimes,
         summary: formatAvailabilitySlots(startTimes, slotMinutes),
+        busy,
+        workStart: openTime,
+        workEnd: closeTime,
       };
     }),
   };
@@ -309,13 +320,17 @@ const CHECK_AVAILABILITY_TOOL: OpenAI.Chat.Completions.ChatCompletionTool = {
   function: {
     name: "check_availability",
     description:
-      "Consulta a agenda real do salão para uma data (hoje até 60 dias à frente) calculando horários de início exatos em bloco contínuo para a duração completa do serviço.",
+      "Consulta a agenda real do salão para uma data (hoje até 60 dias à frente) calculando horários de início exatos em bloco contínuo para a duração completa do serviço e validando um horário específico se a cliente perguntou.",
     parameters: {
       type: "object",
       properties: {
         date: {
           type: "string",
-          description: "Data desejada no formato YYYY-MM-DD (ex.: 2026-11-28) ou expressão em português (ex.: sexta que vem, dia 28).",
+          description: "Data desejada no formato YYYY-MM-DD (ex.: 2026-11-28) ou expressão em português (ex.: hoje, sexta que vem, dia 28).",
+        },
+        requestedTime: {
+          type: "string",
+          description: "Horário específico perguntado pela cliente no formato HH:mm (ex.: 14:00), se houver.",
         },
         serviceName: {
           type: "string",
@@ -364,6 +379,7 @@ export async function generateReceptionistReply(input: {
 
     const shouldQueryAvailability =
       Boolean(intent.dateMatch) ||
+      Boolean(intent.requestedTime) ||
       (intent.asksForSlots && Boolean(intent.service || intent.professional || intent.explicitDurationMin));
 
     if (shouldQueryAvailability) {
@@ -375,7 +391,9 @@ export async function generateReceptionistReply(input: {
         serviceName: intent.service?.name ?? null,
         professionalName: intent.professional?.name ?? null,
         durationMin: intent.service?.durationMin ?? intent.explicitDurationMin ?? null,
+        requestedTime: intent.requestedTime,
         referenceDate: today,
+        nowHHmm: input.catalog.nowHHmm,
       });
 
       // If client asked generally ("tem vaga para luzes?") without naming a date and today has no contiguous block, check tomorrow automatically
@@ -387,6 +405,7 @@ export async function generateReceptionistReply(input: {
           serviceName: intent.service?.name ?? null,
           professionalName: intent.professional?.name ?? null,
           durationMin: intent.service?.durationMin ?? intent.explicitDurationMin ?? null,
+          requestedTime: intent.requestedTime,
           referenceDate: today,
         });
         if (tomorrowResult.professionals.some((row) => row.startTimes.length > 0)) {
@@ -421,10 +440,12 @@ export async function generateReceptionistReply(input: {
             const result = await queryReceptionistAvailability({
               tenantId: input.tenantId!,
               date: resolvedDate,
+              requestedTime: typeof args.requestedTime === "string" ? args.requestedTime.trim() : null,
               serviceName: typeof args.serviceName === "string" ? args.serviceName.trim() : null,
               professionalName: typeof args.professionalName === "string" ? args.professionalName.trim() : null,
               durationMin: typeof args.durationMin === "number" ? args.durationMin : null,
               referenceDate: refDate,
+              nowHHmm: input.catalog.nowHHmm,
             });
             return formatAvailabilityForPrompt(result);
           }
@@ -471,14 +492,7 @@ export async function maybeReplyAsReceptionist(input: {
 
   const catalog = await loadReceptionistCatalog(input.tenantId);
   const integrations = await resolvePlatformIntegrations();
-  const history: ReceptionistHistoryItem[] = conversation.messages
-    .slice()
-    .reverse()
-    .slice(-8)
-    .map((row) => ({
-      role: row.direction === "OUT" ? "assistant" : "user",
-      text: row.body,
-    }));
+  const history = buildReceptionistHistory(conversation.messages, input.incoming);
   const reply = await generateReceptionistReply({
     tenantId: input.tenantId,
     config,
@@ -542,4 +556,29 @@ async function confirmNextAppointment(tenantId: string, clientId: string | null,
     where: { id: next.id },
     data: { status: "CONFIRMED" },
   });
+}
+
+/**
+ * Builds chronological conversation history for OpenAI while dropping the trailing
+ * inbound message if it was already persisted to the DB (avoids sending `incoming` twice).
+ */
+export function buildReceptionistHistory(
+  descMessages: { direction: string; body: string }[],
+  incoming: string,
+): ReceptionistHistoryItem[] {
+  const chronological: ReceptionistHistoryItem[] = descMessages
+    .slice()
+    .reverse()
+    .map((row) => ({
+      role: row.direction === "OUT" ? "assistant" : "user",
+      text: row.body,
+    }));
+
+  const trimmedIncoming = incoming.trim();
+  const last = chronological[chronological.length - 1];
+  if (last && last.role === "user" && last.text.trim() === trimmedIncoming) {
+    chronological.pop();
+  }
+
+  return chronological.slice(-8);
 }
