@@ -144,10 +144,25 @@ export function AgendaBoard({
           </Badge>
         ))}
         {appointments.some((a) => a.status === "AI_BOOKED") ? (
-          <span className="inline-flex items-center gap-1 rounded-full bg-violet-100 px-2.5 py-0.5 text-xs font-medium text-violet-800">
-            <Bot size={12} />
-            {appointments.filter((a) => a.status === "AI_BOOKED").length} para conferência
-          </span>
+          canEdit ? (
+            <button
+              type="button"
+              onClick={() => {
+                const firstAi = appointments.find((a) => a.status === "AI_BOOKED");
+                if (firstAi) setSelected(firstAi);
+              }}
+              className="inline-flex items-center gap-1 rounded-full bg-violet-100 px-2.5 py-0.5 text-xs font-medium text-violet-800 transition hover:bg-violet-200"
+              title="Abrir próximo agendamento da IA para conferência"
+            >
+              <Bot size={12} />
+              {appointments.filter((a) => a.status === "AI_BOOKED").length} para conferência
+            </button>
+          ) : (
+            <span className="inline-flex items-center gap-1 rounded-full bg-violet-100 px-2.5 py-0.5 text-xs font-medium text-violet-800">
+              <Bot size={12} />
+              {appointments.filter((a) => a.status === "AI_BOOKED").length} para conferência
+            </span>
+          )
         ) : null}
       </div>
 

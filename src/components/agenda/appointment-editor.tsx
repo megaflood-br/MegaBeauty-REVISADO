@@ -2,8 +2,8 @@
 
 import { useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { Bot, MessageCircle, Trash2, X } from "lucide-react";
-import { deleteAppointment, saveAppointment } from "@/app/actions/appointments";
+import { Bot, CheckCircle2, MessageCircle, Trash2, X } from "lucide-react";
+import { deleteAppointment, saveAppointment, updateAppointmentStatus } from "@/app/actions/appointments";
 import { createComandaFromAppointment } from "@/app/actions/comandas";
 import { Button, Select } from "@/components/ui";
 import { useConfirm } from "@/components/confirm-dialog";
@@ -127,6 +127,50 @@ export function AppointmentEditor({
     });
   }
 
+  function hasFormChanges(): boolean {
+    if (!appointment) return true;
+    if (clientId !== appointment.client.id || apptDate !== date) return true;
+    const validItems = items.filter((item) => item.serviceId);
+    if (validItems.length !== appointment.items.length) return true;
+    return validItems.some((row, index) => {
+      const original = appointment.items[index];
+      const origProfId = original.professionalId ?? appointment.professionalId;
+      const origTime = original.startAt
+        ? formatTime(new Date(original.startAt))
+        : formatTime(new Date(appointment.startAt));
+      return (
+        row.serviceId !== original.serviceId ||
+        row.professionalId !== origProfId ||
+        row.time !== origTime ||
+        row.durationMin !== original.durationMin
+      );
+    });
+  }
+
+  function confirmAiBooking() {
+    if (!appointment) return;
+    setError(null);
+    const payload = items.filter((item) => item.serviceId);
+    startTransition(async () => {
+      const result = hasFormChanges()
+        ? await saveAppointment({
+            id: appointment.id,
+            clientId,
+            date: apptDate,
+            status: "CONFIRMED",
+            items: payload,
+          })
+        : await updateAppointmentStatus(appointment.id, "CONFIRMED");
+      if ("error" in result && result.error) {
+        setError(result.error);
+        return;
+      }
+      setStatus("CONFIRMED");
+      onClose();
+      router.refresh();
+    });
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4" onClick={onClose}>
       <div
@@ -183,21 +227,23 @@ export function AppointmentEditor({
           </div>
 
           <div className="flex-1 overflow-y-auto px-6 py-5">
-            {status === "AI_BOOKED" ? (
-              <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-violet-200 bg-violet-50 px-4 py-3 text-sm text-violet-900">
+            {mode === "edit" && appointment && status === "AI_BOOKED" ? (
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-violet-200 bg-violet-50 px-4 py-3 text-sm text-violet-900">
                 <div className="flex items-center gap-2">
                   <Bot size={16} className="shrink-0 text-violet-700" />
                   <span>
-                    <strong>Agendado pela IA</strong> — confira serviço, profissional e horário e confirme após revisar.
+                    <strong>Agendado pela IA</strong> — confira serviço, profissional e horário e confirme para validar a ação da IA.
                   </span>
                 </div>
-                <button
+                <Button
                   type="button"
-                  onClick={() => setStatus("CONFIRMED")}
-                  className="rounded-lg bg-violet-700 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-violet-800"
+                  variant="success"
+                  disabled={pending}
+                  onClick={confirmAiBooking}
                 >
-                  Marcar como confirmado
-                </button>
+                  <CheckCircle2 size={15} />
+                  {pending ? "Confirmando..." : "Confirmar agendamento"}
+                </Button>
               </div>
             ) : null}
             <div className="grid gap-3 md:grid-cols-4">

@@ -12,6 +12,7 @@ import { atTime, calendarDate, formatTime } from "@/lib/dates";
 import { postLedgerEntry } from "@/lib/ledger";
 import { applyCatalogPrice } from "@/lib/promotions";
 import { loadPromoRules } from "@/lib/promo-load";
+import { APPOINTMENT_STATUSES, type AppointmentStatus } from "@/lib/constants";
 import { appointmentCampaignVars, safeDispatch } from "@/lib/dispatch-whatsapp-campaign";
 
 export type AppointmentItemInput = {
@@ -116,7 +117,7 @@ export async function saveAppointment(payload: {
   if (id) {
     const existing = await prisma.appointment.findFirst({ where: { id, tenantId: session.tenantId } });
     if (!existing) return { error: "Agendamento não encontrado." };
-    await prisma.appointment.update({ where: { id }, data });
+    await prisma.appointment.update({ where: { id }, data: { ...data, source: existing.source } });
     await prisma.appointmentItem.deleteMany({ where: { appointmentId: id } });
   } else {
     const created = await prisma.appointment.create({ data });
@@ -185,6 +186,9 @@ export async function deleteAppointment(appointmentId: string) {
 export async function updateAppointmentStatus(appointmentId: string, status: string) {
   const { session, access } = await requireTenant();
   if (!canAccess(access, "agenda", "edit")) return { error: "Sem permissão para alterar a agenda." };
+  if (!APPOINTMENT_STATUSES.includes(status as AppointmentStatus)) {
+    return { error: "Status inválido." };
+  }
   const appointment = await prisma.appointment.findFirst({
     where: { id: appointmentId, tenantId: session.tenantId },
     include: {
