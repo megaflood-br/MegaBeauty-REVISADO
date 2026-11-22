@@ -94,6 +94,8 @@ export async function testReceptionist(formData: FormData) {
     incoming,
     history,
     apiKey: integrations.openaiApiKey,
+    bookingMode: "simulate",
+    knownClientName: "Cliente Teste",
   });
   return { text: reply.text, handover: reply.handover, source: reply.source };
 }

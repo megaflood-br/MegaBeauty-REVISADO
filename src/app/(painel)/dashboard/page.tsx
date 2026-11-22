@@ -142,7 +142,7 @@ export default async function DashboardPage({
     loadSalonNotices(session.tenantId, tenant.city),
   ]);
 
-  const worked = (status: string) => !["CANCELLED", "NO_SHOW", "PENDING"].includes(status);
+  const worked = (status: string) => !["CANCELLED", "NO_SHOW", "PENDING", "AI_BOOKED"].includes(status);
   const attendances = appointments.filter((a) => worked(a.status)).flatMap((a) =>
     a.items.map((item) => ({
       date: calendarDate(a.startAt),
@@ -155,7 +155,7 @@ export default async function DashboardPage({
     where: {
       tenantId: session.tenantId,
       startAt: { gte: prevRange.start, lt: prevRange.end },
-      status: { notIn: ["CANCELLED", "NO_SHOW", "PENDING"] },
+      status: { notIn: ["CANCELLED", "NO_SHOW", "PENDING", "AI_BOOKED"] },
     },
     include: { items: true },
   });

@@ -9,7 +9,13 @@ import {
   sanitizeTenantSlug,
   tenantSlugFromHost,
 } from "@/lib/tenant-routing";
-import { queryReceptionistAvailability } from "@/lib/receptionist-runtime";
+import {
+  createReceptionistAppointment,
+  generateReceptionistReply,
+  loadReceptionistCatalog,
+  queryReceptionistAvailability,
+} from "@/lib/receptionist-runtime";
+import { DEFAULT_RECEPTIONIST } from "@/lib/receptionist";
 import { getPublicBookingBusySlots, publicBook } from "@/app/actions/booking";
 import { calendarDate, shiftCalendarDate, zonedDateTime } from "@/lib/dates";
 import { handleEvolutionWebhookRequest } from "@/lib/evolution-webhook-http";
@@ -736,6 +742,150 @@ describe("isolamento multi-tenant automático no Prisma", () => {
             .delete({ where: { professionalId_serviceId: { professionalId: prof!.id, serviceId: svc.id } } })
             .catch(() => null);
         }
+      }
+    }
+  });
+
+  it("recepcionista IA agenda novo horário com status AI_BOOKED, bloqueia conflito e transfere cancelamento/troca para humano", async () => {
+    const aurora = await unscopedPrisma.tenant.findUnique({ where: { slug: "studio-aurora" } });
+    expect(aurora).toBeTruthy();
+
+    const [service, prof] = await Promise.all([
+      unscopedPrisma.service.findFirst({
+        where: { tenantId: aurora!.id, active: true },
+        orderBy: { durationMin: "asc" },
+      }),
+      unscopedPrisma.professional.findFirst({
+        where: { tenantId: aurora!.id, active: true, generateAgenda: true },
+        orderBy: { name: "asc" },
+      }),
+    ]);
+    expect(service).toBeTruthy();
+    expect(prof).toBeTruthy();
+
+    const targetDay = shiftCalendarDate(calendarDate(), 21);
+    const newClientPhone = "5511977776655";
+    const originalLink = await unscopedPrisma.professionalService.findUnique({
+      where: { professionalId_serviceId: { professionalId: prof!.id, serviceId: service!.id } },
+    });
+    if (!originalLink) {
+      await unscopedPrisma.professionalService.create({
+        data: { professionalId: prof!.id, serviceId: service!.id },
+      });
+    }
+
+    let bookedId: string | null = null;
+    try {
+      // 1. Cliente nova sem nome informado -> deve pedir o nome antes de criar o agendamento
+      const needName = await createReceptionistAppointment({
+        tenantId: aurora!.id,
+        date: targetDay,
+        time: "14:00",
+        serviceNames: [service!.name],
+        professionalName: prof!.name,
+        phone: newClientPhone,
+      });
+      expect(needName.ok).toBe(false);
+      if (!needName.ok) {
+        expect(needName.needsClientName).toBe(true);
+      }
+
+      // 2. Modo simulação (dryRun) valida mas não grava nada no banco
+      const simRes = await createReceptionistAppointment({
+        tenantId: aurora!.id,
+        date: targetDay,
+        time: "14:00",
+        serviceNames: [service!.name],
+        professionalName: prof!.name,
+        clientName: "Mariana IA",
+        phone: newClientPhone,
+        dryRun: true,
+      });
+      expect(simRes.ok).toBe(true);
+      if (simRes.ok) {
+        expect(simRes.simulated).toBe(true);
+        expect(simRes.appointmentId).toBeNull();
+        expect(simRes.status).toBe("AI_BOOKED");
+      }
+
+      // 3. Agendamento real pela IA grava com status AI_BOOKED e source ai_receptionist
+      const liveRes = await createReceptionistAppointment({
+        tenantId: aurora!.id,
+        date: targetDay,
+        time: "14:00",
+        serviceNames: [service!.name],
+        professionalName: prof!.name,
+        clientName: "Mariana IA",
+        phone: newClientPhone,
+      });
+      expect(liveRes.ok).toBe(true);
+      if (liveRes.ok) {
+        expect(liveRes.simulated).toBe(false);
+        expect(liveRes.status).toBe("AI_BOOKED");
+        expect(liveRes.appointmentId).toBeTruthy();
+        bookedId = liveRes.appointmentId;
+      }
+
+      const persisted = await unscopedPrisma.appointment.findUnique({
+        where: { id: bookedId! },
+        include: { items: true, client: true },
+      });
+      expect(persisted).toBeTruthy();
+      expect(persisted!.status).toBe("AI_BOOKED");
+      expect(persisted!.source).toBe("ai_receptionist");
+      expect(persisted!.client.name).toBe("Mariana IA");
+      expect(persisted!.items).toHaveLength(1);
+      expect(persisted!.items[0].serviceId).toBe(service!.id);
+
+      // 4. Tentar agendar no mesmo horário já ocupado deve falhar com erro de conflito
+      const conflictRes = await createReceptionistAppointment({
+        tenantId: aurora!.id,
+        date: targetDay,
+        time: "14:00",
+        serviceNames: [service!.name],
+        professionalName: prof!.name,
+        clientName: "Outra Cliente",
+        phone: "5511977776644",
+      });
+      expect(conflictRes.ok).toBe(false);
+      if (!conflictRes.ok) {
+        expect(conflictRes.error).toMatch(/Conflito|ocupad/i);
+      }
+
+      // 5. Cancelar ou trocar horário via recepcionista deve acionar handover humano imediatamente
+      const catalog = await loadReceptionistCatalog(aurora!.id);
+      const cancelReply = await generateReceptionistReply({
+        tenantId: aurora!.id,
+        config: { ...DEFAULT_RECEPTIONIST, enabled: true },
+        catalog,
+        incoming: "quero cancelar meu horário de amanhã",
+        bookingMode: "live",
+        phone: newClientPhone,
+      });
+      expect(cancelReply.handover).toBe(true);
+      expect(cancelReply.bookedAppointmentId).toBeNull();
+
+      const swapReply = await generateReceptionistReply({
+        tenantId: aurora!.id,
+        config: { ...DEFAULT_RECEPTIONIST, enabled: true },
+        catalog,
+        incoming: "posso trocar meu horário para outro dia?",
+        bookingMode: "live",
+        phone: newClientPhone,
+      });
+      expect(swapReply.handover).toBe(true);
+      expect(swapReply.bookedAppointmentId).toBeNull();
+    } finally {
+      if (bookedId) {
+        await unscopedPrisma.appointment.delete({ where: { id: bookedId } }).catch(() => null);
+      }
+      await unscopedPrisma.client
+        .deleteMany({ where: { tenantId: aurora!.id, phone: { in: [newClientPhone, "5511977776644"] } } })
+        .catch(() => null);
+      if (!originalLink) {
+        await unscopedPrisma.professionalService
+          .delete({ where: { professionalId_serviceId: { professionalId: prof!.id, serviceId: service!.id } } })
+          .catch(() => null);
       }
     }
   });

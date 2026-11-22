@@ -147,8 +147,10 @@ import {
   matchCatalogProfessional,
   normalizeReceptionist,
   resolveAvailabilityIntentFromMessages,
+  wantsCancelOrReschedule,
   wantsHumanHandover,
 } from "@/lib/receptionist";
+import { STATUS_COLOR, STATUS_LABEL } from "@/lib/constants";
 import {
   contiguousSlotsForDuration,
   formatAvailabilityForPrompt,
@@ -1675,11 +1677,49 @@ describe("recepcionista virtual", () => {
     expect(price.text).toMatch(/R\$ 80,00/);
 
     const prompt = buildReceptionistSystemPrompt({ ...DEFAULT_RECEPTIONIST, name: "Luna" }, catalog);
-    expect(prompt).toMatch(/Nunca confirme, crie ou altere agendamento/);
+    expect(prompt).toMatch(/create_appointment/);
+    expect(prompt).toMatch(/Agendado pela IA/);
+    expect(prompt).toMatch(/NUNCA pode cancelar, desmarcar, trocar, remarcar/);
     expect(prompt).toMatch(/Varie as palavras/);
     expect(prompt).toMatch(/Só responda porque a cliente escreveu/);
     expect(prompt).toMatch(/11:00/);
     expect(prompt).not.toMatch(/Juliana/);
+  });
+
+  it("transfere cancelamento e troca de horário para humano e reconhece status Agendado pela IA", () => {
+    expect(STATUS_LABEL.AI_BOOKED).toBe("Agendado pela IA");
+    expect(STATUS_COLOR.AI_BOOKED).toBeTruthy();
+    expect(bucketAppointmentStatus("AI_BOOKED")).toBe("unconfirmed");
+
+    // Pedidos de cancelar, desmarcar, trocar ou remarcar devem acionar handover humano
+    expect(wantsCancelOrReschedule("quero cancelar meu horário de amanhã")).toBe(true);
+    expect(wantsCancelOrReschedule("preciso desmarcar minha escova")).toBe(true);
+    expect(wantsCancelOrReschedule("dá pra remarcar para sexta?")).toBe(true);
+    expect(wantsCancelOrReschedule("quero trocar o horário de hoje")).toBe(true);
+    expect(wantsCancelOrReschedule("posso mudar o dia do meu agendamento?")).toBe(true);
+    expect(wantsCancelOrReschedule("não vou conseguir ir amanhã")).toBe(true);
+
+    // Novos agendamentos e consultas NÃO devem disparar handover de cancelamento
+    expect(wantsCancelOrReschedule("quero agendar escova amanhã às 14h")).toBe(false);
+    expect(wantsCancelOrReschedule("tem horário com a Kelly hoje?")).toBe(false);
+    expect(wantsCancelOrReschedule("quanto custa o corte?")).toBe(false);
+
+    const config = normalizeReceptionist({ name: "Luna", emoji: "nenhum" });
+    const cancelReply = localReceptionistReply({
+      config,
+      catalog,
+      incoming: "preciso cancelar meu horário de amanhã",
+    });
+    expect(cancelReply.handover).toBe(true);
+    expect(cancelReply.text).toMatch(/equipe/i);
+
+    const swapReply = localReceptionistReply({
+      config,
+      catalog,
+      incoming: "posso trocar meu horário para sexta?",
+    });
+    expect(swapReply.handover).toBe(true);
+    expect(swapReply.text).toMatch(/equipe/i);
   });
 
   it("interpreta datas futuras em português até 60 dias e rejeita datas inválidas ou fora da janela", () => {

@@ -79,7 +79,9 @@ export async function createComandaFromAppointment(appointmentId: string) {
 
   await prisma.appointment.update({
     where: { id: appointment.id },
-    data: { status: appointment.status === "PENDING" ? "CONFIRMED" : appointment.status },
+    data: {
+      status: appointment.status === "PENDING" || appointment.status === "AI_BOOKED" ? "CONFIRMED" : appointment.status,
+    },
   });
 
   revalidateComandas();

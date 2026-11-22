@@ -2,7 +2,7 @@
 
 import { useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { MessageCircle, Trash2, X } from "lucide-react";
+import { Bot, MessageCircle, Trash2, X } from "lucide-react";
 import { deleteAppointment, saveAppointment } from "@/app/actions/appointments";
 import { createComandaFromAppointment } from "@/app/actions/comandas";
 import { Button, Select } from "@/components/ui";
@@ -183,6 +183,23 @@ export function AppointmentEditor({
           </div>
 
           <div className="flex-1 overflow-y-auto px-6 py-5">
+            {status === "AI_BOOKED" ? (
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-violet-200 bg-violet-50 px-4 py-3 text-sm text-violet-900">
+                <div className="flex items-center gap-2">
+                  <Bot size={16} className="shrink-0 text-violet-700" />
+                  <span>
+                    <strong>Agendado pela IA</strong> — confira serviço, profissional e horário e confirme após revisar.
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setStatus("CONFIRMED")}
+                  className="rounded-lg bg-violet-700 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-violet-800"
+                >
+                  Marcar como confirmado
+                </button>
+              </div>
+            ) : null}
             <div className="grid gap-3 md:grid-cols-4">
               <label className="grid gap-1 text-sm md:col-span-2">
                 <span className="font-medium text-ink-soft">Cliente</span>

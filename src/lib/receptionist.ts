@@ -134,6 +134,17 @@ export function wantsHumanHandover(text: string) {
   );
 }
 
+/**
+ * Detects requests to cancel, reschedule, swap, or modify an existing appointment.
+ * These actions are intentionally NOT allowed for the AI and must be handed over to a human.
+ */
+export function wantsCancelOrReschedule(text: string) {
+  const q = fold(text);
+  return /(cancel(a|ar|o|amento)|desmarc(a|ar|o)|remarc(a|ar|o)|reagend(a|ar|o)|adi(a|ar|o)\s+(o\s+|meu\s+)?(horario|agendamento)|antecip(a|ar|o)\s+(o\s+|meu\s+)?(horario|agendamento)|(troc(a|ar)|mud(a|ar)|alter(a|ar))\s+(o\s+|a\s+|de\s+|meu\s+|minha\s+)?(horario|agendamento|dia|data|profissional|servico|reserva)|passar\s+(o\s+|meu\s+)?(horario|agendamento)\s+para|nao\s+vou\s+(conseguir|poder)\s+(ir|comparecer)|preciso\s+(cancelar|desmarcar|remarcar|reagendar|trocar|mudar)\b)/.test(
+    q,
+  );
+}
+
 export function asksAvailability(text: string) {
   const q = fold(text);
   if (/(horario|horarios|agenda|vaga|vagas|encaixe|disponivel|disponibilidade|livre|livres|marcar|agendar|hoje|amanha|semana que vem|proxima semana)/.test(q)) {
@@ -249,7 +260,12 @@ export function buildReceptionistSystemPrompt(
   config: ReceptionistConfig,
   catalog: ReceptionistCatalog,
   availability?: AvailabilityDayResult | null,
+  options?: {
+    bookingMode?: "live" | "simulate" | "off";
+    knownClientName?: string | null;
+  },
 ) {
+  const bookingMode = options?.bookingMode ?? "live";
   const emojiRule =
     config.emoji === "nenhum"
       ? "Não use emojis."
@@ -260,20 +276,34 @@ export function buildReceptionistSystemPrompt(
   const todayLine = catalog.todayDate
     ? `Data de hoje: ${catalog.todayLabel ? `${catalog.todayLabel} ` : ""}(${catalog.todayDate})${catalog.nowHHmm ? ` · Horário atual agora no salão: ${catalog.nowHHmm}` : ""}. Você pode consultar qualquer data até ${MAX_LOOKAHEAD_DAYS} dias à frente.`
     : "";
+  const clientLine =
+    bookingMode !== "off"
+      ? options?.knownClientName
+        ? `Cliente identificada no cadastro: ${options.knownClientName} (não precisa pedir o nome dela novamente).`
+        : "Cliente ainda sem nome cadastrado: peça o nome dela antes de finalizar o agendamento."
+      : "";
+  const bookingRule =
+    bookingMode === "off"
+      ? "Você não cria agendamentos automaticamente neste modo; ofereça horários reais e diga que a recepção confirma."
+      : bookingMode === "simulate"
+        ? "Você PODE agendar novos horários usando a ferramenta create_appointment (neste ambiente de teste o sistema apenas simula e não grava na agenda real). Sempre confirme serviço(s), data, horário e profissional antes de chamar create_appointment, e informe que o agendamento fica com status 'Agendado pela IA' para conferência da equipe."
+        : "Você PODE agendar novos horários na agenda do salão usando a ferramenta create_appointment. Antes de agendar, certifique-se de ter: serviço(s), data, horário de início (e nome da cliente, se ela ainda não tiver cadastro). Só chame create_appointment quando a cliente confirmar ou pedir explicitamente para marcar aquele horário. Ao concluir, confirme os detalhes reais e avise que o horário ficou registrado como 'Agendado pela IA' para conferência da equipe.";
   const availabilityBlock = availability ? `\n${formatAvailabilityForPrompt(availability)}` : "";
   return [
     `Você é ${config.name}, recepcionista virtual do salão ${catalog.salon}.`,
     `Estilo: ${styleLabel(config.style)}. Personalidade: ${personalityLabel(config.personality)}. ${emojiRule}`,
     todayLine,
+    clientLine,
     "Fale em português brasileiro, curto, como WhatsApp. No máximo 4 frases.",
     "Varie as palavras a cada resposta. Não copie a mensagem anterior da conversa.",
     "Só responda porque a cliente escreveu agora. Não comece conversa nem faça propaganda sozinha.",
-    "Nunca invente horário, preço ou profissional. Use só o catálogo abaixo e a ferramenta check_availability.",
+    "Nunca invente horário, preço ou profissional. Use só o catálogo abaixo e as ferramentas check_availability e create_appointment.",
     "Quando a cliente perguntar sobre qualquer data específica (incluindo dias da semana, semana que vem, dia do mês), um horário específico (ex.: 14:00) ou um serviço com duração específica (especialmente procedimentos longos como 2h ou 3h), consulte check_availability com a data exata, o horário (se mencionado) e o serviço para validar encaixe contínuo real.",
     "Os horários retornados por check_availability são horários de INÍCIO onde o procedimento cabe inteiro sem conflito.",
     "IMPORTANTE SOBRE FAIXAS DE HORÁRIOS: uma faixa contínua como '13:30 até 18:00' significa que TODOS os horários de início dentro desse intervalo (ex.: 13:30, 14:00, 14:30, 15:00, ..., 18:00) estão LIVRES. NUNCA diga que um horário dentro de uma faixa livre está indisponível e NUNCA se contradiga.",
-    "Se a consulta mostrar 'HORÁRIO PERGUNTADO HH:mm: DISPONÍVEL', confirme claramente que esse horário está livre (lembrando que a recepção faz a confirmação final). Só diga que um horário está indisponível se a consulta mostrar explicitamente que ele está ocupado ou indisponível.",
-    "Nunca confirme, crie ou altere agendamento. Se a cliente quiser marcar, ofereça horários reais e diga que a recepção confirma.",
+    "Se a consulta mostrar 'HORÁRIO PERGUNTADO HH:mm: DISPONÍVEL', confirme claramente que esse horário está livre. Só diga que um horário está indisponível se a consulta mostrar explicitamente que ele está ocupado ou indisponível.",
+    bookingRule,
+    "REGRA ESTRITA: você NUNCA pode cancelar, desmarcar, trocar, remarcar ou alterar agendamentos já existentes. Se a cliente pedir cancelamento, troca ou remarcação, diga educadamente que vai passar para alguém da equipe do salão cuidar disso.",
     "Não revele dados de outras clientes, faturamento, estoque ou informações internas.",
     "Se pedirem uma pessoa da equipe, diga que vai chamar a recepção.",
     extra,
@@ -328,6 +358,13 @@ export function formatServicePrice(priceCents: number) {
 export function handoverReply(config: ReceptionistConfig) {
   const emoji = config.emoji === "nenhum" ? "" : " 💛";
   return spin(`{Claro|Pronto|Beleza}. Vou chamar alguém da equipe do salão para continuar com você.${emoji}`);
+}
+
+export function cancelOrRescheduleHandoverReply(config: ReceptionistConfig) {
+  const emoji = config.emoji === "nenhum" ? "" : " 💛";
+  return spin(
+    `{Claro|Entendi}! Para cancelar ou trocar um horário já marcado, vou passar para alguém da equipe do salão cuidar disso com você direitinho.${emoji}`,
+  );
 }
 
 function formatComputedAvailabilityReply(availability: AvailabilityDayResult, emoji: string) {
@@ -403,6 +440,7 @@ export function localReceptionistReply(input: {
   availability?: AvailabilityDayResult | null;
 }) {
   const { config, catalog, incoming, availability: computedAvailability } = input;
+  if (wantsCancelOrReschedule(incoming)) return { text: cancelOrRescheduleHandoverReply(config), handover: true };
   if (wantsHumanHandover(incoming)) return { text: handoverReply(config), handover: true };
 
   const service = matchCatalogService(incoming, catalog.services);

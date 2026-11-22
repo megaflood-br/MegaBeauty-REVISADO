@@ -110,7 +110,7 @@ export function averageTicket(revenueCents: number, count: number) {
 
 export function bucketAppointmentStatus(status: string): "confirmed" | "cancelled" | "unconfirmed" {
   if (status === "CANCELLED" || status === "NO_SHOW") return "cancelled";
-  if (status === "PENDING") return "unconfirmed";
+  if (status === "PENDING" || status === "AI_BOOKED") return "unconfirmed";
   return "confirmed";
 }
 
@@ -276,7 +276,7 @@ export function buildTodayOverview(input: {
       appointmentsCancelled += 1;
       continue;
     }
-    if (appt.status === "PENDING") {
+    if (appt.status === "PENDING" || appt.status === "AI_BOOKED") {
       appointmentsPending += 1;
     } else if (appt.status === "COMPLETED") {
       appointmentsCompleted += 1;

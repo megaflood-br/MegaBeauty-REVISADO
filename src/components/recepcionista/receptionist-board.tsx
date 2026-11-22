@@ -72,7 +72,7 @@ export function ReceptionistBoard({
   const [chat, setChat] = useState<ChatItem[]>([
     {
       role: "assistant",
-      text: `Oi! Sou a ${config.name}, recepcionista do ${salonName}. Posso falar de serviços, valores e horários livres — ainda sem marcar sozinha.`,
+      text: `Oi! Sou a ${config.name}, recepcionista do ${salonName}. Posso consultar horários, informar valores e agendar para conferência da equipe. Para cancelar ou trocar, chamo alguém da recepção.`,
     },
   ]);
 
@@ -133,7 +133,7 @@ export function ReceptionistBoard({
         <div>
           <h1 className="font-display text-3xl">Recepcionista</h1>
           <p className="mt-1 text-sm text-ink-soft">
-            Atendente virtual no WhatsApp do salão. Só responde quando a cliente escreve, simula digitando e não marca sozinha.
+            Atendente virtual no WhatsApp do salão. Agenda novos horários com status <strong>Agendado pela IA</strong> para conferência e transfere cancelamentos ou trocas para a equipe.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -292,7 +292,7 @@ export function ReceptionistBoard({
             </div>
             <div>
               <p className="font-medium">Testar conversa</p>
-              <p className="text-xs text-ink-soft">Usa a tabela e os horários reais. Não envia no WhatsApp.</p>
+              <p className="text-xs text-ink-soft">Usa a tabela e os horários reais. Simula agendamentos sem gravar na agenda nem enviar no WhatsApp.</p>
             </div>
           </div>
           <div className="min-h-0 flex-1 space-y-2 overflow-y-auto px-5 py-4">

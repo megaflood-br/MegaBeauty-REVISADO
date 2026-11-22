@@ -37,6 +37,7 @@ export const TENANT_PLAN_LABEL: Record<TenantPlan, string> = {
 
 export const APPOINTMENT_STATUSES = [
   "PENDING",
+  "AI_BOOKED",
   "CONFIRMED",
   "IN_PROGRESS",
   "COMPLETED",
@@ -47,6 +48,7 @@ export type AppointmentStatus = (typeof APPOINTMENT_STATUSES)[number];
 
 export const STATUS_LABEL: Record<AppointmentStatus, string> = {
   PENDING: "Pendente",
+  AI_BOOKED: "Agendado pela IA",
   CONFIRMED: "Confirmado",
   IN_PROGRESS: "Em atendimento",
   COMPLETED: "Concluído",
@@ -56,6 +58,7 @@ export const STATUS_LABEL: Record<AppointmentStatus, string> = {
 
 export const STATUS_COLOR: Record<AppointmentStatus, string> = {
   PENDING: "#64748B",
+  AI_BOOKED: "#7C3AED",
   CONFIRMED: "#2563EB",
   IN_PROGRESS: "#0D9488",
   COMPLETED: "#059669",

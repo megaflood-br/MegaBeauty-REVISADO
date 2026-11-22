@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import Link from "next/link";
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import { Bot, ChevronLeft, ChevronRight } from "lucide-react";
 import { AppointmentEditor } from "@/components/agenda/appointment-editor";
 import type { AgendaAppointment, AgendaClient, AgendaProfessional, AgendaService } from "@/components/agenda/types";
 import { Avatar, Badge } from "@/components/ui";
@@ -137,12 +137,18 @@ export function AgendaBoard({
         </div>
       </div>
 
-      <div className="flex flex-wrap gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         {Object.entries(STATUS_LABEL).map(([key, label]) => (
           <Badge key={key} color={STATUS_COLOR[key as AppointmentStatus]}>
             {label}
           </Badge>
         ))}
+        {appointments.some((a) => a.status === "AI_BOOKED") ? (
+          <span className="inline-flex items-center gap-1 rounded-full bg-violet-100 px-2.5 py-0.5 text-xs font-medium text-violet-800">
+            <Bot size={12} />
+            {appointments.filter((a) => a.status === "AI_BOOKED").length} para conferência
+          </span>
+        ) : null}
       </div>
 
       <div className="agenda-scroll max-h-[calc(100vh-13rem)] overflow-auto rounded-2xl border border-line bg-paper">
@@ -228,8 +234,22 @@ export function AgendaBoard({
                           background: STATUS_COLOR[item.appt.status],
                         }}
                       >
-                        <div className="text-xs font-semibold leading-tight">{item.appt.client.name}</div>
-                        <div className="text-[11px] opacity-90">{service?.name}</div>
+                        <div className="flex items-center justify-between gap-1">
+                          <span className="truncate text-xs font-semibold leading-tight">{item.appt.client.name}</span>
+                          {item.appt.status === "AI_BOOKED" ? (
+                            <span
+                              className="inline-flex shrink-0 items-center gap-0.5 rounded bg-white/20 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide"
+                              title="Agendado pela IA — aguardando conferência"
+                            >
+                              <Bot size={10} /> IA
+                            </span>
+                          ) : null}
+                        </div>
+                        <div className="truncate text-[11px] opacity-90">
+                          {item.appt.items.length > 1
+                            ? item.appt.items.map((i) => i.service.name).join(" + ")
+                            : service?.name}
+                        </div>
                         <div className="text-[10px] opacity-80">
                           {formatTime(item.start)}–{formatTime(item.end)}
                         </div>
