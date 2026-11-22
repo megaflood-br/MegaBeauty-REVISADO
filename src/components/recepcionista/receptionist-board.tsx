@@ -8,6 +8,7 @@ import { saveReceptionist, testReceptionist } from "@/app/actions/receptionist";
 import { readProductPhoto } from "@/lib/product-photo";
 import { settingsPath } from "@/lib/settings";
 import {
+  RECEPTIONIST_FEATURES,
   RECEPTIONIST_PRESETS,
   emojiLabel,
   personalityLabel,
@@ -17,6 +18,7 @@ import {
   type ReceptionistCatalog,
   type ReceptionistConfig,
   type ReceptionistEmoji,
+  type ReceptionistFeatureKey,
   type ReceptionistPersonality,
   type ReceptionistStyle,
 } from "@/lib/receptionist";
@@ -64,6 +66,13 @@ export function ReceptionistBoard({
   const [personality, setPersonality] = useState<ReceptionistPersonality>(config.personality);
   const [emoji, setEmoji] = useState<ReceptionistEmoji>(config.emoji);
   const [instructions, setInstructions] = useState(config.instructions);
+  const [features, setFeatures] = useState<Record<ReceptionistFeatureKey, boolean>>({
+    canBook: config.canBook,
+    canCheckAvailability: config.canCheckAvailability,
+    canInformPrices: config.canInformPrices,
+    canCheckOwnAppointments: config.canCheckOwnAppointments,
+    canHandover: config.canHandover,
+  });
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [pending, startTransition] = useTransition();
@@ -72,9 +81,13 @@ export function ReceptionistBoard({
   const [chat, setChat] = useState<ChatItem[]>([
     {
       role: "assistant",
-      text: `Oi! Sou a ${config.name}, recepcionista do ${salonName}. Posso consultar horários, informar valores e agendar para conferência da equipe. Para cancelar ou trocar, chamo alguém da recepção.`,
+      text: `Oi! Sou a ${config.name}, recepcionista do ${salonName}. Como posso te ajudar hoje?`,
     },
   ]);
+
+  function toggleFeature(key: ReceptionistFeatureKey) {
+    setFeatures((current) => ({ ...current, [key]: !current[key] }));
+  }
 
   function persist() {
     setError(null);
@@ -88,6 +101,9 @@ export function ReceptionistBoard({
       form.set("personality", personality);
       form.set("emoji", emoji);
       form.set("instructions", instructions);
+      for (const item of RECEPTIONIST_FEATURES) {
+        form.set(item.key, features[item.key] ? "1" : "0");
+      }
       const result = await saveReceptionist(form);
       if (result && "error" in result && result.error) {
         setError(result.error);
@@ -110,6 +126,9 @@ export function ReceptionistBoard({
       form.set("personality", personality);
       form.set("emoji", emoji);
       form.set("instructions", instructions);
+      for (const item of RECEPTIONIST_FEATURES) {
+        form.set(item.key, features[item.key] ? "1" : "0");
+      }
       form.set("history", JSON.stringify(chat));
       const result = await testReceptionist(form);
       setChat((current) => [
@@ -177,6 +196,50 @@ export function ReceptionistBoard({
               </Link>
             </p>
           ) : null}
+
+          <div className="space-y-2.5">
+            <div>
+              <p className="text-sm font-medium">Funções da IA</p>
+              <p className="text-xs text-ink-soft">
+                Ative ou desative o que a recepcionista pode fazer automaticamente no WhatsApp. Cancelamentos e trocas nunca são feitos pela IA.
+              </p>
+            </div>
+            <div className="divide-y divide-line rounded-xl border border-line bg-white">
+              {RECEPTIONIST_FEATURES.map((item) => {
+                const active = features[item.key];
+                return (
+                  <label
+                    key={item.key}
+                    className="flex cursor-pointer items-start justify-between gap-4 px-4 py-3"
+                  >
+                    <span>
+                      <span className="block text-sm font-medium">{item.label}</span>
+                      <span className="mt-0.5 block text-xs text-ink-soft">{item.description}</span>
+                    </span>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={active}
+                      disabled={!canEdit}
+                      onClick={() => toggleFeature(item.key)}
+                      className={cn(
+                        "relative mt-0.5 h-6 w-11 shrink-0 rounded-full transition",
+                        active ? "bg-wine" : "bg-slate-300",
+                        !canEdit && "opacity-60",
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          "absolute top-0.5 h-5 w-5 rounded-full bg-white transition",
+                          active ? "left-5" : "left-0.5",
+                        )}
+                      />
+                    </button>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
 
           <div className="flex items-center gap-4">
             <AvatarPreview name={name} avatarUrl={avatarUrl} />

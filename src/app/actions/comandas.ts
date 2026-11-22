@@ -21,6 +21,7 @@ import {
 import { applyCatalogPrice } from "@/lib/promotions";
 import { loadPromoRules } from "@/lib/promo-load";
 import { moneyVar, safeDispatch } from "@/lib/dispatch-whatsapp-campaign";
+import { safeNotifyAppointmentStatusChange } from "@/lib/appointment-status-notify";
 import { canAccess } from "@/lib/permissions";
 
 async function nextNumber(tenantId: string) {
@@ -77,14 +78,23 @@ export async function createComandaFromAppointment(appointmentId: string) {
     },
   });
 
+  const nextStatus =
+    appointment.status === "PENDING" || appointment.status === "AI_BOOKED" ? "CONFIRMED" : appointment.status;
   await prisma.appointment.update({
     where: { id: appointment.id },
-    data: {
-      status: appointment.status === "PENDING" || appointment.status === "AI_BOOKED" ? "CONFIRMED" : appointment.status,
-    },
+    data: { status: nextStatus },
   });
+  if (nextStatus !== appointment.status) {
+    safeNotifyAppointmentStatusChange({
+      tenantId: session.tenantId,
+      appointmentId: appointment.id,
+      previousStatus: appointment.status,
+      nextStatus,
+    });
+  }
 
   revalidateComandas();
+  revalidatePath("/atendimento");
   return { ok: true as const, id: comanda.id, existing: false };
 }
 
@@ -577,10 +587,22 @@ async function finalizeOpenComanda(
   }
 
   if (comanda.appointmentId) {
+    const prevAppointment = await prisma.appointment.findFirst({
+      where: { id: comanda.appointmentId, tenantId },
+      select: { status: true },
+    });
     await prisma.appointment.update({
       where: { id: comanda.appointmentId },
       data: { status: "COMPLETED" },
     });
+    if (prevAppointment && prevAppointment.status !== "COMPLETED") {
+      safeNotifyAppointmentStatusChange({
+        tenantId,
+        appointmentId: comanda.appointmentId,
+        previousStatus: prevAppointment.status,
+        nextStatus: "COMPLETED",
+      });
+    }
   }
 
   if (tenant.fiscalEnabled && tenant.fiscalAutoIssue) {

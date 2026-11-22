@@ -28,7 +28,51 @@ export type ReceptionistConfig = {
   personality: ReceptionistPersonality;
   emoji: ReceptionistEmoji;
   instructions: string;
+  canBook: boolean;
+  canCheckAvailability: boolean;
+  canInformPrices: boolean;
+  canCheckOwnAppointments: boolean;
+  canHandover: boolean;
 };
+
+export type ReceptionistFeatureKey =
+  | "canBook"
+  | "canCheckAvailability"
+  | "canInformPrices"
+  | "canCheckOwnAppointments"
+  | "canHandover";
+
+export const RECEPTIONIST_FEATURES: readonly {
+  key: ReceptionistFeatureKey;
+  label: string;
+  description: string;
+}[] = [
+  {
+    key: "canBook",
+    label: "Agendar novos horários",
+    description: "Cria agendamentos na agenda com status 'Agendado pela IA' para conferência da equipe.",
+  },
+  {
+    key: "canCheckAvailability",
+    label: "Consultar horários livres",
+    description: "Verifica vagas reais na agenda por data, profissional e duração contínua dos serviços.",
+  },
+  {
+    key: "canInformPrices",
+    label: "Informar preços e serviços",
+    description: "Responde valores e duração dos serviços ativos cadastrados no salão.",
+  },
+  {
+    key: "canCheckOwnAppointments",
+    label: "Consultar agendamentos da cliente",
+    description: "Informa os horários já marcados quando a cliente pergunta qual é o agendamento dela.",
+  },
+  {
+    key: "canHandover",
+    label: "Transferir para atendimento humano",
+    description: "Pausa a IA e chama a equipe quando a cliente pede atendente, cancelamento ou troca.",
+  },
+] as const;
 
 export const RECEPTIONIST_PRESETS = [
   { id: "luna", label: "Luna", color: "#7C3AED" },
@@ -47,6 +91,11 @@ export const DEFAULT_RECEPTIONIST: ReceptionistConfig = {
   personality: "feliz",
   emoji: "moderado",
   instructions: "",
+  canBook: true,
+  canCheckAvailability: true,
+  canInformPrices: true,
+  canCheckOwnAppointments: true,
+  canHandover: true,
 };
 
 export type ReceptionistCatalog = {
@@ -123,6 +172,11 @@ export function normalizeReceptionist(
     personality: string;
     emoji: string;
     instructions: string;
+    canBook: boolean;
+    canCheckAvailability: boolean;
+    canInformPrices: boolean;
+    canCheckOwnAppointments: boolean;
+    canHandover: boolean;
   }> | null,
 ): ReceptionistConfig {
   const name = String(input?.name ?? DEFAULT_RECEPTIONIST.name).trim() || DEFAULT_RECEPTIONIST.name;
@@ -137,6 +191,11 @@ export function normalizeReceptionist(
         : DEFAULT_RECEPTIONIST.personality,
     emoji: input?.emoji && isReceptionistEmoji(input.emoji) ? input.emoji : DEFAULT_RECEPTIONIST.emoji,
     instructions: String(input?.instructions ?? "").trim().slice(0, 500),
+    canBook: input?.canBook !== false,
+    canCheckAvailability: input?.canCheckAvailability !== false,
+    canInformPrices: input?.canInformPrices !== false,
+    canCheckOwnAppointments: input?.canCheckOwnAppointments !== false,
+    canHandover: input?.canHandover !== false,
   };
 }
 
@@ -542,7 +601,7 @@ export function buildReceptionistSystemPrompt(
     clientAppointments?: ClientUpcomingAppointment[] | null;
   },
 ) {
-  const bookingMode = options?.bookingMode ?? "live";
+  const effectiveBookingMode = !config.canBook ? "off" : (options?.bookingMode ?? "live");
   const emojiRule =
     config.emoji === "nenhum"
       ? "Não use emojis."
@@ -554,20 +613,50 @@ export function buildReceptionistSystemPrompt(
     ? `Data de hoje: ${catalog.todayLabel ? `${catalog.todayLabel} ` : ""}(${catalog.todayDate})${catalog.nowHHmm ? ` · Horário atual agora no salão: ${catalog.nowHHmm}` : ""}. Você pode consultar qualquer data até ${MAX_LOOKAHEAD_DAYS} dias à frente.`
     : "";
   const clientLine =
-    bookingMode !== "off"
+    effectiveBookingMode !== "off"
       ? options?.knownClientName
         ? `Cliente identificada no cadastro: ${options.knownClientName} (não precisa pedir o nome dela novamente).`
         : "Cliente ainda sem nome cadastrado: peça o nome dela antes de finalizar o agendamento."
       : "";
   const bookingRule =
-    bookingMode === "off"
-      ? "Você não cria agendamentos automaticamente neste modo; ofereça horários reais e diga que a recepção confirma."
-      : bookingMode === "simulate"
+    effectiveBookingMode === "off"
+      ? "FUNÇÃO DESATIVADA (agendamento automático): você NÃO cria nem confirma agendamentos sozinha. NUNCA diga que agendou, marcou, reservou ou vai registrar. Se a cliente quiser marcar horário, diga educadamente que a recepção do salão confirma e finaliza o agendamento."
+      : effectiveBookingMode === "simulate"
         ? "Você PODE agendar novos horários usando a ferramenta create_appointment (neste ambiente de teste o sistema apenas simula e não grava na agenda real). REGRA OBRIGATÓRIA: NUNCA diga que agendou, marcou ou vai registrar sem ANTES chamar create_appointment nesta mesma resposta e receber sucesso. Quando a cliente pedir para agendar ou responder 'sim'/'pode'/'confirmo', chame create_appointment IMEDIATAMENTE antes de responder, e avise que fica com status 'Agendado pela IA' para conferência da equipe."
         : "Você PODE agendar novos horários na agenda do salão usando a ferramenta create_appointment. REGRA OBRIGATÓRIA: NUNCA diga 'vou registrar', 'vou agendar', 'agendado', 'marcado' ou 'confirmado' sem ANTES executar create_appointment nesta mesma resposta e receber 'AGENDAMENTO CRIADO COM SUCESSO'. Quando a cliente pedir explicitamente para agendar (ex.: 'agende manicure com a Ana hoje às 15h') ou responder 'sim'/'pode'/'ok'/'confirmo' para um horário que você ofereceu, CHAME create_appointment IMEDIATAMENTE nesta resposta antes de escrever o texto final. Se a cliente ainda não tiver nome cadastrado, peça o nome dela antes de finalizar. Ao concluir com sucesso, confirme os detalhes reais e avise que o horário ficou registrado como 'Agendado pela IA' para conferência da equipe.";
-  const availabilityBlock = availability ? `\n${formatAvailabilityForPrompt(availability)}` : "";
+
+  const availabilityRule = config.canCheckAvailability
+    ? [
+        "Quando a cliente perguntar sobre disponibilidade para um NOVO horário em qualquer data específica (incluindo dias da semana, semana que vem, dia do mês), um horário específico (ex.: 14:00) ou um serviço com duração específica (especialmente procedimentos longos como 2h ou 3h), consulte check_availability com a data exata, o horário (se mencionado) e o serviço para validar encaixe contínuo real.",
+        "Os horários retornados por check_availability são horários de INÍCIO onde o procedimento cabe inteiro sem conflito.",
+        "IMPORTANTE SOBRE FAIXAS DE HORÁRIOS: uma faixa contínua como '13:30 até 18:00' significa que TODOS os horários de início dentro desse intervalo (ex.: 13:30, 14:00, 14:30, 15:00, ..., 18:00) estão LIVRES. NUNCA diga que um horário dentro de uma faixa livre está indisponível e NUNCA se contradiga.",
+        "Se a consulta mostrar 'HORÁRIO PERGUNTADO HH:mm: DISPONÍVEL', confirme claramente que esse horário está livre. Só diga que um horário está indisponível se a consulta mostrar explicitamente que ele está ocupado ou indisponível.",
+      ].join("\n")
+    : "FUNÇÃO DESATIVADA (consulta de horários): você NÃO consulta horários livres na agenda. Nunca invente vagas nem horários; se a cliente perguntar disponibilidade, diga educadamente que a equipe da recepção verifica os horários disponíveis para ela.";
+
+  const pricesRule = config.canInformPrices
+    ? ""
+    : "FUNÇÃO DESATIVADA (preços): você NÃO está autorizada a informar preços ou valores de serviços. Se perguntarem valores, diga educadamente que a equipe da recepção passa os valores atualizados.";
+
+  const ownAppointmentsRule = config.canCheckOwnAppointments
+    ? "Quando a cliente perguntar sobre OS PRÓPRIOS agendamentos dela (ex.: 'qual meu horário hoje?', 'quando é meu agendamento?', 'tenho horário marcado?'), responda usando a lista 'Agendamentos futuros DESTA cliente' ou chamando get_my_appointments — informe data, horário, serviço, profissional e status. NUNCA consulte check_availability para responder qual é o horário já marcado da cliente e NUNCA diga que o horário dela está indisponível."
+    : "FUNÇÃO DESATIVADA (consultar agendamentos da cliente): você NÃO consulta agendamentos já marcados da cliente. Se ela perguntar qual é o horário dela, diga educadamente que a equipe da recepção pode confirmar essa informação para ela.";
+
+  const handoverRule = config.canHandover
+    ? "Se pedirem uma pessoa da equipe, diga que vai chamar a recepção."
+    : "Se pedirem uma pessoa da equipe, diga educadamente que alguém da recepção responderá assim que possível.";
+
+  const activeTools: string[] = [];
+  if (config.canCheckAvailability) activeTools.push("check_availability");
+  if (effectiveBookingMode !== "off") activeTools.push("create_appointment");
+  if (config.canCheckOwnAppointments) activeTools.push("get_my_appointments");
+  const toolsHint = activeTools.length
+    ? `Use só o catálogo abaixo e as ferramentas habilitadas (${activeTools.join(", ")}).`
+    : "Use só o catálogo abaixo.";
+
+  const availabilityBlock = config.canCheckAvailability && availability ? `\n${formatAvailabilityForPrompt(availability)}` : "";
   const clientAppointmentsBlock =
-    options?.clientAppointments != null
+    config.canCheckOwnAppointments && options?.clientAppointments != null
       ? `\n${formatClientAppointmentsForPrompt(options.clientAppointments, catalog.todayDate)}`
       : "";
   return [
@@ -578,21 +667,22 @@ export function buildReceptionistSystemPrompt(
     "Fale em português brasileiro, curto, como WhatsApp. No máximo 4 frases.",
     "Varie as palavras a cada resposta. Não copie a mensagem anterior da conversa.",
     "Só responda porque a cliente escreveu agora. Não comece conversa nem faça propaganda sozinha.",
-    "Nunca invente horário, preço ou profissional. Use só o catálogo abaixo e as ferramentas check_availability, create_appointment e get_my_appointments.",
-    "Quando a cliente perguntar sobre OS PRÓPRIOS agendamentos dela (ex.: 'qual meu horário hoje?', 'quando é meu agendamento?', 'tenho horário marcado?'), responda usando a lista 'Agendamentos futuros DESTA cliente' ou chamando get_my_appointments — informe data, horário, serviço, profissional e status. NUNCA consulte check_availability para responder qual é o horário já marcado da cliente e NUNCA diga que o horário dela está indisponível.",
-    "Quando a cliente perguntar sobre disponibilidade para um NOVO horário em qualquer data específica (incluindo dias da semana, semana que vem, dia do mês), um horário específico (ex.: 14:00) ou um serviço com duração específica (especialmente procedimentos longos como 2h ou 3h), consulte check_availability com a data exata, o horário (se mencionado) e o serviço para validar encaixe contínuo real.",
-    "Os horários retornados por check_availability são horários de INÍCIO onde o procedimento cabe inteiro sem conflito.",
-    "IMPORTANTE SOBRE FAIXAS DE HORÁRIOS: uma faixa contínua como '13:30 até 18:00' significa que TODOS os horários de início dentro desse intervalo (ex.: 13:30, 14:00, 14:30, 15:00, ..., 18:00) estão LIVRES. NUNCA diga que um horário dentro de uma faixa livre está indisponível e NUNCA se contradiga.",
-    "Se a consulta mostrar 'HORÁRIO PERGUNTADO HH:mm: DISPONÍVEL', confirme claramente que esse horário está livre. Só diga que um horário está indisponível se a consulta mostrar explicitamente que ele está ocupado ou indisponível.",
+    `Nunca invente horário, preço ou profissional. ${toolsHint}`,
+    ownAppointmentsRule,
+    availabilityRule,
+    pricesRule,
     bookingRule,
     "REGRA DE SERVIÇO E PROFISSIONAL: NUNCA adivinhe um serviço nem reutilize o serviço de um agendamento anterior quando a cliente pedir para agendar com uma profissional sem dizer qual serviço deseja (ex.: 'agende com a Sandy'). Se a cliente não informou qual serviço quer neste pedido, PERGUNTE qual serviço ela deseja, listando apenas os serviços que essa profissional realmente realiza. NUNCA agende um serviço que a profissional não realiza e NUNCA troque a profissional escolhida pela cliente sem confirmação dela.",
     "REGRA ESTRITA: você NUNCA pode cancelar, desmarcar, trocar, remarcar ou alterar agendamentos já existentes. Se a cliente pedir cancelamento, troca ou remarcação, diga educadamente que vai passar para alguém da equipe do salão cuidar disso.",
     "Não revele dados de outras clientes, faturamento, estoque ou informações internas.",
-    "Se pedirem uma pessoa da equipe, diga que vai chamar a recepção.",
+    handoverRule,
     extra,
     "",
     "Catálogo:",
-    formatReceptionistCatalog(catalog),
+    formatReceptionistCatalog(catalog, {
+      showPrices: config.canInformPrices,
+      showAvailability: config.canCheckAvailability,
+    }),
     clientAppointmentsBlock,
     availabilityBlock,
   ]
@@ -600,38 +690,50 @@ export function buildReceptionistSystemPrompt(
     .join("\n");
 }
 
-export function formatReceptionistCatalog(catalog: ReceptionistCatalog) {
+export function formatReceptionistCatalog(
+  catalog: ReceptionistCatalog,
+  options?: { showPrices?: boolean; showAvailability?: boolean },
+) {
+  const showPrices = options?.showPrices !== false;
+  const showAvailability = options?.showAvailability !== false;
   const slotMinutes = catalog.slotMinutes ?? 15;
   const services = catalog.services.length
     ? catalog.services
         .slice(0, 24)
         .map((row) => {
           const who = row.professionals.length ? ` · ${row.professionals.join(", ")}` : "";
-          return `- ${row.name}: ${row.price}, ${row.durationMin} min${who}`;
+          const pricePart = showPrices ? `${row.price}, ` : "";
+          return `- ${row.name}: ${pricePart}${row.durationMin} min${who}`;
         })
         .join("\n")
     : "- nenhum serviço ativo";
   const team = catalog.professionals.length
     ? catalog.professionals
         .map((row) => {
+          const specialty = row.specialty ? ` (${row.specialty})` : "";
+          const allowedServices = row.services?.length ? ` · realiza apenas: ${row.services.join(", ")}` : "";
+          if (!showAvailability) {
+            return `- ${row.name}${specialty}${allowedServices}`;
+          }
           const today = row.today.length
             ? `hoje ${formatAvailabilitySlots(row.today, slotMinutes)}`
             : "hoje sem vaga";
           const tomorrow = row.tomorrow.length
             ? `amanhã ${formatAvailabilitySlots(row.tomorrow, slotMinutes)}`
             : "amanhã sem vaga";
-          const specialty = row.specialty ? ` (${row.specialty})` : "";
-          const allowedServices = row.services?.length ? ` · realiza apenas: ${row.services.join(", ")}` : "";
           return `- ${row.name}${specialty}${allowedServices}: ${today}; ${tomorrow}`;
         })
         .join("\n")
     : "- nenhuma profissional ativa";
+  const teamHeading = showAvailability
+    ? `Profissionais e faixas contínuas de horários de início livres (cada faixa 'A até B' inclui TODOS os horários a cada ${slotMinutes} min de A até B; respeite rigorosamente os serviços que cada profissional realiza; use check_availability para outras datas, horários específicos ou encaixe exato por duração):`
+    : "Profissionais ativas (consulta de horários livres desativada — respeite os serviços que cada profissional realiza):";
   return [
     `Salão: ${catalog.salon}${catalog.city ? ` · ${catalog.city}` : ""}`,
     `Horário: ${catalog.hours}`,
-    "Serviços:",
+    showPrices ? "Serviços:" : "Serviços (valores sob consulta com a equipe):",
     services,
-    `Profissionais e faixas contínuas de horários de início livres (cada faixa 'A até B' inclui TODOS os horários a cada ${slotMinutes} min de A até B; respeite rigorosamente os serviços que cada profissional realiza; use check_availability para outras datas, horários específicos ou encaixe exato por duração):`,
+    teamHeading,
     team,
   ].join("\n");
 }
@@ -726,29 +828,43 @@ export function localReceptionistReply(input: {
   clientAppointments?: ClientUpcomingAppointment[] | null;
 }) {
   const { config, catalog, incoming, availability: computedAvailability, clientAppointments } = input;
-  if (wantsCancelOrReschedule(incoming)) return { text: cancelOrRescheduleHandoverReply(config), handover: true };
-  if (wantsHumanHandover(incoming)) return { text: handoverReply(config), handover: true };
+  if (wantsCancelOrReschedule(incoming)) {
+    return { text: cancelOrRescheduleHandoverReply(config), handover: config.canHandover };
+  }
+  if (wantsHumanHandover(incoming)) {
+    return { text: handoverReply(config), handover: config.canHandover };
+  }
 
   const emoji = config.emoji === "nenhum" ? "" : config.emoji === "sempre" ? " ✨" : " 💛";
 
-  if (asksOwnAppointments(incoming) && clientAppointments != null) {
-    if (!clientAppointments.length) {
+  if (asksOwnAppointments(incoming)) {
+    if (!config.canCheckOwnAppointments) {
       return {
         text: spin(
-          `Não encontrei nenhum agendamento futuro registrado para o seu número.${emoji} Se quiser, posso ver os horários livres para marcar.`,
+          `Para conferir os detalhes do seu agendamento já marcado, alguém da equipe do ${catalog.salon} pode confirmar para você.${emoji}`,
         ),
         handover: false,
       };
     }
-    const items = clientAppointments.slice(0, 3).map((appt) => {
-      const when = catalog.todayDate && appt.date === catalog.todayDate ? `hoje (${appt.dateLabel})` : appt.dateLabel;
-      const svc = appt.serviceNames.length ? appt.serviceNames.join(" + ") : "Atendimento";
-      return `${svc} com ${appt.professionalName} ${when} às ${appt.startTime} (${appt.statusLabel})`;
-    });
-    return {
-      text: `Encontrei seu agendamento: ${items.join("; ")}.${emoji}`,
-      handover: false,
-    };
+    if (clientAppointments != null) {
+      if (!clientAppointments.length) {
+        return {
+          text: spin(
+            `Não encontrei nenhum agendamento futuro registrado para o seu número.${emoji} Se quiser, posso ver os horários livres para marcar.`,
+          ),
+          handover: false,
+        };
+      }
+      const items = clientAppointments.slice(0, 3).map((appt) => {
+        const when = catalog.todayDate && appt.date === catalog.todayDate ? `hoje (${appt.dateLabel})` : appt.dateLabel;
+        const svc = appt.serviceNames.length ? appt.serviceNames.join(" + ") : "Atendimento";
+        return `${svc} com ${appt.professionalName} ${when} às ${appt.startTime} (${appt.statusLabel})`;
+      });
+      return {
+        text: `Encontrei seu agendamento: ${items.join("; ")}.${emoji}`,
+        handover: false,
+      };
+    }
   }
 
   const service = matchCatalogService(incoming, catalog.services);
@@ -760,7 +876,16 @@ export function localReceptionistReply(input: {
   if (first && !service && !professional && !price && !availability && !computedAvailability) {
     return {
       text: spin(
-        `{Oi|Olá|Oi oi}! Sou a ${config.name}, recepcionista do ${catalog.salon}.${emoji} {Posso falar|Consigo te ajudar} de serviços, valores e horários livres. O que você procura?`,
+        `{Oi|Olá|Oi oi}! Sou a ${config.name}, recepcionista do ${catalog.salon}.${emoji} {Como posso te ajudar|O que você procura}?`,
+      ),
+      handover: false,
+    };
+  }
+
+  if (price && !config.canInformPrices) {
+    return {
+      text: spin(
+        `Os valores dos serviços são informados diretamente pela equipe da recepção do ${catalog.salon}.${emoji} Assim que puderem, passam tudo certinho para você.`,
       ),
       handover: false,
     };
@@ -776,6 +901,15 @@ export function localReceptionistReply(input: {
     };
   }
 
+  if (!config.canCheckAvailability && (availability || computedAvailability)) {
+    return {
+      text: spin(
+        `A consulta de horários livres fica com a equipe da recepção do ${catalog.salon}.${emoji} Me diga o serviço e o período que você prefere para repassar à equipe.`,
+      ),
+      handover: false,
+    };
+  }
+
   if (computedAvailability && (availability || computedAvailability.isPast || computedAvailability.outOfRange || !price)) {
     return {
       text: formatComputedAvailabilityReply(computedAvailability, emoji),
@@ -784,6 +918,15 @@ export function localReceptionistReply(input: {
   }
 
   if (service && (price || !availability)) {
+    if (!config.canInformPrices) {
+      const who = service.professionals.length ? ` Com ${service.professionals.join(" ou ")}.` : "";
+      return {
+        text: spin(
+          `${service.name} leva cerca de ${service.durationMin} minutos.${who}${emoji} Os valores são passados pela equipe da recepção.`,
+        ),
+        handover: false,
+      };
+    }
     const who = service.professionals.length ? ` Com ${service.professionals.join(" ou ")}.` : "";
     return {
       text: spin(
@@ -794,6 +937,14 @@ export function localReceptionistReply(input: {
   }
 
   if (availability || professional || service) {
+    if (!config.canCheckAvailability) {
+      return {
+        text: spin(
+          `A consulta de horários livres fica com a equipe da recepção do ${catalog.salon}.${emoji} Me diga o que você procura para repassar à equipe.`,
+        ),
+        handover: false,
+      };
+    }
     const slotMinutes = catalog.slotMinutes ?? 15;
     const row = professional ?? catalog.professionals[0];
     if (!row) {
@@ -830,7 +981,7 @@ export function localReceptionistReply(input: {
 
   return {
     text: spin(
-      `{Posso te ajudar|Consigo te orientar} com serviços, valores e horários livres do ${catalog.salon}.${emoji} Me diz o que você quer fazer e se tem preferência de profissional.`,
+      `{Posso te ajudar|Consigo te orientar} no atendimento do ${catalog.salon}.${emoji} Me diz o que você precisa.`,
     ),
     handover: false,
   };

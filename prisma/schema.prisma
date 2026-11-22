@@ -807,18 +807,23 @@ model Message {
 }
 
 model Receptionist {
-  id           String   @id @default(cuid())
-  tenantId     String   @unique
-  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  enabled      Boolean  @default(false)
-  name         String   @default("Luna")
-  avatarUrl    String?
-  style        String   @default("conversador")
-  personality  String   @default("feliz")
-  emoji        String   @default("moderado")
-  instructions String   @default("")
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id                      String   @id @default(cuid())
+  tenantId                String   @unique
+  tenant                  Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  enabled                 Boolean  @default(false)
+  name                    String   @default("Luna")
+  avatarUrl               String?
+  style                   String   @default("conversador")
+  personality             String   @default("feliz")
+  emoji                   String   @default("moderado")
+  instructions            String   @default("")
+  canBook                 Boolean  @default(true)
+  canCheckAvailability    Boolean  @default(true)
+  canInformPrices         Boolean  @default(true)
+  canCheckOwnAppointments Boolean  @default(true)
+  canHandover             Boolean  @default(true)
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
 }
 
 model Automation {

@@ -26,6 +26,12 @@ function revalidateReceptionist() {
   revalidatePath("/", "layout");
 }
 
+function parseToggle(formData: FormData, key: string, fallback: boolean) {
+  const raw = formData.get(key);
+  if (raw === null) return fallback;
+  return String(raw) === "1";
+}
+
 export async function saveReceptionist(formData: FormData) {
   const { session, access } = await requireTenant();
   if (!canAccess(access, "receptionist", "edit")) return { error: "Sem permissão para configurar a recepcionista." };
@@ -38,6 +44,11 @@ export async function saveReceptionist(formData: FormData) {
   const personality = String(formData.get("personality") ?? "");
   const emoji = String(formData.get("emoji") ?? "");
   const enabled = String(formData.get("enabled") ?? "") === "1";
+  const canBook = parseToggle(formData, "canBook", current.canBook);
+  const canCheckAvailability = parseToggle(formData, "canCheckAvailability", current.canCheckAvailability);
+  const canInformPrices = parseToggle(formData, "canInformPrices", current.canInformPrices);
+  const canCheckOwnAppointments = parseToggle(formData, "canCheckOwnAppointments", current.canCheckOwnAppointments);
+  const canHandover = parseToggle(formData, "canHandover", current.canHandover);
 
   await prisma.receptionist.update({
     where: { tenantId: session.tenantId },
@@ -49,6 +60,11 @@ export async function saveReceptionist(formData: FormData) {
       personality: isReceptionistPersonality(personality) ? personality : DEFAULT_RECEPTIONIST.personality,
       emoji: isReceptionistEmoji(emoji) ? emoji : DEFAULT_RECEPTIONIST.emoji,
       instructions: String(formData.get("instructions") ?? "").trim().slice(0, 500),
+      canBook,
+      canCheckAvailability,
+      canInformPrices,
+      canCheckOwnAppointments,
+      canHandover,
     },
   });
   revalidateReceptionist();
@@ -86,6 +102,11 @@ export async function testReceptionist(formData: FormData) {
     personality: String(formData.get("personality") ?? config.personality) as typeof config.personality,
     emoji: String(formData.get("emoji") ?? config.emoji) as typeof config.emoji,
     instructions: String(formData.get("instructions") ?? config.instructions),
+    canBook: parseToggle(formData, "canBook", config.canBook),
+    canCheckAvailability: parseToggle(formData, "canCheckAvailability", config.canCheckAvailability),
+    canInformPrices: parseToggle(formData, "canInformPrices", config.canInformPrices),
+    canCheckOwnAppointments: parseToggle(formData, "canCheckOwnAppointments", config.canCheckOwnAppointments),
+    canHandover: parseToggle(formData, "canHandover", config.canHandover),
   });
   const reply = await generateReceptionistReply({
     tenantId: session.tenantId,
@@ -94,7 +115,7 @@ export async function testReceptionist(formData: FormData) {
     incoming,
     history,
     apiKey: integrations.openaiApiKey,
-    bookingMode: "simulate",
+    bookingMode: live.canBook ? "simulate" : "off",
     knownClientName: "Cliente Teste",
   });
   return { text: reply.text, handover: reply.handover, source: reply.source };

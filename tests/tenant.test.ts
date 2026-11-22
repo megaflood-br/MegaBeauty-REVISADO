@@ -14,9 +14,11 @@ import {
   generateReceptionistReply,
   loadClientUpcomingAppointments,
   loadReceptionistCatalog,
+  loadReceptionistConfig,
   queryReceptionistAvailability,
 } from "@/lib/receptionist-runtime";
 import { DEFAULT_RECEPTIONIST } from "@/lib/receptionist";
+import { notifyAppointmentStatusChange } from "@/lib/appointment-status-notify";
 import { getPublicBookingBusySlots, publicBook } from "@/app/actions/booking";
 import { calendarDate, shiftCalendarDate, zonedDateTime } from "@/lib/dates";
 import { handleEvolutionWebhookRequest } from "@/lib/evolution-webhook-http";
@@ -976,6 +978,165 @@ describe("isolamento multi-tenant automático no Prisma", () => {
         await unscopedPrisma.professionalService.createMany({
           data: originalLinks.map((l) => ({ professionalId: l.professionalId, serviceId: l.serviceId })),
         });
+      }
+    }
+  });
+
+  it("persiste funções individuais da IA e envia aviso no WhatsApp ao alterar status do agendamento", async () => {
+    const hq = await unscopedPrisma.tenant.findFirst({ where: { isPlatform: true } });
+    const aurora = await unscopedPrisma.tenant.findUnique({ where: { slug: "studio-aurora" } });
+    expect(hq).toBeTruthy();
+    expect(aurora).toBeTruthy();
+
+    // 1. Verifica persistência das funções da IA no banco e carregamento em loadReceptionistConfig
+    const originalReceptionist = await unscopedPrisma.receptionist.findUnique({ where: { tenantId: aurora!.id } });
+    await unscopedPrisma.receptionist.upsert({
+      where: { tenantId: aurora!.id },
+      update: {
+        canBook: false,
+        canCheckAvailability: true,
+        canInformPrices: false,
+        canCheckOwnAppointments: false,
+        canHandover: false,
+      },
+      create: {
+        tenantId: aurora!.id,
+        canBook: false,
+        canCheckAvailability: true,
+        canInformPrices: false,
+        canCheckOwnAppointments: false,
+        canHandover: false,
+      },
+    });
+
+    const [service, prof] = await Promise.all([
+      unscopedPrisma.service.findFirst({ where: { tenantId: aurora!.id, active: true }, orderBy: { name: "asc" } }),
+      unscopedPrisma.professional.findFirst({
+        where: { tenantId: aurora!.id, active: true, generateAgenda: true },
+        orderBy: { name: "asc" },
+      }),
+    ]);
+    expect(service).toBeTruthy();
+    expect(prof).toBeTruthy();
+
+    const originalHq = { evolutionUrl: hq!.evolutionUrl, evolutionApiKey: hq!.evolutionApiKey };
+    const originalAurora = {
+      whatsappProvider: aurora!.whatsappProvider,
+      evolutionInstance: aurora!.evolutionInstance,
+      evolutionStatus: aurora!.evolutionStatus,
+    };
+
+    const localPhone = "11955443322";
+    const fullPhone = `55${localPhone}`;
+    const targetDay = shiftCalendarDate(calendarDate(), 23);
+
+    const testClient = await unscopedPrisma.client.create({
+      data: { tenantId: aurora!.id, name: "Fernanda Status", phone: fullPhone },
+    });
+    const existingConv = await unscopedPrisma.conversation.create({
+      data: { tenantId: aurora!.id, phone: localPhone, clientId: testClient.id, lastMessageAt: new Date() },
+    });
+    const testAppt = await unscopedPrisma.appointment.create({
+      data: {
+        tenantId: aurora!.id,
+        clientId: testClient.id,
+        professionalId: prof!.id,
+        startAt: zonedDateTime(targetDay, "15:00"),
+        endAt: zonedDateTime(targetDay, "16:00"),
+        status: "AI_BOOKED",
+        items: {
+          create: {
+            serviceId: service!.id,
+            professionalId: prof!.id,
+            startAt: zonedDateTime(targetDay, "15:00"),
+            priceCents: service!.priceCents,
+            durationMin: service!.durationMin,
+          },
+        },
+      },
+    });
+
+    await unscopedPrisma.tenant.update({
+      where: { id: hq!.id },
+      data: { evolutionUrl: "https://evo.status.test", evolutionApiKey: "evo-status-key" },
+    });
+    await unscopedPrisma.tenant.update({
+      where: { id: aurora!.id },
+      data: { whatsappProvider: "evolution", evolutionInstance: "mb-aurora", evolutionStatus: "open" },
+    });
+
+    const sentPayloads: { url: string; body: string }[] = [];
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      sentPayloads.push({ url: String(input), body: String(init?.body ?? "") });
+      return new Response(JSON.stringify({ key: { id: "WA-STATUS-1" } }), { status: 200 });
+    });
+
+    try {
+      const loadedConfig = await loadReceptionistConfig(aurora!.id);
+      expect(loadedConfig.canBook).toBe(false);
+      expect(loadedConfig.canCheckAvailability).toBe(true);
+      expect(loadedConfig.canInformPrices).toBe(false);
+      expect(loadedConfig.canCheckOwnAppointments).toBe(false);
+      expect(loadedConfig.canHandover).toBe(false);
+
+      // 2. Status igual não envia mensagem duplicada
+      const sameRes = await notifyAppointmentStatusChange({
+        tenantId: aurora!.id,
+        appointmentId: testAppt.id,
+        previousStatus: "AI_BOOKED",
+        nextStatus: "AI_BOOKED",
+      });
+      expect(sameRes).toEqual({ skipped: "unchanged" });
+      expect(sentPayloads).toHaveLength(0);
+
+      // 3. Alteração de AI_BOOKED -> CONFIRMED envia no WhatsApp, reutiliza conversa 11 dígitos e NÃO pausa o bot
+      const confirmedRes = await notifyAppointmentStatusChange({
+        tenantId: aurora!.id,
+        appointmentId: testAppt.id,
+        previousStatus: "AI_BOOKED",
+        nextStatus: "CONFIRMED",
+      });
+      expect(confirmedRes).toMatchObject({ ok: true, mocked: false, conversationId: existingConv.id });
+      expect(sentPayloads.some((p) => p.url.includes("/message/sendText/mb-aurora"))).toBe(true);
+
+      const convAfter = await unscopedPrisma.conversation.findUnique({
+        where: { id: existingConv.id },
+        include: { messages: { orderBy: { createdAt: "asc" } } },
+      });
+      expect(convAfter?.botPausedUntil).toBeNull();
+      expect(convAfter?.messages).toHaveLength(1);
+      expect(convAfter?.messages[0].direction).toBe("OUT");
+      expect(convAfter?.messages[0].source).toBe("BOT");
+      expect(convAfter?.messages[0].body).toContain("confirmado");
+      expect(convAfter?.messages[0].body).toContain("15:00");
+      expect(convAfter?.messages[0].body).toContain(service!.name);
+
+      // Não deve duplicar conversa entre 11 dígitos e 55+11 dígitos
+      const convCount = await unscopedPrisma.conversation.count({
+        where: { tenantId: aurora!.id, phone: { in: [localPhone, fullPhone] } },
+      });
+      expect(convCount).toBe(1);
+    } finally {
+      fetchSpy.mockRestore();
+      await unscopedPrisma.appointment.delete({ where: { id: testAppt.id } }).catch(() => null);
+      await unscopedPrisma.message.deleteMany({ where: { conversationId: existingConv.id } }).catch(() => null);
+      await unscopedPrisma.conversation.delete({ where: { id: existingConv.id } }).catch(() => null);
+      await unscopedPrisma.client.delete({ where: { id: testClient.id } }).catch(() => null);
+      await unscopedPrisma.tenant.update({ where: { id: hq!.id }, data: originalHq });
+      await unscopedPrisma.tenant.update({ where: { id: aurora!.id }, data: originalAurora });
+      if (originalReceptionist) {
+        await unscopedPrisma.receptionist.update({
+          where: { tenantId: aurora!.id },
+          data: {
+            canBook: originalReceptionist.canBook,
+            canCheckAvailability: originalReceptionist.canCheckAvailability,
+            canInformPrices: originalReceptionist.canInformPrices,
+            canCheckOwnAppointments: originalReceptionist.canCheckOwnAppointments,
+            canHandover: originalReceptionist.canHandover,
+          },
+        });
+      } else {
+        await unscopedPrisma.receptionist.delete({ where: { tenantId: aurora!.id } }).catch(() => null);
       }
     }
   });

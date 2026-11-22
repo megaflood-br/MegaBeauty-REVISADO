@@ -140,6 +140,7 @@ import {
 import { evolutionWebhookToken, verifyEvolutionWebhookAuth } from "@/lib/evolution-webhook-auth";
 import {
   DEFAULT_RECEPTIONIST,
+  RECEPTIONIST_FEATURES,
   asksAvailability,
   asksOwnAppointments,
   asksPrices,
@@ -158,6 +159,7 @@ import {
   wantsCancelOrReschedule,
   wantsHumanHandover,
 } from "@/lib/receptionist";
+import { formatAppointmentStatusMessage } from "@/lib/appointment-status-notify";
 import { STATUS_COLOR, STATUS_LABEL } from "@/lib/constants";
 import {
   contiguousSlotsForDuration,
@@ -1961,6 +1963,121 @@ describe("recepcionista virtual", () => {
         activeProfessionalName: "Aline",
       }),
     ).toBe(true);
+  });
+
+  it("permite ativar e desativar funções individuais da IA no prompt, catálogo e respostas locais", () => {
+    expect(RECEPTIONIST_FEATURES.map((f) => f.key)).toEqual([
+      "canBook",
+      "canCheckAvailability",
+      "canInformPrices",
+      "canCheckOwnAppointments",
+      "canHandover",
+    ]);
+
+    const defaults = normalizeReceptionist({ name: "Luna" });
+    expect(defaults.canBook).toBe(true);
+    expect(defaults.canCheckAvailability).toBe(true);
+    expect(defaults.canInformPrices).toBe(true);
+    expect(defaults.canCheckOwnAppointments).toBe(true);
+    expect(defaults.canHandover).toBe(true);
+
+    const restricted = normalizeReceptionist({
+      name: "Luna",
+      emoji: "nenhum",
+      canBook: false,
+      canCheckAvailability: false,
+      canInformPrices: false,
+      canCheckOwnAppointments: false,
+      canHandover: false,
+    });
+
+    const restrictedCatalog = formatReceptionistCatalog(catalog, {
+      showPrices: restricted.canInformPrices,
+      showAvailability: restricted.canCheckAvailability,
+    });
+    expect(restrictedCatalog).not.toContain("R$ 80,00");
+    expect(restrictedCatalog).not.toContain("14:00");
+    expect(restrictedCatalog).toContain("valores sob consulta");
+
+    const restrictedPrompt = buildReceptionistSystemPrompt(restricted, catalog, null, {
+      bookingMode: "live",
+      clientAppointments: [
+        {
+          id: "a1",
+          date: "2026-11-22",
+          dateLabel: "domingo, 22 de novembro",
+          startTime: "15:00",
+          endTime: "16:00",
+          professionalName: "Camila Ferreira",
+          serviceNames: ["Escova"],
+          status: "CONFIRMED",
+          statusLabel: "Confirmado",
+        },
+      ],
+    });
+    expect(restrictedPrompt).toContain("FUNÇÃO DESATIVADA (agendamento automático)");
+    expect(restrictedPrompt).toContain("FUNÇÃO DESATIVADA (consulta de horários)");
+    expect(restrictedPrompt).toContain("FUNÇÃO DESATIVADA (preços)");
+    expect(restrictedPrompt).toContain("FUNÇÃO DESATIVADA (consultar agendamentos da cliente)");
+    expect(restrictedPrompt).not.toContain("create_appointment");
+    expect(restrictedPrompt).not.toContain("check_availability");
+    expect(restrictedPrompt).not.toContain("get_my_appointments");
+    expect(restrictedPrompt).not.toContain("R$ 80,00");
+    expect(restrictedPrompt).not.toContain("Agendamentos futuros DESTA cliente");
+
+    // Respostas locais respeitam cada função desativada
+    const priceOff = localReceptionistReply({ config: restricted, catalog, incoming: "quanto custa a escova?" });
+    expect(priceOff.text).not.toContain("R$ 80,00");
+    expect(priceOff.text).toMatch(/recepção/i);
+
+    const slotsOff = localReceptionistReply({ config: restricted, catalog, incoming: "tem horário com a Kelly hoje?" });
+    expect(slotsOff.text).not.toContain("11:00");
+    expect(slotsOff.text).toMatch(/recepção/i);
+
+    const ownOff = localReceptionistReply({
+      config: restricted,
+      catalog,
+      incoming: "qual meu horário hoje?",
+      clientAppointments: [
+        {
+          id: "a1",
+          date: "2026-11-22",
+          dateLabel: "domingo, 22 de novembro",
+          startTime: "15:00",
+          endTime: "16:00",
+          professionalName: "Camila Ferreira",
+          serviceNames: ["Escova"],
+          status: "CONFIRMED",
+          statusLabel: "Confirmado",
+        },
+      ],
+    });
+    expect(ownOff.text).not.toContain("15:00");
+    expect(ownOff.text).toMatch(/equipe/i);
+
+    const handoverOff = localReceptionistReply({ config: restricted, catalog, incoming: "quero cancelar meu horário" });
+    expect(handoverOff.handover).toBe(false);
+  });
+
+  it("gera mensagens claras ao cliente para cada alteração de status de agendamento", () => {
+    const base = {
+      clientName: "Carlos Silva",
+      salonName: "Renove Estética",
+      dateLabel: "domingo, 22 de novembro",
+      time: "15:00",
+      professionalName: "Aline",
+      serviceNames: ["Manicure"],
+    };
+
+    expect(formatAppointmentStatusMessage({ ...base, status: "CONFIRMED" })).toMatch(
+      /Oi Carlos!.*Renove Estética.*Manicure com Aline.*15:00.*confirmado/i,
+    );
+    expect(formatAppointmentStatusMessage({ ...base, status: "IN_PROGRESS" })).toMatch(/iniciado/i);
+    expect(formatAppointmentStatusMessage({ ...base, status: "COMPLETED" })).toMatch(/concluído/i);
+    expect(formatAppointmentStatusMessage({ ...base, status: "CANCELLED" })).toMatch(/cancelado/i);
+    expect(formatAppointmentStatusMessage({ ...base, status: "NO_SHOW" })).toMatch(/não pôde comparecer/i);
+    expect(formatAppointmentStatusMessage({ ...base, status: "PENDING" })).toMatch(/Pendente/i);
+    expect(formatAppointmentStatusMessage({ ...base, status: "AI_BOOKED" })).toMatch(/Agendado pela IA/i);
   });
 
   it("interpreta datas futuras em português até 60 dias e rejeita datas inválidas ou fora da janela", () => {

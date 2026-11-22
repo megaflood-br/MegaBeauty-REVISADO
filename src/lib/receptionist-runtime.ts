@@ -67,6 +67,11 @@ export async function loadReceptionistConfig(tenantId: string): Promise<Receptio
     personality: row.personality,
     emoji: row.emoji,
     instructions: row.instructions,
+    canBook: row.canBook,
+    canCheckAvailability: row.canCheckAvailability,
+    canInformPrices: row.canInformPrices,
+    canCheckOwnAppointments: row.canCheckOwnAppointments,
+    canHandover: row.canHandover,
   });
 }
 
@@ -989,8 +994,8 @@ export async function generateReceptionistReply(input: {
   knownClientName?: string | null;
 }) {
   const cancelOrReschedule = wantsCancelOrReschedule(input.incoming);
-  const handover = wantsHumanHandover(input.incoming) || cancelOrReschedule;
-  if (handover) {
+  const handoverRequested = wantsHumanHandover(input.incoming) || cancelOrReschedule;
+  if (handoverRequested) {
     const local = localReceptionistReply({
       config: input.config,
       catalog: input.catalog,
@@ -998,14 +1003,17 @@ export async function generateReceptionistReply(input: {
     });
     return {
       text: local.text,
-      handover: true,
+      handover: input.config.canHandover,
       source: "local" as const,
       bookedAppointmentId: null as string | null,
     };
   }
 
   const isCheckingOwnAppointments = asksOwnAppointments(input.incoming);
-  const canLookupOwnAppointments = Boolean(input.tenantId && (input.clientId || input.phone));
+  const canLookupOwnAppointments = Boolean(
+    input.config.canCheckOwnAppointments && input.tenantId && (input.clientId || input.phone),
+  );
+  const canCheckAvail = input.config.canCheckAvailability;
 
   const clientAppointments = canLookupOwnAppointments
     ? await loadClientUpcomingAppointments({
@@ -1016,7 +1024,7 @@ export async function generateReceptionistReply(input: {
     : null;
 
   let precomputedAvailability: AvailabilityDayResult | null = null;
-  if (input.tenantId && !isCheckingOwnAppointments) {
+  if (input.tenantId && canCheckAvail && !isCheckingOwnAppointments) {
     const intent = resolveAvailabilityIntentFromMessages({
       incoming: input.incoming,
       history: input.history,
@@ -1072,14 +1080,15 @@ export async function generateReceptionistReply(input: {
     clientAppointments,
   });
 
-  const bookingMode = input.bookingMode ?? (input.tenantId && input.phone ? "live" : "off");
-  const tools: OpenAI.Chat.Completions.ChatCompletionTool[] | undefined = input.tenantId
-    ? [
-        CHECK_AVAILABILITY_TOOL,
-        ...(bookingMode !== "off" ? [CREATE_APPOINTMENT_TOOL] : []),
-        ...(canLookupOwnAppointments ? [GET_MY_APPOINTMENTS_TOOL] : []),
-      ]
-    : undefined;
+  const requestedBookingMode = input.bookingMode ?? (input.tenantId && input.phone ? "live" : "off");
+  const bookingMode = input.config.canBook ? requestedBookingMode : "off";
+  const enabledTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [];
+  if (input.tenantId) {
+    if (canCheckAvail) enabledTools.push(CHECK_AVAILABILITY_TOOL);
+    if (bookingMode !== "off") enabledTools.push(CREATE_APPOINTMENT_TOOL);
+    if (canLookupOwnAppointments) enabledTools.push(GET_MY_APPOINTMENTS_TOOL);
+  }
+  const tools = enabledTools.length ? enabledTools : undefined;
 
   let bookedAppointmentId: string | null = null;
   let createAppointmentSucceeded = false;
@@ -1098,9 +1107,12 @@ export async function generateReceptionistReply(input: {
       history: input.history,
       tools,
       validateResponse:
-        input.tenantId && bookingMode !== "off" && !isCheckingOwnAppointments
+        input.tenantId && !isCheckingOwnAppointments
           ? (text) => {
-              if (!createAppointmentSucceeded && looksLikeBookingConfirmationClaim(text)) {
+              if (bookingMode === "off" && looksLikeBookingConfirmationClaim(text)) {
+                return "ERRO INTERNO: A função de agendamento automático está DESATIVADA. Você NÃO agendou nem pode agendar horários. Corrija a resposta informando educadamente que a equipe da recepção confirmará e registrará o agendamento.";
+              }
+              if (bookingMode !== "off" && !createAppointmentSucceeded && looksLikeBookingConfirmationClaim(text)) {
                 return "ERRO INTERNO: Você respondeu como se tivesse agendado ou fosse registrar o horário, mas NÃO executou create_appointment com sucesso! Chame a ferramenta create_appointment AGORA com date, time, serviceNames, professionalName (e clientName se conhecido/informado) antes de responder à cliente. Se faltar algum dado (por exemplo, o nome da cliente sem cadastro ou qual variação do serviço), pergunte esse dado à cliente em vez de dizer que agendou ou que vai registrar.";
               }
               return null;
@@ -1119,7 +1131,7 @@ export async function generateReceptionistReply(input: {
               return formatClientAppointmentsForPrompt(fresh, input.catalog.todayDate);
             }
 
-            if (name === "check_availability") {
+            if (name === "check_availability" && canCheckAvail) {
               const rawDate = typeof args.date === "string" ? args.date.trim() : "";
               const refDate = input.catalog.todayDate ?? calendarDate();
               const resolvedDate = isValidCalendarDate(rawDate) ? rawDate : parseRequestedDate(rawDate, refDate)?.date ?? "";
@@ -1225,24 +1237,26 @@ export async function generateReceptionistReply(input: {
               return `NÃO FOI POSSÍVEL AGENDAR: ${bookingResult.error}`;
             }
 
-            return "Ferramenta desconhecida ou não permitida.";
+            return "Ferramenta desativada ou não permitida.";
           }
         : undefined,
     });
     if (openai) {
-      // Hard safety net: never send a false booking confirmation if create_appointment did not succeed
+      // Hard safety net: never send a false booking confirmation if booking is disabled or create_appointment did not succeed
       if (
         input.tenantId &&
-        bookingMode !== "off" &&
         !isCheckingOwnAppointments &&
-        !createAppointmentSucceeded &&
+        (bookingMode === "off" || !createAppointmentSucceeded) &&
         looksLikeBookingConfirmationClaim(openai)
       ) {
-        const safeFallback = lastBookingNeedsClientName
-          ? "Para eu concluir o seu agendamento na agenda, qual é o seu nome completo?"
-          : lastBookingError
-            ? `Ainda não consegui registrar o horário: ${lastBookingError}`
-            : "Para eu registrar o seu agendamento agora na agenda, me confirme por favor o serviço, o dia, o horário e o seu nome.";
+        const safeFallback =
+          bookingMode === "off"
+            ? "Anotei o seu pedido! Como o agendamento automático está desativado, alguém da equipe da recepção vai confirmar e finalizar o seu horário por aqui."
+            : lastBookingNeedsClientName
+              ? "Para eu concluir o seu agendamento na agenda, qual é o seu nome completo?"
+              : lastBookingError
+                ? `Ainda não consegui registrar o horário: ${lastBookingError}`
+                : "Para eu registrar o seu agendamento agora na agenda, me confirme por favor o serviço, o dia, o horário e o seu nome.";
         return { text: safeFallback.slice(0, 700), handover: false, source: "openai" as const, bookedAppointmentId };
       }
       return { text: openai.slice(0, 700), handover: false, source: "openai" as const, bookedAppointmentId };

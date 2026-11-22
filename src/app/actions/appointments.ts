@@ -14,6 +14,7 @@ import { applyCatalogPrice } from "@/lib/promotions";
 import { loadPromoRules } from "@/lib/promo-load";
 import { APPOINTMENT_STATUSES, type AppointmentStatus } from "@/lib/constants";
 import { appointmentCampaignVars, safeDispatch } from "@/lib/dispatch-whatsapp-campaign";
+import { safeNotifyAppointmentStatusChange } from "@/lib/appointment-status-notify";
 
 export type AppointmentItemInput = {
   serviceId: string;
@@ -114,9 +115,11 @@ export async function saveAppointment(payload: {
   };
 
   let id = payload.id;
+  let previousStatus: string | null = null;
   if (id) {
     const existing = await prisma.appointment.findFirst({ where: { id, tenantId: session.tenantId } });
     if (!existing) return { error: "Agendamento não encontrado." };
+    previousStatus = existing.status;
     await prisma.appointment.update({ where: { id }, data: { ...data, source: existing.source } });
     await prisma.appointmentItem.deleteMany({ where: { appointmentId: id } });
   } else {
@@ -138,23 +141,33 @@ export async function saveAppointment(payload: {
 
   revalidatePath("/agenda");
   revalidatePath("/dashboard");
+  revalidatePath("/atendimento");
 
-  const appointment = await prisma.appointment.findFirst({
-    where: { id, tenantId: session.tenantId },
-    include: {
-      client: { select: { id: true, name: true, phone: true } },
-      professional: { select: { name: true } },
-      items: { include: { service: { select: { name: true } } } },
-    },
-  });
-  if (appointment?.client) {
-    safeDispatch({
+  if (previousStatus && previousStatus !== data.status) {
+    safeNotifyAppointmentStatusChange({
       tenantId: session.tenantId,
-      trigger: "INFORMED",
-      client: appointment.client,
-      sentOn: appointment.id,
-      vars: appointmentCampaignVars(appointment),
+      appointmentId: id!,
+      previousStatus,
+      nextStatus: data.status,
     });
+  } else if (!previousStatus) {
+    const appointment = await prisma.appointment.findFirst({
+      where: { id, tenantId: session.tenantId },
+      include: {
+        client: { select: { id: true, name: true, phone: true } },
+        professional: { select: { name: true } },
+        items: { include: { service: { select: { name: true } } } },
+      },
+    });
+    if (appointment?.client) {
+      safeDispatch({
+        tenantId: session.tenantId,
+        trigger: "INFORMED",
+        client: appointment.client,
+        sentOn: appointment.id,
+        vars: appointmentCampaignVars(appointment),
+      });
+    }
   }
 
   return { ok: true as const, id };
@@ -258,8 +271,18 @@ export async function updateAppointmentStatus(appointmentId: string, status: str
     }
   }
 
+  if (appointment.status !== status) {
+    safeNotifyAppointmentStatusChange({
+      tenantId: session.tenantId,
+      appointmentId: appointment.id,
+      previousStatus: appointment.status,
+      nextStatus: status,
+    });
+  }
+
   revalidatePath("/agenda");
   revalidatePath("/dashboard");
+  revalidatePath("/atendimento");
   revalidatePath("/comissoes");
   revalidatePath("/estoque");
   revalidatePath("/financeiro");
