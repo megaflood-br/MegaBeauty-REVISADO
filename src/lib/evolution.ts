@@ -262,8 +262,8 @@ export async function connectEvolutionInstance(config: EvolutionConfig) {
 }
 
 /**
- * Registers the Evolution webhook supporting both Evolution API v2 (`{ webhook: { ... } }`)
- * and Evolution API v1 (flat body) while attaching authentication headers.
+ * Registers the Evolution webhook supporting Evolution API v2 (`byEvents` / `webhookByEvents`,
+ * with or without custom `headers`) and Evolution API v1 (flat body).
  */
 export async function setEvolutionWebhook(
   config: EvolutionConfig,
@@ -274,37 +274,110 @@ export async function setEvolutionWebhook(
     "x-webhook-secret": config.apiKey,
     apikey: config.apiKey,
   };
-  try {
-    return await evoFetch(config, `/webhook/set/${config.instance}`, {
-      method: "POST",
-      body: JSON.stringify({
-        webhook: {
-          enabled: true,
-          url: webhookUrl,
-          headers: customHeaders,
-          byEvents: false,
-          base64: false,
-          events: [...EVOLUTION_WEBHOOK_EVENTS],
-        },
-      }),
-    });
-  } catch (v2Error) {
+  const payloads: Record<string, unknown>[] = [
+    {
+      webhook: {
+        enabled: true,
+        url: webhookUrl,
+        headers: customHeaders,
+        byEvents: false,
+        base64: false,
+        events: [...EVOLUTION_WEBHOOK_EVENTS],
+      },
+    },
+    {
+      webhook: {
+        enabled: true,
+        url: webhookUrl,
+        headers: customHeaders,
+        webhookByEvents: false,
+        webhookBase64: false,
+        events: [...EVOLUTION_WEBHOOK_EVENTS],
+      },
+    },
+    {
+      webhook: {
+        enabled: true,
+        url: webhookUrl,
+        byEvents: false,
+        base64: false,
+        events: [...EVOLUTION_WEBHOOK_EVENTS],
+      },
+    },
+    {
+      enabled: true,
+      url: webhookUrl,
+      headers: customHeaders,
+      webhookByEvents: false,
+      webhookBase64: false,
+      events: [...EVOLUTION_WEBHOOK_EVENTS],
+    },
+  ];
+
+  let firstError: unknown = null;
+  for (const body of payloads) {
     try {
       return await evoFetch(config, `/webhook/set/${config.instance}`, {
         method: "POST",
-        body: JSON.stringify({
-          enabled: true,
-          url: webhookUrl,
-          headers: customHeaders,
-          webhookByEvents: false,
-          webhookBase64: false,
-          events: [...EVOLUTION_WEBHOOK_EVENTS],
-        }),
+        body: JSON.stringify(body),
       });
-    } catch {
-      throw v2Error;
+    } catch (error) {
+      if (!firstError) firstError = error;
     }
   }
+  throw firstError ?? new Error("Não foi possível registrar o webhook na Evolution.");
+}
+
+export type EvolutionRemoteWebhookInfo = {
+  enabled: boolean;
+  url: string;
+  byEvents: boolean;
+  events: string[];
+};
+
+export async function findEvolutionWebhook(config: EvolutionConfig): Promise<EvolutionRemoteWebhookInfo | null> {
+  try {
+    const raw = await evoFetch(config, `/webhook/find/${config.instance}`, { method: "GET" });
+    if (!raw || typeof raw !== "object") return null;
+    const root = raw as Record<string, unknown>;
+    const node = (root.webhook && typeof root.webhook === "object" ? root.webhook : root) as Record<string, unknown>;
+    const events = Array.isArray(node.events)
+      ? node.events.filter((item): item is string => typeof item === "string")
+      : [];
+    return {
+      enabled: Boolean(node.enabled),
+      url: typeof node.url === "string" ? node.url : "",
+      byEvents: Boolean(node.byEvents ?? node.webhookByEvents),
+      events,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function resolveEvolutionLidPhone(config: EvolutionConfig, lidJid: string): Promise<string> {
+  if (!lidJid || !lidJid.includes("@lid")) return "";
+  try {
+    const result = await evoFetch(config, `/chat/findContacts/${config.instance}`, {
+      method: "POST",
+      signal: AbortSignal.timeout(2500),
+      body: JSON.stringify({ where: { id: lidJid } }),
+    });
+    const list = Array.isArray(result) ? result : result && typeof result === "object" ? [result] : [];
+    for (const item of list) {
+      if (!item || typeof item !== "object") continue;
+      const row = item as Record<string, unknown>;
+      const candidates = [row.remoteJid, row.remoteJidAlt, row.jid, row.wuid, row.phone, row.number, row.id]
+        .filter((v): v is string => typeof v === "string" && v.trim().length > 0);
+      const direct = candidates.find((c) => c.includes("@s.whatsapp.net"));
+      if (direct) return digitsFromJid(direct);
+      const numeric = candidates.find((c) => !c.includes("@lid") && /\d{10,15}/.test(c));
+      if (numeric) return digitsFromJid(numeric);
+    }
+  } catch {
+    // non-fatal fallback
+  }
+  return "";
 }
 
 export async function logoutEvolutionInstance(config: EvolutionConfig) {
@@ -377,10 +450,16 @@ function digitsFromJid(jid: string) {
   return jid.split("@")[0].split(":")[0].replace(/\D/g, "");
 }
 
+export function extractRawRemoteJid(payload: Record<string, unknown>) {
+  const data = webhookData(payload);
+  const key = (data.key ?? payload.key ?? {}) as Record<string, unknown>;
+  return String(key.remoteJid ?? data.remoteJid ?? payload.remoteJid ?? "").trim();
+}
+
 export function extractPhone(payload: Record<string, unknown>) {
   const data = webhookData(payload);
   const key = (data.key ?? payload.key ?? {}) as Record<string, unknown>;
-  const primaryJid = String(key.remoteJid ?? data.remoteJid ?? payload.remoteJid ?? "").trim();
+  const primaryJid = extractRawRemoteJid(payload);
   if (
     primaryJid.includes("@g.us") ||
     primaryJid.includes("@broadcast") ||
@@ -393,9 +472,11 @@ export function extractPhone(payload: Record<string, unknown>) {
     key.remoteJid,
     key.remoteJidAlt,
     key.senderPn,
+    key.participant,
     data.remoteJid,
     data.remoteJidAlt,
     data.senderPn,
+    data.participant,
     payload.remoteJid,
   ]
     .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
@@ -406,7 +487,9 @@ export function extractPhone(payload: Record<string, unknown>) {
   if (directPhoneJid) return digitsFromJid(directPhoneJid);
 
   if (primaryJid.includes("@lid")) {
-    const fallbackNumeric = candidates.find((jid) => !jid.includes("@lid") && !jid.includes("@g.us"));
+    const fallbackNumeric = candidates.find(
+      (jid) => !jid.includes("@lid") && !jid.includes("@g.us") && !jid.includes("@broadcast"),
+    );
     if (fallbackNumeric) return digitsFromJid(fallbackNumeric);
   }
 

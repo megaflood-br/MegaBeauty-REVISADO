@@ -1,11 +1,13 @@
 import { prisma } from "@/lib/db";
 import { evolutionWebhookUrl, instanceNameForTenant, maskSecret, metaWebhookUrl, resolvePlatformIntegrations } from "@/lib/integrations";
 import { evolutionWebhookToken } from "@/lib/evolution-webhook-auth";
+import { listEvolutionWebhookTraces, maskWebhookUrlToken, type WebhookTraceEntry } from "@/lib/evolution-webhook-log";
 import {
   connectEvolutionInstance,
   createEvolutionInstance,
   extractEvolutionNumber,
   extractQrBase64,
+  findEvolutionWebhook,
   getConnectionState,
   parseEvolutionState,
   setEvolutionWebhook,
@@ -158,17 +160,17 @@ export async function provisionWhatsAppInstance(tenantId: string) {
     });
   }
 
-  let webhookWarning: string | null = null;
-  async function registerWebhook() {
+  async function registerWebhook(): Promise<string | null> {
     if (!webhookUrl) {
-      webhookWarning = "Configure a URL pública da plataforma em Integrações para receber mensagens pelo webhook.";
-      return;
+      return "Configure a URL pública da plataforma em Integrações para receber mensagens pelo webhook.";
     }
     try {
       await setEvolutionWebhook(config, webhookUrl, { headers: webhookHeaders });
+      return null;
     } catch (error) {
-      webhookWarning = error instanceof Error ? error.message : "Não foi possível registrar o webhook na Evolution.";
-      console.error("[evolution] failed to register webhook:", webhookWarning);
+      const warning = error instanceof Error ? error.message : "Não foi possível registrar o webhook na Evolution.";
+      console.error("[evolution] failed to register webhook:", warning);
+      return warning;
     }
   }
 
@@ -179,20 +181,20 @@ export async function provisionWhatsAppInstance(tenantId: string) {
       webhookHeaders,
     });
     const qr = extractQrBase64(created);
-    await registerWebhook();
+    const webhookWarning = await registerWebhook();
     await persist(qr, "connecting");
-    if (qr) return { instance, qr, state: "connecting" as const, webhookUrl, webhookWarning };
+    if (qr) return { instance, qr, state: "connecting" as const, number: null as string | null, webhookUrl, webhookWarning };
   } catch (error) {
     const message = error instanceof Error ? error.message : "";
     if (!/exist|already|já existe|403|409/i.test(message)) throw error;
   }
 
-  await registerWebhook();
+  const webhookWarning = await registerWebhook();
   const connect = await connectEvolutionInstance(config);
   const qr = extractQrBase64(connect);
   const state = parseEvolutionState(connect);
   const number = extractEvolutionNumber(connect);
-  const nextStatus = state === "open" ? "open" : "connecting";
+  const nextStatus: WhatsAppLive["state"] = state === "open" ? "open" : "connecting";
   await persist(qr, nextStatus, number);
   return { instance, qr: nextStatus === "open" ? null : qr, state: nextStatus, number, webhookUrl, webhookWarning };
 }
@@ -239,5 +241,69 @@ export async function syncEvolutionWebhookAndState(tenantId: string) {
     state,
     number: number ?? null,
     webhookUrl,
+  };
+}
+
+export type EvolutionDiagnostic = {
+  instance: string;
+  evolutionState: "open" | "connecting" | "close" | "unreachable";
+  evolutionError: string | null;
+  expectedWebhookUrlMasked: string;
+  remoteWebhook: {
+    enabled: boolean;
+    urlMasked: string;
+    urlMatches: boolean;
+    byEvents: boolean;
+    hasMessagesUpsert: boolean;
+    events: string[];
+  } | null;
+  receptionistEnabled: boolean;
+  recentWebhooks: WebhookTraceEntry[];
+};
+
+export async function diagnoseEvolutionWhatsApp(tenantId: string): Promise<EvolutionDiagnostic> {
+  const [tenant, server, receptionist] = await Promise.all([
+    prisma.tenant.findUnique({ where: { id: tenantId } }),
+    resolvePlatformIntegrations(),
+    prisma.receptionist.findUnique({ where: { tenantId }, select: { enabled: true } }),
+  ]);
+  if (!tenant) throw new Error("Salão não encontrado.");
+  if (!server.hasEvolution) throw new Error("O servidor WhatsApp ainda não foi configurado na plataforma.");
+
+  const instance = tenant.evolutionInstance || instanceNameForTenant(tenant.slug);
+  const config = salonConfig(server, instance);
+  const { webhookUrl: expectedUrl } = signedEvolutionWebhook(server, tenant);
+
+  let evolutionState: EvolutionDiagnostic["evolutionState"] = "unreachable";
+  let evolutionError: string | null = null;
+  try {
+    const statePayload = await getConnectionState(config);
+    evolutionState = parseEvolutionState(statePayload);
+  } catch (error) {
+    evolutionError = error instanceof Error ? error.message : "Não foi possível consultar o estado na Evolution.";
+  }
+
+  const remote = await findEvolutionWebhook(config);
+  const cleanExpected = expectedUrl.replace(/\/$/, "");
+  const cleanRemote = (remote?.url ?? "").replace(/\/$/, "");
+  const normalizedEvents = (remote?.events ?? []).map((e) => e.toUpperCase().replace(/\./g, "_"));
+
+  return {
+    instance,
+    evolutionState,
+    evolutionError,
+    expectedWebhookUrlMasked: maskWebhookUrlToken(expectedUrl),
+    remoteWebhook: remote
+      ? {
+          enabled: remote.enabled,
+          urlMasked: maskWebhookUrlToken(remote.url),
+          urlMatches: Boolean(cleanExpected && cleanRemote === cleanExpected),
+          byEvents: remote.byEvents,
+          hasMessagesUpsert: normalizedEvents.includes("MESSAGES_UPSERT"),
+          events: remote.events,
+        }
+      : null,
+    receptionistEnabled: Boolean(receptionist?.enabled),
+    recentWebhooks: listEvolutionWebhookTraces(tenant.id, tenant.slug, 8),
   };
 }

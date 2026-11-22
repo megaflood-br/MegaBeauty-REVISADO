@@ -7,7 +7,8 @@ import { canAccess } from "@/lib/permissions";
 import { logoutEvolutionInstance } from "@/lib/evolution";
 import { draftWhatsAppMessage } from "@/lib/openai";
 import { resolvePlatformIntegrations } from "@/lib/integrations";
-import { provisionWhatsAppInstance, syncEvolutionWebhookAndState } from "@/lib/whatsapp-live";
+import { diagnoseEvolutionWhatsApp, provisionWhatsAppInstance, syncEvolutionWebhookAndState } from "@/lib/whatsapp-live";
+import { conversationPhoneCandidates } from "@/lib/whatsapp-inbound";
 import { markSalonConversationRead, sendSalonComposing, sendSalonWhatsApp } from "@/lib/whatsapp-send";
 import { isWhatsAppProvider, newMetaVerifyToken, readMetaPhone } from "@/lib/whatsapp-meta";
 import { HUMAN_TYPING_DELAY_MS, botPausedUntilFromNow } from "@/lib/whatsapp-copy";
@@ -33,11 +34,20 @@ export async function sendWhatsApp(formData: FormData) {
   let phone = String(formData.get("phone") ?? "").replace(/\D/g, "");
   if (!body) return { error: "Mensagem é obrigatória." };
 
-  const existingConversation = conversationId
+  let existingConversation = conversationId
     ? await prisma.conversation.findFirst({
         where: { id: conversationId, tenantId: session.tenantId },
       })
     : null;
+  if (!existingConversation && phone) {
+    const candidates = conversationPhoneCandidates(phone);
+    if (candidates.length) {
+      existingConversation = await prisma.conversation.findFirst({
+        where: { tenantId: session.tenantId, phone: { in: candidates } },
+        orderBy: { lastMessageAt: "desc" },
+      });
+    }
+  }
   if (existingConversation) phone = existingConversation.phone.replace(/\D/g, "") || existingConversation.phone;
   if (!phone) return { error: "Telefone e mensagem são obrigatórios." };
 
@@ -160,6 +170,17 @@ export async function syncWhatsAppInstance() {
     return { ok: true as const, ...result };
   } catch (error) {
     return { error: error instanceof Error ? error.message : "Não foi possível sincronizar o webhook na Evolution." };
+  }
+}
+
+export async function diagnoseWhatsAppInstance() {
+  const { session, access } = await requireTenant();
+  if (!canAccess(access, "settings", "edit")) return { error: "Sem permissão para diagnosticar conexões." };
+  try {
+    const diagnostic = await diagnoseEvolutionWhatsApp(session.tenantId);
+    return { ok: true as const, diagnostic };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : "Não foi possível diagnosticar o webhook na Evolution." };
   }
 }
 

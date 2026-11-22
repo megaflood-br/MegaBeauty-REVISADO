@@ -389,6 +389,67 @@ describe("isolamento multi-tenant automático no Prisma", () => {
         select: { botPausedUntil: true },
       });
       expect(afterEcho?.botPausedUntil).toBeNull();
+
+      // 4. WEBHOOK_BY_EVENTS=true concatenado na query (`?tenant=studio-aurora&token=.../messages-upsert`)
+      //    e autenticação via `payload.apikey` no corpo JSON + unificação de conversa 11 dígitos vs 55+11 dígitos
+      const localPhone = "11991230001";
+      const fullPhone = `55${localPhone}`;
+      const existingLocalConv = await unscopedPrisma.conversation.create({
+        data: { tenantId: aurora!.id, phone: localPhone, lastMessageAt: new Date() },
+      });
+      try {
+        const bodyKeyReq = new NextRequest(
+          "http://localhost:3000/api/webhooks/evolution?tenant=studio-aurora/messages-upsert",
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              instance: "mb-studio-aurora",
+              apikey: testSecret,
+              data: {
+                key: { id: "WA-TEST-BODYKEY-1", fromMe: false, remoteJid: `${fullPhone}@s.whatsapp.net` },
+                message: { conversation: "Oi, recebi sua mensagem!" },
+              },
+            }),
+          },
+        );
+        const bodyKeyRes = await handleEvolutionWebhookRequest(bodyKeyReq);
+        expect(bodyKeyRes.status).toBe(200);
+
+        const suffixTokenReq = new NextRequest(
+          `http://localhost:3000/api/webhooks/evolution?tenant=studio-aurora&token=${token}/messages-upsert`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              instance: "mb-studio-aurora",
+              data: {
+                key: { id: "WA-TEST-SUFFIX-2", fromMe: false, remoteJid: `${fullPhone}@s.whatsapp.net` },
+                message: { conversation: "Segunda mensagem no mesmo chat" },
+              },
+            }),
+          },
+        );
+        const suffixRes = await handleEvolutionWebhookRequest(suffixTokenReq);
+        expect(suffixRes.status).toBe(200);
+
+        // Ambas devem cair na MESMA conversa criada com 11 dígitos (sem duplicar conversa!)
+        const allMatchingConvs = await unscopedPrisma.conversation.findMany({
+          where: { tenantId: aurora!.id, phone: { in: [localPhone, fullPhone] } },
+          include: { messages: { orderBy: { createdAt: "asc" } } },
+        });
+        expect(allMatchingConvs).toHaveLength(1);
+        expect(allMatchingConvs[0].id).toBe(existingLocalConv.id);
+        expect(allMatchingConvs[0].messages.map((m) => m.body)).toEqual([
+          "Oi, recebi sua mensagem!",
+          "Segunda mensagem no mesmo chat",
+        ]);
+      } finally {
+        await unscopedPrisma.message.deleteMany({ where: { conversationId: existingLocalConv.id } }).catch(() => null);
+        await unscopedPrisma.conversation.deleteMany({
+          where: { tenantId: aurora!.id, phone: { in: [localPhone, fullPhone] } },
+        }).catch(() => null);
+      }
     } finally {
       const conv = await unscopedPrisma.conversation.findUnique({
         where: { tenantId_phone: { tenantId: aurora!.id, phone: testPhone } },

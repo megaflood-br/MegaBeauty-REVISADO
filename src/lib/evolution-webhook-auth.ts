@@ -26,6 +26,7 @@ export function verifyEvolutionWebhookAuth(input: {
   expectedSecret: string;
   slug: string;
   headerSecret?: string | null;
+  bodySecret?: string | null;
   queryToken?: string | null;
   headerToken?: string | null;
 }) {
@@ -34,6 +35,11 @@ export function verifyEvolutionWebhookAuth(input: {
 
   const headerSecret = (input.headerSecret ?? "").trim();
   if (headerSecret && secretsEqual(headerSecret, expectedSecret)) {
+    return true;
+  }
+
+  const bodySecret = (input.bodySecret ?? "").trim();
+  if (bodySecret && secretsEqual(bodySecret, expectedSecret)) {
     return true;
   }
 

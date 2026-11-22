@@ -1,17 +1,18 @@
 "use client";
 
 import { useEffect, useState, useTransition } from "react";
-import { BadgeCheck, QrCode, RefreshCw, Smartphone, Unplug } from "lucide-react";
+import { Activity, BadgeCheck, QrCode, RefreshCw, Smartphone, Unplug } from "lucide-react";
 import { Button, Field, Input } from "@/components/ui";
 import {
   connectWhatsAppInstance,
+  diagnoseWhatsAppInstance,
   disconnectOfficialWhatsApp,
   disconnectWhatsAppInstance,
   saveOfficialWhatsApp,
   setWhatsAppProvider,
   syncWhatsAppInstance,
 } from "@/app/actions/whatsapp";
-import type { WhatsAppLive } from "@/lib/whatsapp-live";
+import type { EvolutionDiagnostic, WhatsAppLive } from "@/lib/whatsapp-live";
 import type { WhatsAppProvider } from "@/lib/whatsapp-meta";
 import { cn } from "@/lib/utils";
 
@@ -19,6 +20,8 @@ export function WhatsAppConnect({ initial }: { initial: WhatsAppLive }) {
   const [live, setLive] = useState(initial);
   const [pending, setPending] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [diagnosing, setDiagnosing] = useState(false);
+  const [diagnostic, setDiagnostic] = useState<EvolutionDiagnostic | null>(null);
   const [error, setError] = useState<string | null>(initial.error);
   const [notice, setNotice] = useState<string | null>(null);
   const [saving, startSave] = useTransition();
@@ -98,6 +101,18 @@ export function WhatsAppConnect({ initial }: { initial: WhatsAppLive }) {
       );
     }
     setSyncing(false);
+  }
+
+  async function diagnoseWebhook() {
+    setDiagnosing(true);
+    setError(null);
+    const result = await diagnoseWhatsAppInstance();
+    if (result && "error" in result && typeof result.error === "string") {
+      setError(result.error);
+    } else if (result && "ok" in result && result.ok) {
+      setDiagnostic(result.diagnostic);
+    }
+    setDiagnosing(false);
   }
 
   async function disconnect() {
@@ -222,8 +237,11 @@ export function WhatsAppConnect({ initial }: { initial: WhatsAppLive }) {
           live={live}
           pending={pending}
           syncing={syncing}
+          diagnosing={diagnosing}
+          diagnostic={diagnostic}
           onConnect={connect}
           onSync={syncWebhook}
+          onDiagnose={diagnoseWebhook}
           onDisconnect={disconnect}
         />
       )}
@@ -238,19 +256,25 @@ function EvolutionPanel({
   live,
   pending,
   syncing,
+  diagnosing,
+  diagnostic,
   onConnect,
   onSync,
+  onDiagnose,
   onDisconnect,
 }: {
   live: WhatsAppLive;
   pending: boolean;
   syncing: boolean;
+  diagnosing: boolean;
+  diagnostic: EvolutionDiagnostic | null;
   onConnect: () => void;
   onSync: () => void;
+  onDiagnose: () => void;
   onDisconnect: () => void;
 }) {
   const connected = live.state === "open";
-  const busy = pending || syncing;
+  const busy = pending || syncing || diagnosing;
   return (
     <div className="space-y-4">
       <div
@@ -278,9 +302,13 @@ function EvolutionPanel({
             Instância {live.instance}
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button type="button" variant="secondary" disabled={busy} onClick={onSync}>
+            <Button type="button" variant="outline" disabled={busy} onClick={onSync}>
               <RefreshCw size={16} className={syncing ? "animate-spin" : undefined} />
               {syncing ? "Sincronizando..." : "Sincronizar webhook"}
+            </Button>
+            <Button type="button" variant="ghost" disabled={busy} onClick={onDiagnose}>
+              <Activity size={16} />
+              {diagnosing ? "Verificando..." : "Diagnosticar recebimento"}
             </Button>
             <Button type="button" variant="danger" disabled={busy} onClick={onDisconnect}>
               <Unplug size={16} />
@@ -306,13 +334,71 @@ function EvolutionPanel({
               <RefreshCw size={16} />
               {live.qr ? "Atualizar QR" : "Gerar QR Code"}
             </Button>
-            <Button type="button" variant="secondary" disabled={busy} onClick={onSync}>
+            <Button type="button" variant="outline" disabled={busy} onClick={onSync}>
               <RefreshCw size={16} className={syncing ? "animate-spin" : undefined} />
               {syncing ? "Sincronizando..." : "Sincronizar webhook"}
+            </Button>
+            <Button type="button" variant="ghost" disabled={busy} onClick={onDiagnose}>
+              <Activity size={16} />
+              {diagnosing ? "Verificando..." : "Diagnosticar recebimento"}
             </Button>
           </div>
         </div>
       )}
+
+      {diagnostic ? (
+        <div className="space-y-2 rounded-xl border border-line bg-sand/50 p-3 text-xs text-ink">
+          <p className="font-semibold">Diagnóstico do recebimento ({diagnostic.instance})</p>
+          <ul className="space-y-1 text-ink-soft">
+            <li>
+              Estado real na Evolution:{" "}
+              <strong className="text-ink">
+                {diagnostic.evolutionState}
+                {diagnostic.evolutionError ? ` (${diagnostic.evolutionError})` : ""}
+              </strong>
+            </li>
+            <li>
+              Webhook cadastrado na Evolution:{" "}
+              {diagnostic.remoteWebhook ? (
+                <strong className={diagnostic.remoteWebhook.enabled && diagnostic.remoteWebhook.urlMatches && diagnostic.remoteWebhook.hasMessagesUpsert ? "text-emerald-700" : "text-amber-800"}>
+                  {diagnostic.remoteWebhook.enabled ? "Ativo" : "Desativado"} ·{" "}
+                  {diagnostic.remoteWebhook.urlMatches ? "URL correta" : "URL diferente da esperada"} ·{" "}
+                  {diagnostic.remoteWebhook.hasMessagesUpsert ? "MESSAGES_UPSERT ativo" : "sem MESSAGES_UPSERT"}
+                </strong>
+              ) : (
+                <strong className="text-red-600">Não configurado na Evolution (clique em Sincronizar webhook)</strong>
+              )}
+            </li>
+            {diagnostic.remoteWebhook?.urlMasked ? (
+              <li className="break-all">URL atual na Evolution: {diagnostic.remoteWebhook.urlMasked}</li>
+            ) : null}
+            <li>
+              Recepcionista virtual:{" "}
+              <strong className={diagnostic.receptionistEnabled ? "text-emerald-700" : "text-amber-800"}>
+                {diagnostic.receptionistEnabled ? "Atendimento automático ligado" : "Desligada (ative em Recepcionista)"}
+              </strong>
+            </li>
+          </ul>
+          <div className="border-t border-line pt-2">
+            <p className="font-medium text-ink">Últimos eventos recebidos pelo servidor:</p>
+            {diagnostic.recentWebhooks.length ? (
+              <ul className="mt-1 space-y-1 text-ink-soft">
+                {diagnostic.recentWebhooks.map((item, idx) => (
+                  <li key={`${item.at}-${idx}`} className="font-mono text-[11px]">
+                    {new Date(item.at).toLocaleTimeString("pt-BR")} · HTTP {item.httpStatus} · {item.event} · {item.outcome}
+                    {item.phoneSuffix ? ` · final ${item.phoneSuffix}` : ""}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="mt-1 text-ink-soft">
+                Nenhum webhook chegou ainda neste servidor. Envie uma mensagem de outro WhatsApp para o número do salão e clique em
+                Verificar novamente. Se continuar vazio, a Evolution não está conseguindo acessar a URL pública acima.
+              </p>
+            )}
+          </div>
+        </div>
+      ) : null}
 
       {live.webhookUrl ? (
         <p className="break-all text-xs text-ink-soft">Webhook Evolution: {live.webhookUrl}</p>
