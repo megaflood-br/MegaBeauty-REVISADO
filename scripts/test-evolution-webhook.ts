@@ -1,6 +1,10 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { testEvolutionAuthAndWebhookBySlug } from "../src/lib/whatsapp-live";
+import {
+  syncEvolutionWebhookAndState,
+  testEvolutionAuthAndWebhook,
+  testEvolutionAuthAndWebhookBySlug,
+} from "../src/lib/whatsapp-live";
 
 function loadDotEnv() {
   const envPath = path.resolve(process.cwd(), ".env");
@@ -24,8 +28,17 @@ function loadDotEnv() {
 
 async function main() {
   loadDotEnv();
-  const slug = process.argv[2];
-  const report = await testEvolutionAuthAndWebhookBySlug(slug);
+  const args = process.argv.slice(2);
+  const shouldSync = args.includes("--sync");
+  const slug = args.find((arg) => !arg.startsWith("--"));
+
+  let report = await testEvolutionAuthAndWebhookBySlug(slug);
+
+  if (shouldSync) {
+    console.log(`\nSincronizando webhook da instância "${report.instance}" (salão: ${report.tenantSlug})...`);
+    await syncEvolutionWebhookAndState(report.tenantId);
+    report = await testEvolutionAuthAndWebhook(report.tenantId);
+  }
 
   console.log(`\n=== Teste Evolution API · Salão: ${report.tenantSlug} (${report.instance}) ===`);
   for (const check of report.checks) {
