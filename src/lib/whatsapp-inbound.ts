@@ -22,6 +22,32 @@ export async function ingestOutboundFromDevice(input: {
   const body = input.body.trim();
   if (!phone || !body) return { skipped: "empty" as const };
 
+  const existingConversation = await prisma.conversation.findUnique({
+    where: { tenantId_phone: { tenantId: input.tenantId, phone } },
+    select: { id: true },
+  });
+
+  if (existingConversation) {
+    const existing = await duplicateMessage(existingConversation.id, input.waId);
+    if (existing) return { skipped: "duplicate" as const, conversationId: existingConversation.id };
+
+    const echo = await prisma.message.findFirst({
+      where: {
+        conversationId: existingConversation.id,
+        direction: "OUT",
+        body,
+        createdAt: { gte: new Date(Date.now() - 30_000) },
+      },
+      select: { id: true, waId: true },
+    });
+    if (echo) {
+      if (input.waId && !echo.waId) {
+        await prisma.message.update({ where: { id: echo.id }, data: { waId: input.waId } });
+      }
+      return { skipped: "echo" as const, conversationId: existingConversation.id };
+    }
+  }
+
   const client = await prisma.client.findFirst({
     where: { tenantId: input.tenantId, phone },
     select: { id: true },
@@ -38,25 +64,6 @@ export async function ingestOutboundFromDevice(input: {
       botPausedUntil: pausedUntil,
     },
   });
-
-  const existing = await duplicateMessage(conversation.id, input.waId);
-  if (existing) return { skipped: "duplicate" as const, conversationId: conversation.id };
-
-  const echo = await prisma.message.findFirst({
-    where: {
-      conversationId: conversation.id,
-      direction: "OUT",
-      body,
-      createdAt: { gte: new Date(Date.now() - 20_000) },
-    },
-    select: { id: true, waId: true },
-  });
-  if (echo) {
-    if (input.waId && !echo.waId) {
-      await prisma.message.update({ where: { id: echo.id }, data: { waId: input.waId } });
-    }
-    return { skipped: "echo" as const, conversationId: conversation.id };
-  }
 
   await prisma.message.create({
     data: {
@@ -127,7 +134,10 @@ export async function ingestInboundWhatsApp(input: {
     conversationId: conversation.id,
     phone,
     incoming: body,
-  }).catch(() => null);
+  }).catch((error) => {
+    console.error("[receptionist] auto-reply failed:", error);
+    return null;
+  });
 
   return { skipped: null, conversationId: conversation.id };
 }

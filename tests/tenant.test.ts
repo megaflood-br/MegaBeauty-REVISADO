@@ -1,3 +1,4 @@
+import { NextRequest } from "next/server";
 import { describe, expect, it } from "vitest";
 import { prisma, prismaForTenant, unscopedPrisma } from "@/lib/db";
 import { withTenantContext, withoutTenantScope } from "@/lib/tenant-context";
@@ -11,6 +12,9 @@ import {
 import { queryReceptionistAvailability } from "@/lib/receptionist-runtime";
 import { getPublicBookingBusySlots } from "@/app/actions/booking";
 import { calendarDate, shiftCalendarDate, zonedDateTime } from "@/lib/dates";
+import { handleEvolutionWebhookRequest } from "@/lib/evolution-webhook-http";
+import { evolutionWebhookToken } from "@/lib/evolution-webhook-auth";
+import { ingestOutboundFromDevice } from "@/lib/whatsapp-inbound";
 
 describe("detecção de tenant por domínio e path", () => {
   it("detecta subdomínio em produção e localhost, rejeitando reservados", () => {
@@ -272,6 +276,132 @@ describe("isolamento multi-tenant automático no Prisma", () => {
       expect("error" in outOfRangeRes).toBe(true);
     } finally {
       await unscopedPrisma.appointment.delete({ where: { id: created.id } }).catch(() => null);
+    }
+  });
+
+  it("recebe webhook da Evolution com token HMAC, corrige status para open, isola por tenant e não pausa o bot no eco", async () => {
+    const aurora = await unscopedPrisma.tenant.findUnique({ where: { slug: "studio-aurora" } });
+    const norte = await unscopedPrisma.tenant.findUnique({ where: { slug: "barbearia-norte" } });
+    expect(aurora).toBeTruthy();
+    expect(norte).toBeTruthy();
+
+    const originalState = {
+      evolutionApiKey: aurora!.evolutionApiKey,
+      evolutionStatus: aurora!.evolutionStatus,
+      evolutionInstance: aurora!.evolutionInstance,
+    };
+    const testSecret = "test-evo-webhook-secret-2026";
+    const testPhone = "5511991234567";
+    const token = evolutionWebhookToken(testSecret, "studio-aurora");
+
+    await unscopedPrisma.tenant.update({
+      where: { id: aurora!.id },
+      data: {
+        evolutionApiKey: testSecret,
+        evolutionStatus: "connecting",
+        evolutionInstance: "mb-studio-aurora",
+      },
+    });
+
+    try {
+      // 1. Sem autenticação deve retornar 401
+      const unauthReq = new NextRequest("http://localhost:3000/api/webhooks/evolution?tenant=studio-aurora", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ event: "MESSAGES_UPSERT", data: {} }),
+      });
+      const unauthRes = await handleEvolutionWebhookRequest(unauthReq);
+      expect(unauthRes.status).toBe(401);
+
+      // 2. Com token HMAC na query (sem header apikey!) e subpath messages-upsert (WEBHOOK_BY_EVENTS=true),
+      //    @lid + remoteJidAlt e mensagem efêmera deve persistir no salão certo e curar evolutionStatus para "open"
+      const signedReq = new NextRequest(
+        `http://localhost:3000/api/webhooks/evolution/messages-upsert?tenant=studio-aurora&token=${token}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            instance: "mb-studio-aurora",
+            data: {
+              key: {
+                id: "WA-TEST-IN-1",
+                fromMe: false,
+                remoteJid: "998877665544@lid",
+                remoteJidAlt: `${testPhone}@s.whatsapp.net`,
+              },
+              message: {
+                ephemeralMessage: {
+                  message: { conversation: "Olá, quero agendar escova" },
+                },
+              },
+            },
+          }),
+        },
+      );
+      const okRes = await handleEvolutionWebhookRequest(signedReq, "messages-upsert");
+      expect(okRes.status).toBe(200);
+      const okJson = await okRes.json();
+      expect(okJson.ok).toBe(true);
+      expect(okJson.processed).toBe(1);
+
+      const healedTenant = await unscopedPrisma.tenant.findUnique({
+        where: { id: aurora!.id },
+        select: { evolutionStatus: true },
+      });
+      expect(healedTenant?.evolutionStatus).toBe("open");
+
+      const auroraConv = await withTenantContext(aurora!.id, () =>
+        prisma.conversation.findFirst({
+          where: { phone: testPhone },
+          include: { messages: { orderBy: { createdAt: "asc" } } },
+        }),
+      );
+      expect(auroraConv).toBeTruthy();
+      expect(auroraConv!.messages.some((m) => m.direction === "IN" && m.body === "Olá, quero agendar escova")).toBe(true);
+
+      // Isolamento: outro salão não enxerga essa conversa
+      const norteConv = await withTenantContext(norte!.id, () =>
+        prisma.conversation.findFirst({ where: { phone: testPhone } }),
+      );
+      expect(norteConv).toBeNull();
+
+      // 3. Eco de mensagem enviada pelo bot (fromMe: true) NÃO pode pausar o bot (botPausedUntil permanece null)
+      await unscopedPrisma.message.create({
+        data: {
+          conversationId: auroraConv!.id,
+          direction: "OUT",
+          body: "Claro! Qual dia você prefere?",
+          source: "AI",
+        },
+      });
+      const echoResult = await withTenantContext(aurora!.id, () =>
+        ingestOutboundFromDevice({
+          tenantId: aurora!.id,
+          phone: testPhone,
+          body: "Claro! Qual dia você prefere?",
+          waId: "WA-TEST-ECHO-1",
+        }),
+      );
+      expect(echoResult.skipped).toBe("echo");
+
+      const afterEcho = await unscopedPrisma.conversation.findUnique({
+        where: { id: auroraConv!.id },
+        select: { botPausedUntil: true },
+      });
+      expect(afterEcho?.botPausedUntil).toBeNull();
+    } finally {
+      const conv = await unscopedPrisma.conversation.findUnique({
+        where: { tenantId_phone: { tenantId: aurora!.id, phone: testPhone } },
+        select: { id: true },
+      });
+      if (conv) {
+        await unscopedPrisma.message.deleteMany({ where: { conversationId: conv.id } }).catch(() => null);
+        await unscopedPrisma.conversation.delete({ where: { id: conv.id } }).catch(() => null);
+      }
+      await unscopedPrisma.tenant.update({
+        where: { id: aurora!.id },
+        data: originalState,
+      });
     }
   });
 });

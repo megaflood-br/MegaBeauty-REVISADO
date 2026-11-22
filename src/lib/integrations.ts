@@ -78,10 +78,11 @@ export function instanceNameForTenant(slug: string) {
   return `mb-${clean || "salao"}`.slice(0, 48);
 }
 
-export function evolutionWebhookUrl(publicAppUrl: string, slug: string) {
+export function evolutionWebhookUrl(publicAppUrl: string, slug: string, token?: string) {
   const origin = publicAppOrigin(publicAppUrl, false);
   if (!origin) return "";
-  return `${origin}/api/webhooks/evolution?tenant=${encodeURIComponent(slug)}`;
+  const base = `${origin}/api/webhooks/evolution?tenant=${encodeURIComponent(slug)}`;
+  return token ? `${base}&token=${encodeURIComponent(token)}` : base;
 }
 
 export function metaWebhookUrl(publicAppUrl: string, slug: string) {

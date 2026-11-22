@@ -7,7 +7,7 @@ import { canAccess } from "@/lib/permissions";
 import { logoutEvolutionInstance } from "@/lib/evolution";
 import { draftWhatsAppMessage } from "@/lib/openai";
 import { resolvePlatformIntegrations } from "@/lib/integrations";
-import { provisionWhatsAppInstance } from "@/lib/whatsapp-live";
+import { provisionWhatsAppInstance, syncEvolutionWebhookAndState } from "@/lib/whatsapp-live";
 import { markSalonConversationRead, sendSalonComposing, sendSalonWhatsApp } from "@/lib/whatsapp-send";
 import { isWhatsAppProvider, newMetaVerifyToken, readMetaPhone } from "@/lib/whatsapp-meta";
 import { HUMAN_TYPING_DELAY_MS, botPausedUntilFromNow } from "@/lib/whatsapp-copy";
@@ -138,9 +138,28 @@ export async function connectWhatsAppInstance() {
       data: { whatsappProvider: "evolution" },
     });
     revalidateWhatsApp();
-    return { ok: true as const, qr: result.qr };
+    return {
+      ok: true as const,
+      qr: result.qr,
+      state: result.state,
+      number: "number" in result ? result.number ?? null : null,
+      webhookUrl: result.webhookUrl,
+      warning: result.webhookWarning,
+    };
   } catch (error) {
     return { error: error instanceof Error ? error.message : "Não foi possível gerar o QR Code." };
+  }
+}
+
+export async function syncWhatsAppInstance() {
+  const { session, access } = await requireTenant();
+  if (!canAccess(access, "settings", "edit")) return { error: "Sem permissão para alterar conexões." };
+  try {
+    const result = await syncEvolutionWebhookAndState(session.tenantId);
+    revalidateWhatsApp();
+    return { ok: true as const, ...result };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : "Não foi possível sincronizar o webhook na Evolution." };
   }
 }
 

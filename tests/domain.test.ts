@@ -126,14 +126,18 @@ import {
 import {
   EVOLUTION_WEBHOOK_EVENTS,
   evolutionWebhookKind,
+  extractEvolutionInstance,
   extractEvolutionMessageId,
   extractEvolutionNumber,
+  extractInboundText,
   extractPhone,
   extractQrBase64,
+  extractWebhookMessagePayloads,
   isEvolutionConfigured,
   isEvolutionFromMe,
   parseEvolutionState,
 } from "@/lib/evolution";
+import { evolutionWebhookToken, verifyEvolutionWebhookAuth } from "@/lib/evolution-webhook-auth";
 import {
   DEFAULT_RECEPTIONIST,
   asksAvailability,
@@ -1927,6 +1931,89 @@ describe("recepcionista virtual", () => {
         data: { qrcode: { base64: "data:image/png;base64,abc" } },
       }),
     ).toBe("data:image/png;base64,abc");
+  });
+
+  it("valida autenticação HMAC por tenant e lê mensagens @lid, efêmeras, mídia e em lote da Evolution", () => {
+    const secret = "evo-super-secret-key";
+    const token = evolutionWebhookToken(secret, "studio-aurora");
+    expect(token).toHaveLength(32);
+    expect(evolutionWebhookUrl("https://beauty.megaflood.cloud", "studio-aurora", token)).toBe(
+      `https://beauty.megaflood.cloud/api/webhooks/evolution?tenant=studio-aurora&token=${token}`,
+    );
+
+    // Aceita header apikey ou token HMAC válido do mesmo tenant
+    expect(verifyEvolutionWebhookAuth({ expectedSecret: secret, slug: "studio-aurora", headerSecret: secret })).toBe(true);
+    expect(verifyEvolutionWebhookAuth({ expectedSecret: secret, slug: "studio-aurora", queryToken: token })).toBe(true);
+    expect(verifyEvolutionWebhookAuth({ expectedSecret: secret, slug: "studio-aurora", headerToken: token })).toBe(true);
+
+    // Rejeita segredo errado, token de outro salão ou vazio
+    expect(verifyEvolutionWebhookAuth({ expectedSecret: secret, slug: "studio-aurora", headerSecret: "errado" })).toBe(false);
+    expect(verifyEvolutionWebhookAuth({ expectedSecret: secret, slug: "barbearia-norte", queryToken: token })).toBe(false);
+    expect(verifyEvolutionWebhookAuth({ expectedSecret: secret, slug: "studio-aurora" })).toBe(false);
+    expect(verifyEvolutionWebhookAuth({ expectedSecret: "", slug: "studio-aurora", queryToken: token })).toBe(false);
+
+    // Extrai telefone real quando WhatsApp envia @lid + remoteJidAlt ou sufixo :device, ignorando status/newsletter
+    expect(
+      extractPhone({
+        data: {
+          key: {
+            remoteJid: "123456789012345@lid",
+            remoteJidAlt: "5511977776666:12@s.whatsapp.net",
+          },
+        },
+      }),
+    ).toBe("5511977776666");
+    expect(extractPhone({ data: { key: { remoteJid: "status@broadcast" } } })).toBe("");
+    expect(extractPhone({ data: { key: { remoteJid: "120363999@newsletter" } } })).toBe("");
+    expect(extractEvolutionInstance({ instance: "mb-studio-aurora" })).toBe("mb-studio-aurora");
+
+    // Desembrulha mensagens efêmeras, visualização única, legendas, áudio e respostas de botão/lista
+    expect(
+      extractInboundText({
+        data: {
+          message: {
+            ephemeralMessage: {
+              message: { conversation: "Oi, tem vaga sexta?" },
+            },
+          },
+        },
+      }),
+    ).toBe("Oi, tem vaga sexta?");
+    expect(
+      extractInboundText({
+        data: {
+          message: {
+            viewOnceMessageV2: {
+              message: { extendedTextMessage: { text: "Quero marcar luzes" } },
+            },
+          },
+        },
+      }),
+    ).toBe("Quero marcar luzes");
+    expect(extractInboundText({ data: { message: { imageMessage: { caption: "Foto referência" } } } })).toBe("Foto referência");
+    expect(extractInboundText({ data: { message: { audioMessage: { seconds: 8 } } } })).toBe("[Áudio recebido]");
+    expect(
+      extractInboundText({
+        data: { message: { buttonsResponseMessage: { selectedDisplayText: "Confirmar horário" } } },
+      }),
+    ).toBe("Confirmar horário");
+    expect(
+      extractInboundText({
+        data: { message: { listResponseMessage: { title: "Escova modelada" } } },
+      }),
+    ).toBe("Escova modelada");
+
+    // Quebra payloads em lote (array data ou data.messages)
+    const batch = extractWebhookMessagePayloads({
+      event: "MESSAGES_UPSERT",
+      data: [{ key: { id: "1" } }, { key: { id: "2" } }],
+    });
+    expect(batch).toHaveLength(2);
+    const wrappedBatch = extractWebhookMessagePayloads({
+      event: "MESSAGES_UPSERT",
+      data: { messages: [{ key: { id: "a" } }, { key: { id: "b" } }] },
+    });
+    expect(wrappedBatch).toHaveLength(2);
   });
 });
 

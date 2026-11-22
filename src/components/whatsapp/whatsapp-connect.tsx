@@ -9,6 +9,7 @@ import {
   disconnectWhatsAppInstance,
   saveOfficialWhatsApp,
   setWhatsAppProvider,
+  syncWhatsAppInstance,
 } from "@/app/actions/whatsapp";
 import type { WhatsAppLive } from "@/lib/whatsapp-live";
 import type { WhatsAppProvider } from "@/lib/whatsapp-meta";
@@ -17,7 +18,9 @@ import { cn } from "@/lib/utils";
 export function WhatsAppConnect({ initial }: { initial: WhatsAppLive }) {
   const [live, setLive] = useState(initial);
   const [pending, setPending] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState<string | null>(initial.error);
+  const [notice, setNotice] = useState<string | null>(null);
   const [saving, startSave] = useTransition();
   const [phoneNumberId, setPhoneNumberId] = useState(initial.officialPhoneNumberId);
   const [wabaId, setWabaId] = useState(initial.officialWabaId);
@@ -46,17 +49,61 @@ export function WhatsAppConnect({ initial }: { initial: WhatsAppLive }) {
   async function connect() {
     setPending(true);
     setError(null);
+    setNotice(null);
     const result = await connectWhatsAppInstance();
-    if (result && "error" in result && typeof result.error === "string") setError(result.error);
-    if (result && "qr" in result && typeof result.qr === "string") {
-      setLive((current) => ({ ...current, qr: result.qr, state: "connecting", provider: "evolution" }));
+    if (result && "error" in result && typeof result.error === "string") {
+      setError(result.error);
+    } else if (result && "ok" in result && result.ok) {
+      const nextState = result.state ?? "connecting";
+      setLive((current) => ({
+        ...current,
+        qr: nextState === "open" ? null : result.qr ?? current.qr,
+        state: nextState,
+        connected: nextState === "open",
+        number: result.number ?? current.number,
+        webhookUrl: result.webhookUrl || current.webhookUrl,
+        provider: "evolution",
+      }));
+      if (result.warning) {
+        setError(result.warning);
+      } else if (nextState === "open") {
+        setNotice("WhatsApp já está conectado e o webhook foi sincronizado.");
+      }
     }
     setPending(false);
+  }
+
+  async function syncWebhook() {
+    setSyncing(true);
+    setError(null);
+    setNotice(null);
+    const result = await syncWhatsAppInstance();
+    if (result && "error" in result && typeof result.error === "string") {
+      setError(result.error);
+    } else if (result && "ok" in result && result.ok) {
+      setLive((current) => ({
+        ...current,
+        provider: "evolution",
+        instance: result.instance,
+        state: result.state,
+        connected: result.state === "open",
+        qr: result.state === "open" ? null : current.qr,
+        number: result.number ?? current.number,
+        webhookUrl: result.webhookUrl,
+      }));
+      setNotice(
+        result.state === "open"
+          ? "Webhook reconfigurado na Evolution e conexão confirmada."
+          : "Webhook reconfigurado na Evolution. Leia o QR Code se o celular ainda não estiver pareado.",
+      );
+    }
+    setSyncing(false);
   }
 
   async function disconnect() {
     setPending(true);
     setError(null);
+    setNotice(null);
     await disconnectWhatsAppInstance();
     setLive((current) => ({ ...current, state: "close", qr: null, number: null, connected: current.provider === "official" && current.officialState === "open" }));
     setPending(false);
@@ -64,6 +111,7 @@ export function WhatsAppConnect({ initial }: { initial: WhatsAppLive }) {
 
   function choose(provider: WhatsAppProvider) {
     setError(null);
+    setNotice(null);
     setLive((current) => ({
       ...current,
       provider,
@@ -79,6 +127,7 @@ export function WhatsAppConnect({ initial }: { initial: WhatsAppLive }) {
 
   function saveOfficial() {
     setError(null);
+    setNotice(null);
     startSave(async () => {
       const form = new FormData();
       form.set("metaPhoneNumberId", phoneNumberId);
@@ -105,6 +154,7 @@ export function WhatsAppConnect({ initial }: { initial: WhatsAppLive }) {
   async function disconnectOfficial() {
     setPending(true);
     setError(null);
+    setNotice(null);
     await disconnectOfficialWhatsApp();
     setLive((current) => ({
       ...current,
@@ -168,9 +218,17 @@ export function WhatsAppConnect({ initial }: { initial: WhatsAppLive }) {
           onDisconnect={disconnectOfficial}
         />
       ) : (
-        <EvolutionPanel live={live} pending={pending} onConnect={connect} onDisconnect={disconnect} />
+        <EvolutionPanel
+          live={live}
+          pending={pending}
+          syncing={syncing}
+          onConnect={connect}
+          onSync={syncWebhook}
+          onDisconnect={disconnect}
+        />
       )}
 
+      {notice ? <p className="text-sm text-emerald-700">{notice}</p> : null}
       {error ? <p className="text-sm text-red-600">{error}</p> : null}
     </div>
   );
@@ -179,15 +237,20 @@ export function WhatsAppConnect({ initial }: { initial: WhatsAppLive }) {
 function EvolutionPanel({
   live,
   pending,
+  syncing,
   onConnect,
+  onSync,
   onDisconnect,
 }: {
   live: WhatsAppLive;
   pending: boolean;
+  syncing: boolean;
   onConnect: () => void;
+  onSync: () => void;
   onDisconnect: () => void;
 }) {
   const connected = live.state === "open";
+  const busy = pending || syncing;
   return (
     <div className="space-y-4">
       <div
@@ -214,10 +277,16 @@ function EvolutionPanel({
             <Smartphone size={16} />
             Instância {live.instance}
           </div>
-          <Button type="button" variant="danger" disabled={pending} onClick={onDisconnect}>
-            <Unplug size={16} />
-            Desconectar
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" variant="secondary" disabled={busy} onClick={onSync}>
+              <RefreshCw size={16} className={syncing ? "animate-spin" : undefined} />
+              {syncing ? "Sincronizando..." : "Sincronizar webhook"}
+            </Button>
+            <Button type="button" variant="danger" disabled={busy} onClick={onDisconnect}>
+              <Unplug size={16} />
+              Desconectar
+            </Button>
+          </div>
         </div>
       ) : (
         <div className="space-y-3">
@@ -233,15 +302,21 @@ function EvolutionPanel({
             </div>
           )}
           <div className="flex flex-wrap gap-2">
-            <Button type="button" disabled={pending} onClick={onConnect}>
+            <Button type="button" disabled={busy} onClick={onConnect}>
               <RefreshCw size={16} />
               {live.qr ? "Atualizar QR" : "Gerar QR Code"}
+            </Button>
+            <Button type="button" variant="secondary" disabled={busy} onClick={onSync}>
+              <RefreshCw size={16} className={syncing ? "animate-spin" : undefined} />
+              {syncing ? "Sincronizando..." : "Sincronizar webhook"}
             </Button>
           </div>
         </div>
       )}
 
-      {live.webhookUrl ? <p className="text-xs text-ink-soft">Webhook Evolution: {live.webhookUrl}</p> : null}
+      {live.webhookUrl ? (
+        <p className="break-all text-xs text-ink-soft">Webhook Evolution: {live.webhookUrl}</p>
+      ) : null}
     </div>
   );
 }

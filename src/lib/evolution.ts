@@ -197,10 +197,33 @@ export function parseEvolutionState(payload: unknown): "open" | "connecting" | "
 export function extractEvolutionNumber(payload: unknown): string | null {
   if (!payload || typeof payload !== "object") return null;
   const root = payload as Record<string, unknown>;
-  const instance = (root.instance ?? {}) as Record<string, unknown>;
-  const owner = instance.owner ?? instance.wuid ?? root.owner ?? root.number;
+  const instance = (root.instance && typeof root.instance === "object" ? root.instance : {}) as Record<string, unknown>;
+  const data = (root.data && typeof root.data === "object" && !Array.isArray(root.data)
+    ? root.data
+    : {}) as Record<string, unknown>;
+  const owner =
+    instance.owner ??
+    instance.wuid ??
+    data.wuid ??
+    data.owner ??
+    root.owner ??
+    root.wuid ??
+    root.number ??
+    root.sender;
   if (typeof owner !== "string" || !owner) return null;
-  return owner.replace("@s.whatsapp.net", "").replace(/\D/g, "") || null;
+  return owner.split("@")[0].split(":")[0].replace(/\D/g, "") || null;
+}
+
+export function extractEvolutionInstance(payload: Record<string, unknown>): string {
+  const raw = payload.instance;
+  if (typeof raw === "string" && raw.trim()) return raw.trim();
+  if (raw && typeof raw === "object") {
+    const name = (raw as Record<string, unknown>).instanceName ?? (raw as Record<string, unknown>).name;
+    if (typeof name === "string" && name.trim()) return name.trim();
+  }
+  const data = webhookData(payload);
+  if (typeof data.instance === "string" && data.instance.trim()) return data.instance.trim();
+  return "";
 }
 
 export async function getConnectionState(config: EvolutionConfig) {
@@ -209,7 +232,7 @@ export async function getConnectionState(config: EvolutionConfig) {
 
 export async function createEvolutionInstance(
   server: Pick<EvolutionConfig, "url" | "apiKey">,
-  params: { instance: string; webhookUrl?: string },
+  params: { instance: string; webhookUrl?: string; webhookHeaders?: Record<string, string> },
 ) {
   return evoFetch(server, "/instance/create", {
     method: "POST",
@@ -221,9 +244,11 @@ export async function createEvolutionInstance(
       ...(params.webhookUrl
         ? {
             webhook: {
+              enabled: true,
               url: params.webhookUrl,
               byEvents: false,
               base64: false,
+              ...(params.webhookHeaders ? { headers: params.webhookHeaders } : {}),
               events: [...EVOLUTION_WEBHOOK_EVENTS],
             },
           }
@@ -236,39 +261,156 @@ export async function connectEvolutionInstance(config: EvolutionConfig) {
   return evoFetch(config, `/instance/connect/${config.instance}`);
 }
 
-export async function setEvolutionWebhook(config: EvolutionConfig, webhookUrl: string) {
-  return evoFetch(config, `/webhook/set/${config.instance}`, {
-    method: "POST",
-    body: JSON.stringify({
-      enabled: true,
-      url: webhookUrl,
-      webhookByEvents: false,
-      webhookBase64: false,
-      events: [...EVOLUTION_WEBHOOK_EVENTS],
-    }),
-  });
+/**
+ * Registers the Evolution webhook supporting both Evolution API v2 (`{ webhook: { ... } }`)
+ * and Evolution API v1 (flat body) while attaching authentication headers.
+ */
+export async function setEvolutionWebhook(
+  config: EvolutionConfig,
+  webhookUrl: string,
+  options?: { headers?: Record<string, string> },
+) {
+  const customHeaders = options?.headers ?? {
+    "x-webhook-secret": config.apiKey,
+    apikey: config.apiKey,
+  };
+  try {
+    return await evoFetch(config, `/webhook/set/${config.instance}`, {
+      method: "POST",
+      body: JSON.stringify({
+        webhook: {
+          enabled: true,
+          url: webhookUrl,
+          headers: customHeaders,
+          byEvents: false,
+          base64: false,
+          events: [...EVOLUTION_WEBHOOK_EVENTS],
+        },
+      }),
+    });
+  } catch (v2Error) {
+    try {
+      return await evoFetch(config, `/webhook/set/${config.instance}`, {
+        method: "POST",
+        body: JSON.stringify({
+          enabled: true,
+          url: webhookUrl,
+          headers: customHeaders,
+          webhookByEvents: false,
+          webhookBase64: false,
+          events: [...EVOLUTION_WEBHOOK_EVENTS],
+        }),
+      });
+    } catch {
+      throw v2Error;
+    }
+  }
 }
 
 export async function logoutEvolutionInstance(config: EvolutionConfig) {
   return evoFetch(config, `/instance/logout/${config.instance}`, { method: "DELETE" });
 }
 
+function unwrapMessageNode(raw: unknown, depth = 0): Record<string, unknown> {
+  if (!raw || typeof raw !== "object" || depth > 5) return {};
+  const msg = raw as Record<string, unknown>;
+  const wrappers = [
+    "ephemeralMessage",
+    "viewOnceMessage",
+    "viewOnceMessageV2",
+    "viewOnceMessageV2Extension",
+    "documentWithCaptionMessage",
+    "editedMessage",
+    "deviceSentMessage",
+  ];
+  for (const key of wrappers) {
+    const nested = msg[key];
+    if (nested && typeof nested === "object" && "message" in nested) {
+      return unwrapMessageNode((nested as { message?: unknown }).message, depth + 1);
+    }
+  }
+  const protocol = msg.protocolMessage as { editedMessage?: unknown } | undefined;
+  if (protocol?.editedMessage && typeof protocol.editedMessage === "object") {
+    return unwrapMessageNode(protocol.editedMessage, depth + 1);
+  }
+  return msg;
+}
+
 export function extractInboundText(payload: Record<string, unknown>) {
   const data = webhookData(payload);
-  const message = (data.message ?? {}) as Record<string, unknown>;
-  const conversation = message.conversation;
-  if (typeof conversation === "string") return conversation;
+  const message = unwrapMessageNode(data.message ?? payload.message);
+
+  if (typeof message.conversation === "string" && message.conversation.trim()) {
+    return message.conversation;
+  }
   const extended = message.extendedTextMessage as { text?: string } | undefined;
-  if (extended?.text) return extended.text;
+  if (typeof extended?.text === "string" && extended.text.trim()) {
+    return extended.text;
+  }
+
+  const image = message.imageMessage as { caption?: string } | undefined;
+  if (image) return image.caption?.trim() || "[Imagem recebida]";
+  const video = message.videoMessage as { caption?: string } | undefined;
+  if (video) return video.caption?.trim() || "[Vídeo recebido]";
+  const doc = message.documentMessage as { caption?: string; fileName?: string } | undefined;
+  if (doc) return doc.caption?.trim() || (doc.fileName ? `[Documento: ${doc.fileName}]` : "[Documento recebido]");
+  if (message.audioMessage) return "[Áudio recebido]";
+  if (message.stickerMessage) return "[Figurinha recebida]";
+
+  const buttons = message.buttonsResponseMessage as { selectedDisplayText?: string; selectedButtonId?: string } | undefined;
+  if (buttons?.selectedDisplayText) return buttons.selectedDisplayText;
+  if (buttons?.selectedButtonId) return buttons.selectedButtonId;
+
+  const list = message.listResponseMessage as { title?: string; singleSelectReply?: { selectedRowId?: string } } | undefined;
+  if (list?.title) return list.title;
+  if (list?.singleSelectReply?.selectedRowId) return list.singleSelectReply.selectedRowId;
+
+  const template = message.templateButtonReplyMessage as { selectedDisplayText?: string } | undefined;
+  if (template?.selectedDisplayText) return template.selectedDisplayText;
+
+  if (typeof data.body === "string" && data.body.trim()) return data.body;
+  if (typeof data.text === "string" && data.text.trim()) return data.text;
   return "";
+}
+
+function digitsFromJid(jid: string) {
+  return jid.split("@")[0].split(":")[0].replace(/\D/g, "");
 }
 
 export function extractPhone(payload: Record<string, unknown>) {
   const data = webhookData(payload);
   const key = (data.key ?? payload.key ?? {}) as Record<string, unknown>;
-  const remoteJid = String(key.remoteJid ?? data.remoteJid ?? payload.remoteJid ?? "");
-  if (remoteJid.includes("@g.us")) return "";
-  return remoteJid.replace("@s.whatsapp.net", "").replace(/\D/g, "");
+  const primaryJid = String(key.remoteJid ?? data.remoteJid ?? payload.remoteJid ?? "").trim();
+  if (
+    primaryJid.includes("@g.us") ||
+    primaryJid.includes("@broadcast") ||
+    primaryJid.includes("@newsletter")
+  ) {
+    return "";
+  }
+
+  const candidates = [
+    key.remoteJid,
+    key.remoteJidAlt,
+    key.senderPn,
+    data.remoteJid,
+    data.remoteJidAlt,
+    data.senderPn,
+    payload.remoteJid,
+  ]
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .map((value) => value.trim());
+
+  // When WhatsApp sends a @lid JID, prefer the real phone JID (@s.whatsapp.net) if present
+  const directPhoneJid = candidates.find((jid) => jid.includes("@s.whatsapp.net"));
+  if (directPhoneJid) return digitsFromJid(directPhoneJid);
+
+  if (primaryJid.includes("@lid")) {
+    const fallbackNumeric = candidates.find((jid) => !jid.includes("@lid") && !jid.includes("@g.us"));
+    if (fallbackNumeric) return digitsFromJid(fallbackNumeric);
+  }
+
+  return primaryJid ? digitsFromJid(primaryJid) : "";
 }
 
 export function extractEvolutionMessageId(payload: Record<string, unknown>) {
@@ -282,4 +424,20 @@ export function isEvolutionFromMe(payload: Record<string, unknown>) {
   const data = webhookData(payload);
   const key = (data.key ?? payload.key ?? {}) as Record<string, unknown>;
   return key.fromMe === true || data.fromMe === true;
+}
+
+export function extractWebhookMessagePayloads(payload: Record<string, unknown>): Record<string, unknown>[] {
+  const data = payload.data;
+  if (Array.isArray(data)) {
+    return data
+      .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
+      .map((item) => ({ ...payload, data: item }));
+  }
+  if (data && typeof data === "object" && Array.isArray((data as { messages?: unknown }).messages)) {
+    const msgs = (data as { messages: unknown[] }).messages;
+    return msgs
+      .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
+      .map((item) => ({ ...payload, data: item }));
+  }
+  return [payload];
 }
