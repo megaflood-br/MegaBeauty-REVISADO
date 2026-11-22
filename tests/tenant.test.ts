@@ -10,7 +10,7 @@ import {
   tenantSlugFromHost,
 } from "@/lib/tenant-routing";
 import { queryReceptionistAvailability } from "@/lib/receptionist-runtime";
-import { getPublicBookingBusySlots } from "@/app/actions/booking";
+import { getPublicBookingBusySlots, publicBook } from "@/app/actions/booking";
 import { calendarDate, shiftCalendarDate, zonedDateTime } from "@/lib/dates";
 import { handleEvolutionWebhookRequest } from "@/lib/evolution-webhook-http";
 import { evolutionWebhookToken } from "@/lib/evolution-webhook-auth";
@@ -622,6 +622,121 @@ describe("isolamento multi-tenant automático no Prisma", () => {
       expect(busyRes.professionals[0].startTimes).toContain("15:00");
     } finally {
       await unscopedPrisma.appointment.delete({ where: { id: created.id } }).catch(() => null);
+    }
+  });
+
+  it("publicBook soma a duração total dos serviços selecionados, bloqueia encaixes incompatíveis e grava todos os itens", async () => {
+    const aurora = await unscopedPrisma.tenant.findUnique({ where: { slug: "studio-aurora" } });
+    expect(aurora).toBeTruthy();
+
+    const [services, prof, client] = await Promise.all([
+      unscopedPrisma.service.findMany({
+        where: { tenantId: aurora!.id, active: true },
+        orderBy: { durationMin: "asc" },
+        take: 2,
+      }),
+      unscopedPrisma.professional.findFirst({
+        where: { tenantId: aurora!.id, active: true, generateAgenda: true },
+        orderBy: { name: "asc" },
+      }),
+      unscopedPrisma.client.findFirst({ where: { tenantId: aurora!.id } }),
+    ]);
+    expect(services.length).toBeGreaterThanOrEqual(2);
+    expect(prof).toBeTruthy();
+    expect(client).toBeTruthy();
+
+    const [svcA, svcB] = services;
+    const totalDurationMin = svcA.durationMin + svcB.durationMin;
+    const targetDay = shiftCalendarDate(calendarDate(), 19);
+    const testPhone = "11988887766";
+
+    // Cria um agendamento existente logo após o fim do primeiro serviço (bloqueando o bloco contínuo combinado)
+    const blockerStart = zonedDateTime(targetDay, "10:00");
+    const blockerAt = new Date(blockerStart.getTime() + svcA.durationMin * 60_000);
+    const blockerEnd = new Date(blockerAt.getTime() + 60 * 60_000);
+
+    const blocker = await unscopedPrisma.appointment.create({
+      data: {
+        tenantId: aurora!.id,
+        clientId: client!.id,
+        professionalId: prof!.id,
+        startAt: blockerAt,
+        endAt: blockerEnd,
+        status: "CONFIRMED",
+      },
+    });
+
+    const originalLinks = await unscopedPrisma.professionalService.findMany({
+      where: { professionalId: prof!.id },
+    });
+    // Garante que a profissional de teste realiza os dois serviços
+    for (const svc of [svcA, svcB]) {
+      await unscopedPrisma.professionalService.upsert({
+        where: { professionalId_serviceId: { professionalId: prof!.id, serviceId: svc.id } },
+        update: {},
+        create: { professionalId: prof!.id, serviceId: svc.id },
+      });
+    }
+
+    let createdAppointmentId: string | null = null;
+    try {
+      // 1. Tentar às 10:00: o 1º serviço caberia sozinho, mas o bloco contínuo dos 2 conflita com blockerAt -> deve rejeitar
+      const badForm = new FormData();
+      badForm.set("slug", "studio-aurora");
+      badForm.set("professionalId", prof!.id);
+      badForm.append("serviceIds", svcA.id);
+      badForm.append("serviceIds", svcB.id);
+      badForm.set("startAt", blockerStart.toISOString());
+      badForm.set("name", "Teste Contíguo");
+      badForm.set("phone", testPhone);
+
+      const conflictRes = await publicBook(badForm);
+      expect(conflictRes).toHaveProperty("error");
+
+      // 2. Tentar em horário livre após o bloqueio (14:00): deve aceitar e criar Appointment com endAt = 14:00 + totalDurationMin e 2 itens
+      const freeStart = zonedDateTime(targetDay, "14:00");
+      const okForm = new FormData();
+      okForm.set("slug", "studio-aurora");
+      okForm.set("professionalId", prof!.id);
+      okForm.append("serviceIds", svcA.id);
+      okForm.append("serviceIds", svcB.id);
+      okForm.set("startAt", freeStart.toISOString());
+      okForm.set("name", "Teste Contíguo");
+      okForm.set("phone", testPhone);
+
+      const okRes = await publicBook(okForm);
+      expect(okRes).toEqual({ ok: true });
+
+      const booked = await unscopedPrisma.appointment.findFirst({
+        where: {
+          tenantId: aurora!.id,
+          professionalId: prof!.id,
+          startAt: freeStart,
+        },
+        include: { items: { orderBy: { startAt: "asc" } } },
+      });
+      expect(booked).toBeTruthy();
+      createdAppointmentId = booked!.id;
+      expect(booked!.endAt.getTime() - booked!.startAt.getTime()).toBe(totalDurationMin * 60_000);
+      expect(booked!.items).toHaveLength(2);
+      expect(booked!.items.map((i) => i.serviceId)).toEqual([svcA.id, svcB.id]);
+    } finally {
+      if (createdAppointmentId) {
+        await unscopedPrisma.appointment.delete({ where: { id: createdAppointmentId } }).catch(() => null);
+      }
+      await unscopedPrisma.appointment.delete({ where: { id: blocker.id } }).catch(() => null);
+      await unscopedPrisma.client
+        .deleteMany({ where: { tenantId: aurora!.id, phone: testPhone } })
+        .catch(() => null);
+      // Restaura links originais da profissional se necessário
+      const originalIds = new Set(originalLinks.map((l) => l.serviceId));
+      for (const svc of [svcA, svcB]) {
+        if (!originalIds.has(svc.id)) {
+          await unscopedPrisma.professionalService
+            .delete({ where: { professionalId_serviceId: { professionalId: prof!.id, serviceId: svc.id } } })
+            .catch(() => null);
+        }
+      }
     }
   });
 });

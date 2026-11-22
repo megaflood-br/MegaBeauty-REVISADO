@@ -9,6 +9,28 @@ export type BookingBusyInterval = {
   endAt: string;
 };
 
+export type BookingServiceOption = {
+  id: string;
+  name: string;
+  durationMin: number;
+  priceCents: number;
+};
+
+export type BookingProfessionalOption = {
+  id: string;
+  name: string;
+  serviceIds: string[];
+};
+
+export type BookingSlotUnavailabilityReason = "past" | "conflict" | "exceeds_close";
+
+export type BookingSlotOption = {
+  start: string;
+  end: string;
+  available: boolean;
+  reason?: BookingSlotUnavailabilityReason;
+};
+
 export type BookingDayOption = {
   date: string;
   weekdayShort: string;
@@ -27,7 +49,63 @@ function pad(n: number) {
 }
 
 function formatMinutes(total: number) {
-  return `${pad(Math.floor(total / 60))}:${pad(total % 60)}`;
+  const safe = Math.max(0, Math.round(total));
+  return `${pad(Math.floor(safe / 60))}:${pad(safe % 60)}`;
+}
+
+export function formatSlotEndTime(startHHmm: string, durationMin: number) {
+  const startMin = parseHHmm(startHHmm);
+  const safeDuration = Math.max(0, Math.round(durationMin));
+  return formatMinutes(startMin + safeDuration);
+}
+
+/**
+ * Resolves the selected services (deduplicated in selection order) and calculates
+ * their combined duration and base price.
+ */
+export function calculateSelectedServicesTotals<T extends BookingServiceOption>(
+  services: T[],
+  selectedIds: string[],
+) {
+  const byId = new Map(services.map((item) => [item.id, item]));
+  const seen = new Set<string>();
+  const selectedServices: T[] = [];
+
+  for (const rawId of selectedIds) {
+    const id = rawId.trim();
+    if (!id || seen.has(id)) continue;
+    const match = byId.get(id);
+    if (!match) continue;
+    seen.add(id);
+    selectedServices.push(match);
+  }
+
+  const totalDurationMin = selectedServices.reduce(
+    (sum, item) => sum + Math.max(0, Math.round(item.durationMin || 0)),
+    0,
+  );
+  const totalPriceCents = selectedServices.reduce((sum, item) => sum + (item.priceCents || 0), 0);
+
+  return {
+    selectedServices,
+    totalDurationMin,
+    totalPriceCents,
+  };
+}
+
+/**
+ * Filters professionals able to execute ALL selected services.
+ * Professionals with an empty `serviceIds` list are treated as unrestricted (perform all services).
+ */
+export function filterEligibleProfessionals<T extends BookingProfessionalOption>(
+  professionals: T[],
+  selectedServiceIds: string[],
+): T[] {
+  const uniqueIds = Array.from(new Set(selectedServiceIds.filter(Boolean)));
+  if (!uniqueIds.length) return professionals;
+  return professionals.filter(
+    (prof) => prof.serviceIds.length === 0 || uniqueIds.every((serviceId) => prof.serviceIds.includes(serviceId)),
+  );
 }
 
 export function publicBookingRange(today = calendarDate(), maxDays = PUBLIC_BOOKING_MAX_DAYS) {
@@ -74,13 +152,7 @@ export function buildUpcomingBookingDays(
   return days;
 }
 
-/**
- * Computes ALL valid start times on `date` where the full contiguous interval
- * `[start, start + durationMin]` fits inside `[openTime, closeTime]`, does not
- * start in the past when `date === today`, and has zero overlap with any busy
- * interval for `professionalId`.
- */
-export function publicBookingSlotsForDate(input: {
+export type PublicBookingSlotsInput = {
   date: string;
   openTime: string;
   closeTime: string;
@@ -90,14 +162,22 @@ export function publicBookingSlotsForDate(input: {
   busy: BookingBusyInterval[];
   today?: string;
   now?: Date;
-}): string[] {
+};
+
+/**
+ * Evaluates every candidate start time on `date` and checks whether the full contiguous
+ * interval `[start, start + durationMin]` fits within `[openTime, closeTime]`, is not
+ * in the past, and has zero overlap with any busy appointment of `professionalId`.
+ */
+export function publicBookingSlotOptions(input: PublicBookingSlotsInput): BookingSlotOption[] {
   if (!input.professionalId || !isValidCalendarDate(input.date)) return [];
+  if (!Number.isFinite(input.durationMin) || input.durationMin <= 0) return [];
 
   const step = Math.max(5, Math.min(120, Math.round(input.slotMinutes || 15)));
   const duration = clampDurationMin(input.durationMin, step);
   const openMin = parseHHmm(input.openTime);
   const closeMin = parseHHmm(input.closeTime);
-  if (closeMin <= openMin || openMin + duration > closeMin) return [];
+  if (closeMin <= openMin) return [];
 
   const now = input.now ?? new Date();
   const today = input.today && isValidCalendarDate(input.today) ? input.today : calendarDate(now);
@@ -114,18 +194,63 @@ export function publicBookingSlotsForDate(input: {
       s: new Date(item.startAt).getTime(),
       e: new Date(item.endAt).getTime(),
     }))
-    .filter((item) => Number.isFinite(item.s) && Number.isFinite(item.e) && item.e > item.s && item.s < dayEndMs && item.e > dayStartMs);
+    .filter(
+      (item) =>
+        Number.isFinite(item.s) &&
+        Number.isFinite(item.e) &&
+        item.e > item.s &&
+        item.s < dayEndMs &&
+        item.e > dayStartMs,
+    );
 
-  const slots: string[] = [];
-  for (let startMin = openMin; startMin + duration <= closeMin; startMin += step) {
-    const hhmm = formatMinutes(startMin);
-    const startMs = zonedDateTime(input.date, hhmm).getTime();
-    if (startMs < nowMs) continue;
+  const options: BookingSlotOption[] = [];
+  for (let startMin = openMin; startMin < closeMin; startMin += step) {
+    const start = formatMinutes(startMin);
+    const end = formatMinutes(startMin + duration);
+    const startMs = zonedDateTime(input.date, start).getTime();
+
+    if (startMs < nowMs) {
+      options.push({ start, end, available: false, reason: "past" });
+      continue;
+    }
+
+    if (startMin + duration > closeMin) {
+      options.push({ start, end, available: false, reason: "exceeds_close" });
+      continue;
+    }
+
     const endMs = startMs + duration * 60_000;
     const conflict = proBusy.some((item) => startMs < item.e && endMs > item.s);
-    if (!conflict) {
-      slots.push(hhmm);
+    if (conflict) {
+      options.push({ start, end, available: false, reason: "conflict" });
+      continue;
     }
+
+    options.push({ start, end, available: true });
   }
-  return slots;
+
+  return options;
+}
+
+/**
+ * Computes ALL valid start times on `date` where the full contiguous interval
+ * `[start, start + durationMin]` fits inside `[openTime, closeTime]`, does not
+ * start in the past when `date === today`, and has zero overlap with any busy
+ * interval for `professionalId`.
+ */
+export function publicBookingSlotsForDate(input: PublicBookingSlotsInput): string[] {
+  return publicBookingSlotOptions(input)
+    .filter((option) => option.available)
+    .map((option) => option.start);
+}
+
+/**
+ * Validates whether a specific `startTime` ("HH:mm") can host a contiguous block
+ * of `durationMin` minutes for `professionalId` on `date`.
+ */
+export function isContiguousBlockAvailable(
+  input: PublicBookingSlotsInput & { startTime: string },
+): boolean {
+  if (!input.startTime) return false;
+  return publicBookingSlotOptions(input).some((option) => option.start === input.startTime && option.available);
 }

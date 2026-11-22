@@ -1,9 +1,9 @@
 "use client";
 
 import { useMemo, useState, useTransition } from "react";
-import { CalendarDays, ChevronLeft, ChevronRight, Clock } from "lucide-react";
+import { AlertCircle, CalendarDays, Check, ChevronLeft, ChevronRight, Clock, Search, X } from "lucide-react";
 import { getPublicBookingBusySlots, publicBook } from "@/app/actions/booking";
-import { Button, Field, Input, Select } from "@/components/ui";
+import { Button, Field, Input } from "@/components/ui";
 import { SearchSelect } from "@/components/search-select";
 import { formatBRL } from "@/lib/money";
 import { calendarDate, formatDayLabel, minutesToLabel, shiftCalendarDate, zonedDateTime } from "@/lib/dates";
@@ -11,7 +11,11 @@ import { bestPromotion, type PromoRule } from "@/lib/promotions";
 import {
   PUBLIC_BOOKING_MAX_DAYS,
   buildUpcomingBookingDays,
+  calculateSelectedServicesTotals,
+  filterEligibleProfessionals,
+  formatSlotEndTime,
   isDateInBookingWindow,
+  publicBookingSlotOptions,
   publicBookingSlotsForDate,
   type BookingBusyInterval,
 } from "@/lib/booking-availability";
@@ -59,7 +63,10 @@ export function BookingWizard({
   const maxDate = useMemo(() => shiftCalendarDate(today, maxDays), [today, maxDays]);
   const upcomingDays = useMemo(() => buildUpcomingBookingDays(today, maxDays), [today, maxDays]);
 
-  const [serviceId, setServiceId] = useState(services[0]?.id ?? "");
+  const [selectedServiceIds, setSelectedServiceIds] = useState<string[]>(() =>
+    services[0]?.id ? [services[0].id] : [],
+  );
+  const [serviceQuery, setServiceQuery] = useState("");
   const [professionalId, setProfessionalId] = useState("");
   const [date, setDate] = useState(today);
   const [pageIndex, setPageIndex] = useState(0);
@@ -70,12 +77,27 @@ export function BookingWizard({
   const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
 
-  const service = services.find((s) => s.id === serviceId);
-  const serviceDurationMin = service?.durationMin ?? 0;
-  const pros = useMemo(
-    () => professionals.filter((p) => !serviceId || p.serviceIds.includes(serviceId) || p.serviceIds.length === 0),
-    [professionals, serviceId],
+  const { selectedServices, totalDurationMin } = useMemo(
+    () => calculateSelectedServicesTotals(services, selectedServiceIds),
+    [services, selectedServiceIds],
   );
+
+  const selectedServiceIdList = useMemo(
+    () => selectedServices.map((item) => item.id),
+    [selectedServices],
+  );
+
+  const filteredServices = useMemo(() => {
+    const q = serviceQuery.trim().toLowerCase();
+    if (!q) return services;
+    return services.filter((item) => item.name.toLowerCase().includes(q));
+  }, [services, serviceQuery]);
+
+  const pros = useMemo(
+    () => filterEligibleProfessionals(professionals, selectedServiceIdList),
+    [professionals, selectedServiceIdList],
+  );
+
   const activeProfessional = pros.find((p) => p.id === professionalId) ?? null;
   const effectiveProfessionalId = activeProfessional?.id ?? "";
 
@@ -84,7 +106,34 @@ export function BookingWizard({
 
   const activeBusy = busyByDate[date] ?? initialBusy;
 
-  const servicePromo = service ? bestPromotion(promotions, date, "SERVICE", service.id, service.priceCents) : null;
+  const selectedPricing = useMemo(() => {
+    let totalBaseCents = 0;
+    let totalFinalCents = 0;
+    const appliedPromos: { serviceName: string; promoName: string; priceCents: number }[] = [];
+
+    for (const item of selectedServices) {
+      totalBaseCents += item.priceCents;
+      const promo = bestPromotion(promotions, date, "SERVICE", item.id, item.priceCents);
+      if (promo) {
+        totalFinalCents += promo.priceCents;
+        appliedPromos.push({
+          serviceName: item.name,
+          promoName: promo.promo.name,
+          priceCents: promo.priceCents,
+        });
+      } else {
+        totalFinalCents += item.priceCents;
+      }
+    }
+
+    return {
+      totalBaseCents,
+      totalFinalCents,
+      discountCents: Math.max(0, totalBaseCents - totalFinalCents),
+      appliedPromos,
+    };
+  }, [selectedServices, promotions, date]);
+
   const dayOffers = useMemo(
     () =>
       services.flatMap((item) => {
@@ -94,44 +143,78 @@ export function BookingWizard({
     [services, promotions, date],
   );
 
-  const freeSlots =
-    effectiveProfessionalId && serviceDurationMin
-      ? publicBookingSlotsForDate({
-          date,
-          openTime: effectiveOpenTime,
-          closeTime: effectiveCloseTime,
-          slotMinutes,
-          durationMin: serviceDurationMin,
-          professionalId: effectiveProfessionalId,
-          busy: activeBusy,
-          today,
-        })
-      : [];
+  const slotOptions = useMemo(
+    () =>
+      effectiveProfessionalId && totalDurationMin > 0
+        ? publicBookingSlotOptions({
+            date,
+            openTime: effectiveOpenTime,
+            closeTime: effectiveCloseTime,
+            slotMinutes,
+            durationMin: totalDurationMin,
+            professionalId: effectiveProfessionalId,
+            busy: activeBusy,
+            today,
+          })
+        : [],
+    [
+      effectiveProfessionalId,
+      totalDurationMin,
+      date,
+      effectiveOpenTime,
+      effectiveCloseTime,
+      slotMinutes,
+      activeBusy,
+      today,
+    ],
+  );
 
-  const selectedTime = freeSlots.includes(time) ? time : "";
+  const freeSlotOptions = useMemo(
+    () => slotOptions.filter((option) => option.available),
+    [slotOptions],
+  );
+
+  const blockedSlotCount = useMemo(
+    () => slotOptions.filter((option) => !option.available && option.reason !== "past").length,
+    [slotOptions],
+  );
+
+  const selectedSlot = freeSlotOptions.find((option) => option.start === time) ?? null;
+  const selectedTime = selectedSlot?.start ?? "";
+  const timeBecameIncompatible = Boolean(time) && !selectedTime && Boolean(effectiveProfessionalId) && totalDurationMin > 0;
 
   const totalPages = Math.ceil(upcomingDays.length / DAYS_PER_PAGE);
   const visibleDays = upcomingDays.slice(pageIndex * DAYS_PER_PAGE, (pageIndex + 1) * DAYS_PER_PAGE);
 
-  const visibleAvailabilityCounts: Record<string, number> | null =
-    effectiveProfessionalId && serviceDurationMin
-      ? Object.fromEntries(
-          visibleDays.map((day) => {
-            const dayBusy = busyByDate[day.date] ?? initialBusy;
-            const count = publicBookingSlotsForDate({
-              date: day.date,
-              openTime: effectiveOpenTime,
-              closeTime: effectiveCloseTime,
-              slotMinutes,
-              durationMin: serviceDurationMin,
-              professionalId: effectiveProfessionalId,
-              busy: dayBusy,
-              today,
-            }).length;
-            return [day.date, count];
-          }),
-        )
-      : null;
+  const visibleAvailabilityCounts: Record<string, number> | null = useMemo(() => {
+    if (!effectiveProfessionalId || totalDurationMin <= 0) return null;
+    return Object.fromEntries(
+      visibleDays.map((day) => {
+        const dayBusy = busyByDate[day.date] ?? initialBusy;
+        const count = publicBookingSlotsForDate({
+          date: day.date,
+          openTime: effectiveOpenTime,
+          closeTime: effectiveCloseTime,
+          slotMinutes,
+          durationMin: totalDurationMin,
+          professionalId: effectiveProfessionalId,
+          busy: dayBusy,
+          today,
+        }).length;
+        return [day.date, count];
+      }),
+    );
+  }, [
+    effectiveProfessionalId,
+    totalDurationMin,
+    visibleDays,
+    busyByDate,
+    initialBusy,
+    effectiveOpenTime,
+    effectiveCloseTime,
+    slotMinutes,
+    today,
+  ]);
 
   function selectDate(nextDate: string) {
     if (!isDateInBookingWindow(nextDate, today, maxDays)) {
@@ -159,15 +242,17 @@ export function BookingWizard({
       });
   }
 
-  function handleServiceChange(nextServiceId: string) {
-    setServiceId(nextServiceId);
-    setTime("");
+  function toggleService(targetId: string) {
     setError(null);
-    const nextPros = professionals.filter(
-      (p) => !nextServiceId || p.serviceIds.includes(nextServiceId) || p.serviceIds.length === 0,
-    );
+    const nextIds = selectedServiceIds.includes(targetId)
+      ? selectedServiceIds.filter((id) => id !== targetId)
+      : [...selectedServiceIds, targetId];
+    setSelectedServiceIds(nextIds);
+
+    const nextPros = filterEligibleProfessionals(professionals, nextIds);
     if (professionalId && !nextPros.some((p) => p.id === professionalId)) {
       setProfessionalId("");
+      setTime("");
     }
   }
 
@@ -176,6 +261,14 @@ export function BookingWizard({
     setTime("");
     setError(null);
   }
+
+  const canSubmit =
+    !pending &&
+    loadingDate !== date &&
+    selectedServices.length > 0 &&
+    totalDurationMin > 0 &&
+    Boolean(effectiveProfessionalId) &&
+    Boolean(selectedTime);
 
   if (done) {
     return (
@@ -188,8 +281,12 @@ export function BookingWizard({
 
   return (
     <form
-      className="grid gap-4 rounded-3xl bg-paper p-6"
+      className="grid gap-5 rounded-3xl bg-paper p-6"
       action={(formData) => {
+        if (!canSubmit) {
+          setError("Selecione serviços, profissional e um horário com bloco contíguo disponível.");
+          return;
+        }
         setError(null);
         startTransition(async () => {
           const result = await publicBook(formData);
@@ -199,7 +296,12 @@ export function BookingWizard({
       }}
     >
       <input type="hidden" name="slug" value={slug} />
+      {selectedServices.map((item) => (
+        <input key={item.id} type="hidden" name="serviceIds" value={item.id} />
+      ))}
+      <input type="hidden" name="serviceId" value={selectedServices[0]?.id ?? ""} />
       <input type="hidden" name="startAt" value={selectedTime ? zonedDateTime(date, selectedTime).toISOString() : ""} />
+
       {dayOffers.length ? (
         <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
           <p className="font-medium">Ofertas neste dia</p>
@@ -212,34 +314,152 @@ export function BookingWizard({
           </ul>
         </div>
       ) : null}
-      <Field label="Serviço">
-        <SearchSelect
-          name="serviceId"
-          required
-          placeholder="Buscar serviço..."
-          value={serviceId}
-          onChange={handleServiceChange}
-          options={services.map((s) => {
-            const promo = bestPromotion(promotions, date, "SERVICE", s.id, s.priceCents);
-            return {
-              value: s.id,
-              label: s.name,
-              hint: promo
-                ? `${minutesToLabel(s.durationMin)} · ${formatBRL(promo.priceCents)} na ${promo.promo.name}`
-                : `${minutesToLabel(s.durationMin)} · ${formatBRL(s.priceCents)}`,
-            };
+
+      <div className="space-y-2.5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="text-sm font-medium text-ink-soft">
+            Serviços ({selectedServices.length} selecionado{selectedServices.length === 1 ? "" : "s"})
+          </span>
+          {totalDurationMin > 0 ? (
+            <span className="inline-flex items-center gap-1 text-xs font-medium text-wine">
+              <Clock size={12} />
+              Duração total: {minutesToLabel(totalDurationMin)}
+            </span>
+          ) : null}
+        </div>
+
+        {services.length > 5 ? (
+          <div className="relative">
+            <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-ink-soft" />
+            <Input
+              type="search"
+              value={serviceQuery}
+              onChange={(e) => setServiceQuery(e.target.value)}
+              placeholder="Buscar serviços para adicionar..."
+              className="pl-8 text-sm"
+            />
+          </div>
+        ) : null}
+
+        <div className="grid max-h-56 gap-1.5 overflow-y-auto pr-0.5">
+          {filteredServices.map((item) => {
+            const checked = selectedServiceIds.includes(item.id);
+            const promo = bestPromotion(promotions, date, "SERVICE", item.id, item.priceCents);
+            return (
+              <button
+                key={item.id}
+                type="button"
+                aria-pressed={checked}
+                onClick={() => toggleService(item.id)}
+                className={cn(
+                  "flex items-center justify-between gap-3 rounded-xl border px-3 py-2.5 text-left transition",
+                  checked
+                    ? "border-wine bg-wine/5 text-ink"
+                    : "border-line bg-white hover:border-wine/40 hover:bg-sand/40",
+                )}
+              >
+                <div className="flex min-w-0 items-center gap-2.5">
+                  <span
+                    className={cn(
+                      "flex h-4.5 w-4.5 shrink-0 items-center justify-center rounded border transition",
+                      checked ? "border-wine bg-wine text-white" : "border-line bg-white",
+                    )}
+                  >
+                    {checked ? <Check size={12} /> : null}
+                  </span>
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium">{item.name}</p>
+                    <p className="text-xs text-ink-soft">
+                      {minutesToLabel(item.durationMin)}
+                      {promo ? ` · ${promo.promo.name}` : ""}
+                    </p>
+                  </div>
+                </div>
+                <div className="shrink-0 text-right">
+                  {promo ? (
+                    <>
+                      <span className="block text-[11px] text-ink-soft line-through">{formatBRL(item.priceCents)}</span>
+                      <span className="text-sm font-semibold text-emerald-700">{formatBRL(promo.priceCents)}</span>
+                    </>
+                  ) : (
+                    <span className="text-sm font-semibold">{formatBRL(item.priceCents)}</span>
+                  )}
+                </div>
+              </button>
+            );
           })}
-        />
-      </Field>
+          {!filteredServices.length ? (
+            <p className="rounded-xl border border-line bg-sand/30 px-3 py-2 text-xs text-ink-soft">
+              Nenhum serviço encontrado para &ldquo;{serviceQuery}&rdquo;.
+            </p>
+          ) : null}
+        </div>
+
+        {selectedServices.length > 0 ? (
+          <div className="rounded-2xl border border-line bg-sand/35 px-3.5 py-2.5">
+            <div className="flex flex-wrap gap-1.5">
+              {selectedServices.map((item) => (
+                <span
+                  key={item.id}
+                  className="inline-flex items-center gap-1 rounded-lg border border-line bg-white px-2 py-0.5 text-xs text-ink"
+                >
+                  {item.name} ({minutesToLabel(item.durationMin)})
+                  <button
+                    type="button"
+                    aria-label={`Remover ${item.name}`}
+                    onClick={() => toggleService(item.id)}
+                    className="text-ink-soft hover:text-wine"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              ))}
+            </div>
+            <div className="mt-2 flex flex-wrap items-center justify-between gap-2 border-t border-line/70 pt-2 text-xs">
+              <span className="text-ink-soft">
+                Tempo contíguo necessário:{" "}
+                <strong className="text-ink">{minutesToLabel(totalDurationMin)}</strong>
+              </span>
+              <span className="font-semibold text-ink">
+                Total: {formatBRL(selectedPricing.totalFinalCents)}
+                {selectedPricing.discountCents > 0 ? (
+                  <span className="ml-1 font-normal text-emerald-700">
+                    (-{formatBRL(selectedPricing.discountCents)})
+                  </span>
+                ) : null}
+              </span>
+            </div>
+          </div>
+        ) : (
+          <p className="text-xs text-warn">Selecione pelo menos um serviço para verificar os horários livres.</p>
+        )}
+      </div>
+
       <Field label="Profissional">
         <SearchSelect
           name="professionalId"
           required
-          placeholder="Buscar profissional..."
+          placeholder={
+            selectedServices.length === 0
+              ? "Selecione ao menos um serviço primeiro..."
+              : pros.length === 0
+                ? "Nenhuma profissional realiza essa combinação"
+                : "Buscar profissional..."
+          }
           value={effectiveProfessionalId}
           onChange={handleProfessionalChange}
-          options={pros.map((p) => ({ value: p.id, label: p.name }))}
+          options={pros.map((p) => ({
+            value: p.id,
+            label: p.name,
+            hint: `${p.workStart || openTime} às ${p.workEnd || closeTime}`,
+          }))}
         />
+        {selectedServices.length > 1 && pros.length === 0 ? (
+          <p className="mt-1 inline-flex items-center gap-1.5 text-xs text-warn">
+            <AlertCircle size={13} />
+            Nenhuma profissional realiza todos os serviços selecionados juntos. Remova um serviço ou faça agendamentos separados.
+          </p>
+        ) : null}
       </Field>
 
       <div className="space-y-2.5">
@@ -309,7 +529,11 @@ export function BookingWizard({
                           ? "bg-slate-300"
                           : "bg-emerald-500",
                     )}
-                    title={soldOut ? "Sem horários livres" : `${slotCount} horário(s) livre(s)`}
+                    title={
+                      soldOut
+                        ? `Sem bloco contíguo de ${minutesToLabel(totalDurationMin)}`
+                        : `${slotCount} encaixe(s) compatível(is)`
+                    }
                   />
                 ) : null}
               </button>
@@ -333,32 +557,88 @@ export function BookingWizard({
         </div>
       </div>
 
-      <Field label="Horário">
-        <Select value={selectedTime} onChange={(e) => setTime(e.target.value)} required disabled={!effectiveProfessionalId || !service}>
-          <option value="">
-            {!effectiveProfessionalId
-              ? "Selecione a profissional primeiro"
-              : loadingDate === date
-                ? "Atualizando horários..."
-                : freeSlots.length
-                  ? `Escolha um horário livre (${freeSlots.length} opções)`
-                  : "Sem encaixe livre neste dia"}
-          </option>
-          {freeSlots.map((s) => (
-            <option key={s} value={s}>
-              {s}
-            </option>
-          ))}
-        </Select>
-        {effectiveProfessionalId && service ? (
-          <p className="mt-1 inline-flex items-center gap-1.5 text-xs text-ink-soft">
+      <div className="space-y-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="text-sm font-medium text-ink-soft">Horário disponível</span>
+          {selectedTime && totalDurationMin > 0 ? (
+            <span className="text-xs font-medium text-wine">
+              Bloco reservado: {selectedTime} às {formatSlotEndTime(selectedTime, totalDurationMin)}
+            </span>
+          ) : null}
+        </div>
+
+        {timeBecameIncompatible ? (
+          <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+            <AlertCircle size={14} className="mt-0.5 shrink-0" />
+            <span>
+              O horário <strong>{time}</strong> não comporta o bloco contíguo de{" "}
+              <strong>{minutesToLabel(totalDurationMin)}</strong> na agenda desta profissional. Escolha outro encaixe disponível abaixo.
+            </span>
+          </div>
+        ) : null}
+
+        {!selectedServices.length ? (
+          <p className="rounded-xl border border-line bg-sand/30 px-3 py-2.5 text-xs text-ink-soft">
+            Selecione pelo menos um serviço acima para calcular os blocos livres.
+          </p>
+        ) : !effectiveProfessionalId ? (
+          <p className="rounded-xl border border-line bg-sand/30 px-3 py-2.5 text-xs text-ink-soft">
+            Escolha a profissional para consultar os horários compatíveis com {minutesToLabel(totalDurationMin)}.
+          </p>
+        ) : loadingDate === date ? (
+          <p className="rounded-xl border border-line bg-sand/30 px-3 py-2.5 text-xs text-ink-soft">
+            Validando blocos contíguos disponíveis na agenda...
+          </p>
+        ) : freeSlotOptions.length ? (
+          <div className="grid max-h-48 grid-cols-3 gap-1.5 overflow-y-auto pr-0.5 sm:grid-cols-4">
+            {freeSlotOptions.map((slot) => {
+              const isSelected = slot.start === selectedTime;
+              return (
+                <button
+                  key={slot.start}
+                  type="button"
+                  aria-pressed={isSelected}
+                  onClick={() => {
+                    setTime(slot.start);
+                    setError(null);
+                  }}
+                  className={cn(
+                    "flex flex-col items-center justify-center rounded-xl border px-2 py-2 text-center transition",
+                    isSelected
+                      ? "border-wine bg-wine text-white"
+                      : "border-line bg-white text-ink hover:border-wine/50 hover:bg-sand/50",
+                  )}
+                >
+                  <span className="text-sm font-semibold">{slot.start}</span>
+                  <span className={cn("text-[10px]", isSelected ? "text-white/85" : "text-ink-soft")}>
+                    até {slot.end}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-3 text-xs text-amber-900">
+            <p className="font-medium">
+              Sem bloco contíguo livre de {minutesToLabel(totalDurationMin)} neste dia.
+            </p>
+            <p className="mt-0.5 text-amber-800/90">
+              {blockedSlotCount > 0
+                ? "Os intervalos livres existentes são menores que a duração total selecionada ou ultrapassam o expediente."
+                : "Não há mais horários livres dentro do expediente hoje."}
+              {" "}Experimente outra data nos próximos {maxDays} dias ou ajuste os serviços selecionados.
+            </p>
+          </div>
+        )}
+
+        {effectiveProfessionalId && totalDurationMin > 0 && freeSlotOptions.length > 0 ? (
+          <p className="inline-flex items-center gap-1.5 text-xs text-ink-soft">
             <Clock size={12} />
-            {freeSlots.length
-              ? `Encaixe contínuo validado para ${minutesToLabel(service.durationMin)} (${effectiveOpenTime} às ${effectiveCloseTime}).`
-              : `Sem bloco livre de ${minutesToLabel(service.durationMin)} neste dia. Experimente outra data nos próximos ${maxDays} dias.`}
+            Mostrando apenas os {freeSlotOptions.length} encaixe(s) com bloco contíguo de{" "}
+            {minutesToLabel(totalDurationMin)} ({effectiveOpenTime} às {effectiveCloseTime}).
           </p>
         ) : null}
-      </Field>
+      </div>
 
       <Field label="Seu nome">
         <Input name="name" required maxLength={120} />
@@ -366,13 +646,24 @@ export function BookingWizard({
       <Field label="WhatsApp">
         <Input name="phone" required placeholder="11999999999" />
       </Field>
-      {servicePromo ? (
+
+      {selectedPricing.appliedPromos.length ? (
         <p className="text-sm text-emerald-700">
-          Oferta válida neste dia: {servicePromo.promo.name} por {formatBRL(servicePromo.priceCents)}.
+          Desconto aplicado neste dia:{" "}
+          {selectedPricing.appliedPromos
+            .map((p) => `${p.serviceName} (${p.promoName}) por ${formatBRL(p.priceCents)}`)
+            .join(" · ")}
         </p>
       ) : null}
+
       {error ? <p className="text-sm text-warn">{error}</p> : null}
-      <Button disabled={pending || !selectedTime}>{pending ? "Reservando..." : "Confirmar agendamento"}</Button>
+      <Button disabled={!canSubmit}>
+        {pending
+          ? "Reservando..."
+          : selectedTime
+            ? `Confirmar (${selectedTime} – ${formatSlotEndTime(selectedTime, totalDurationMin)})`
+            : "Confirmar agendamento"}
+      </Button>
     </form>
   );
 }

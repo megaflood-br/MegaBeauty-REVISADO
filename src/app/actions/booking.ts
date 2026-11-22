@@ -59,13 +59,20 @@ export async function getPublicBookingBusySlots(input: {
 export async function publicBook(formData: FormData) {
   const slug = String(formData.get("slug") ?? "").trim();
   const professionalId = String(formData.get("professionalId") ?? "").trim();
-  const serviceId = String(formData.get("serviceId") ?? "").trim();
+  const rawServiceIds = [
+    ...formData.getAll("serviceIds").map((value) => String(value ?? "").trim()),
+    String(formData.get("serviceId") ?? "").trim(),
+  ].filter(Boolean);
+  const serviceIds = Array.from(new Set(rawServiceIds));
   const startAt = new Date(String(formData.get("startAt") ?? ""));
   const name = String(formData.get("name") ?? "").trim().slice(0, 120);
   const phone = String(formData.get("phone") ?? "").replace(/\D/g, "");
 
   const tenant = await prisma.tenant.findUnique({ where: { slug } });
   if (!tenant) return { error: "Salão não encontrado." };
+  if (!serviceIds.length) {
+    return { error: "Selecione pelo menos um serviço." };
+  }
   if (!name || phone.length < 10 || phone.length > 15) {
     return { error: "Informe seu nome e um WhatsApp válido com DDD." };
   }
@@ -83,9 +90,9 @@ export async function publicBook(formData: FormData) {
   }
 
   return withTenantContext(tenant.id, async () => {
-    const [service, professional] = await Promise.all([
-      prisma.service.findFirst({
-        where: { id: serviceId, tenantId: tenant.id, active: true },
+    const [services, professional] = await Promise.all([
+      prisma.service.findMany({
+        where: { id: { in: serviceIds }, tenantId: tenant.id, active: true },
       }),
       prisma.professional.findFirst({
         where: { id: professionalId, tenantId: tenant.id, active: true, generateAgenda: true },
@@ -93,24 +100,40 @@ export async function publicBook(formData: FormData) {
       }),
     ]);
 
-    if (!service) return { error: "Serviço indisponível." };
+    const serviceById = new Map(services.map((item) => [item.id, item]));
+    const orderedServices = serviceIds
+      .map((id) => serviceById.get(id))
+      .filter((item): item is NonNullable<typeof item> => Boolean(item));
+
+    if (orderedServices.length !== serviceIds.length) {
+      return { error: "Um ou mais serviços selecionados estão indisponíveis." };
+    }
     if (!professional) return { error: "Profissional indisponível." };
-    if (
-      professional.serviceLinks.length > 0 &&
-      !professional.serviceLinks.some((link) => link.serviceId === service.id)
-    ) {
-      return { error: "Esta profissional não realiza o serviço selecionado." };
+
+    if (professional.serviceLinks.length > 0) {
+      const allowedIds = new Set(professional.serviceLinks.map((link) => link.serviceId));
+      const unsupported = orderedServices.find((svc) => !allowedIds.has(svc.id));
+      if (unsupported) {
+        return { error: `Esta profissional não realiza o serviço "${unsupported.name}".` };
+      }
+    }
+
+    const totalDurationMin = orderedServices.reduce((sum, svc) => sum + Math.max(0, svc.durationMin), 0);
+    if (totalDurationMin <= 0) {
+      return { error: "Duração total inválida para os serviços selecionados." };
     }
 
     const openMin = parseHHmm(professional.workStart || tenant.openTime);
     const closeMin = parseHHmm(professional.workEnd || tenant.closeTime);
     const startMin = minutesInTz(startAt);
-    const endMin = startMin + service.durationMin;
+    const endMin = startMin + totalDurationMin;
     if (startMin < openMin || endMin > closeMin) {
-      return { error: "Este horário não comporta a duração completa do serviço dentro do expediente." };
+      return {
+        error: "Este horário não comporta a duração total contínua dos serviços selecionados dentro do expediente.",
+      };
     }
 
-    const endAt = addMinutes(startAt, service.durationMin);
+    const endAt = addMinutes(startAt, totalDurationMin);
     const busy = await prisma.appointment.findMany({
       where: {
         tenantId: tenant.id,
@@ -122,15 +145,31 @@ export async function publicBook(formData: FormData) {
       select: { id: true, startAt: true, endAt: true },
     });
     if (hasConflict({ start: startAt, end: endAt }, busy.map((b) => ({ id: b.id, start: b.startAt, end: b.endAt })))) {
-      return { error: "Horário recém ocupado. Escolha outro." };
+      return { error: "Não há bloco contíguo livre para toda a duração dos serviços neste horário. Escolha outro." };
     }
 
-    const client = await prisma.client.upsert({
-      where: { tenantId_phone: { tenantId: tenant.id, phone } },
-      update: { name },
-      create: { tenantId: tenant.id, name, phone, source: "online" },
-    });
+    const [client, promoRules] = await Promise.all([
+      prisma.client.upsert({
+        where: { tenantId_phone: { tenantId: tenant.id, phone } },
+        update: { name },
+        create: { tenantId: tenant.id, name, phone, source: "online" },
+      }),
+      loadPromoRules(tenant.id),
+    ]);
     const isNew = Date.now() - client.createdAt.getTime() < 8000;
+
+    let cursor = startAt;
+    const itemsToCreate = orderedServices.map((svc) => {
+      const itemStart = cursor;
+      cursor = addMinutes(cursor, svc.durationMin);
+      return {
+        serviceId: svc.id,
+        professionalId: professional.id,
+        startAt: itemStart,
+        priceCents: applyCatalogPrice(promoRules, bookingDate, "SERVICE", svc.id, svc.priceCents).priceCents,
+        durationMin: svc.durationMin,
+      };
+    });
 
     const appointment = await prisma.appointment.create({
       data: {
@@ -142,17 +181,7 @@ export async function publicBook(formData: FormData) {
         status: "PENDING",
         source: "online",
         items: {
-          create: {
-            serviceId: service.id,
-            priceCents: applyCatalogPrice(
-              await loadPromoRules(tenant.id),
-              bookingDate,
-              "SERVICE",
-              service.id,
-              service.priceCents,
-            ).priceCents,
-            durationMin: service.durationMin,
-          },
+          create: itemsToCreate,
         },
       },
       include: {

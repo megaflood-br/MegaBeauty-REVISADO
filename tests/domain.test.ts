@@ -161,8 +161,13 @@ import { buildReceptionistHistory } from "@/lib/receptionist-runtime";
 import {
   PUBLIC_BOOKING_MAX_DAYS,
   buildUpcomingBookingDays,
+  calculateSelectedServicesTotals,
+  filterEligibleProfessionals,
+  formatSlotEndTime,
+  isContiguousBlockAvailable,
   isDateInBookingWindow,
   publicBookingRange,
+  publicBookingSlotOptions,
   publicBookingSlotsForDate,
 } from "@/lib/booking-availability";
 import {
@@ -2036,6 +2041,91 @@ describe("recepcionista virtual", () => {
       busy: [],
     });
     expect(todaySlots).toEqual(["17:00", "17:30", "18:00"]);
+  });
+
+  it("calcula duração total de múltiplos serviços e bloqueia encaixes incompatíveis na agenda do profissional", () => {
+    const services = [
+      { id: "s-corte", name: "Corte", durationMin: 45, priceCents: 9000 },
+      { id: "s-escova", name: "Escova", durationMin: 45, priceCents: 7000 },
+      { id: "s-hidrata", name: "Hidratação", durationMin: 60, priceCents: 11000 },
+    ];
+
+    const totals = calculateSelectedServicesTotals(services, ["s-corte", "s-escova", "s-hidrata", "s-corte"]);
+    expect(totals.selectedServices.map((s) => s.id)).toEqual(["s-corte", "s-escova", "s-hidrata"]);
+    expect(totals.totalDurationMin).toBe(150);
+    expect(totals.totalPriceCents).toBe(27000);
+    expect(formatSlotEndTime("14:00", totals.totalDurationMin)).toBe("16:30");
+
+    const pros = [
+      { id: "p-ana", name: "Ana", serviceIds: ["s-corte", "s-escova", "s-hidrata"] },
+      { id: "p-bia", name: "Bia", serviceIds: ["s-corte", "s-escova"] },
+      { id: "p-carla", name: "Carla", serviceIds: [] }, // sem restrição = realiza todos
+    ];
+    expect(filterEligibleProfessionals(pros, ["s-corte", "s-hidrata"]).map((p) => p.id)).toEqual([
+      "p-ana",
+      "p-carla",
+    ]);
+
+    const today = "2026-11-22";
+    const targetDate = "2026-11-25";
+    const busy = [
+      {
+        professionalId: "p-ana",
+        startAt: zonedDateTime(targetDate, "14:00").toISOString(),
+        endAt: zonedDateTime(targetDate, "15:00").toISOString(),
+      },
+    ];
+
+    // Com 1 serviço (45 min), 13:00 está livre (13:00..13:45)
+    expect(
+      isContiguousBlockAvailable({
+        date: targetDate,
+        openTime: "09:00",
+        closeTime: "18:00",
+        slotMinutes: 30,
+        durationMin: 45,
+        professionalId: "p-ana",
+        busy,
+        today,
+        startTime: "13:00",
+      }),
+    ).toBe(true);
+
+    // Ao somar os 3 serviços (150 min = 2h30), 13:00..15:30 conflita com 14:00..15:00 -> incompatível!
+    // E 16:00..18:30 ultrapassa o expediente (18:00) -> incompatível!
+    const options = publicBookingSlotOptions({
+      date: targetDate,
+      openTime: "09:00",
+      closeTime: "18:00",
+      slotMinutes: 30,
+      durationMin: totals.totalDurationMin,
+      professionalId: "p-ana",
+      busy,
+      today,
+    });
+    const at1130 = options.find((o) => o.start === "11:30");
+    const at1300 = options.find((o) => o.start === "13:00");
+    const at1500 = options.find((o) => o.start === "15:00");
+    const at1600 = options.find((o) => o.start === "16:00");
+
+    expect(at1130).toEqual({ start: "11:30", end: "14:00", available: true });
+    expect(at1300).toEqual({ start: "13:00", end: "15:30", available: false, reason: "conflict" });
+    expect(at1500).toEqual({ start: "15:00", end: "17:30", available: true });
+    expect(at1600).toEqual({ start: "16:00", end: "18:30", available: false, reason: "exceeds_close" });
+
+    // Sem serviços selecionados (duração 0) não deve retornar nenhum encaixe
+    expect(
+      publicBookingSlotsForDate({
+        date: targetDate,
+        openTime: "09:00",
+        closeTime: "18:00",
+        slotMinutes: 30,
+        durationMin: 0,
+        professionalId: "p-ana",
+        busy,
+        today,
+      }),
+    ).toEqual([]);
   });
 
   it("lê fromMe, status, QR e eventos do webhook da Evolution", () => {
