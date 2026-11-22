@@ -157,10 +157,36 @@ export function asksPrices(text: string) {
   return /(preco|precos|valor|valores|quanto (custa|fica|e|eh)|tabela|servico|servicos)/.test(fold(text));
 }
 
+export function looksLikeBookingConfirmationClaim(text: string): boolean {
+  const q = fold(text);
+  if (!q) return false;
+  // Ignore pure questions asking the client if they want to confirm/book
+  if (
+    /(gostaria de confirmar|quer (que eu )?(confirmar|agendar|marcar|registrar)|deseja (confirmar|agendar|marcar)|posso (confirmar|agendar|marcar|registrar))/.test(
+      q,
+    )
+  ) {
+    return false;
+  }
+  return /(vou (registrar|agendar|marcar|reservar|anotar|confirmar) (o |a |seu |sua |esse |este )?(agendamento|horario|reserva|sessao)|estou (registrando|agendando|marcando|reservando)|(agendamento|horario|reserva) (foi |esta |ta |ficou )?(registrad|criad|confirmad|agendad|marcad|feit|realizad|garantid)[oa]|(agendei|marquei|registrei|reservei|anotei) (o |a |seu |sua |esse |para )?(agendamento|horario|manicure|pedicure|corte|escova|servico|voce|com\b)|ficou (agendad|marcad|registrad|reservad)[oa]|(esta|ta) (agendad|marcad|registrad|reservad)[oa]|agendado pela ia)/.test(
+    q,
+  );
+}
+
 export function matchCatalogService(text: string, services: ReceptionistCatalog["services"]) {
   const q = fold(text);
+  if (!q) return null;
+  const exact = services.find((service) => fold(service.name) === q);
+  if (exact) return exact;
   const sorted = services.slice().sort((a, b) => b.name.length - a.name.length);
-  return sorted.find((service) => fold(service.name).length >= 3 && q.includes(fold(service.name))) ?? null;
+  const fullInText = sorted.find((service) => fold(service.name).length >= 3 && q.includes(fold(service.name)));
+  if (fullInText) return fullInText;
+  // Concise tool/service query (e.g., "manicure" matching unique catalog item "Manicure Tradicional")
+  if (q.length >= 3 && q.split(/\s+/).length <= 4) {
+    const partialMatches = services.filter((service) => fold(service.name).includes(q));
+    if (partialMatches.length === 1) return partialMatches[0];
+  }
+  return null;
 }
 
 export function matchCatalogProfessional(text: string, professionals: ReceptionistCatalog["professionals"]) {
@@ -286,8 +312,8 @@ export function buildReceptionistSystemPrompt(
     bookingMode === "off"
       ? "Você não cria agendamentos automaticamente neste modo; ofereça horários reais e diga que a recepção confirma."
       : bookingMode === "simulate"
-        ? "Você PODE agendar novos horários usando a ferramenta create_appointment (neste ambiente de teste o sistema apenas simula e não grava na agenda real). Sempre confirme serviço(s), data, horário e profissional antes de chamar create_appointment, e informe que o agendamento fica com status 'Agendado pela IA' para conferência da equipe."
-        : "Você PODE agendar novos horários na agenda do salão usando a ferramenta create_appointment. Antes de agendar, certifique-se de ter: serviço(s), data, horário de início (e nome da cliente, se ela ainda não tiver cadastro). Só chame create_appointment quando a cliente confirmar ou pedir explicitamente para marcar aquele horário. Ao concluir, confirme os detalhes reais e avise que o horário ficou registrado como 'Agendado pela IA' para conferência da equipe.";
+        ? "Você PODE agendar novos horários usando a ferramenta create_appointment (neste ambiente de teste o sistema apenas simula e não grava na agenda real). REGRA OBRIGATÓRIA: NUNCA diga que agendou, marcou ou vai registrar sem ANTES chamar create_appointment nesta mesma resposta e receber sucesso. Quando a cliente pedir para agendar ou responder 'sim'/'pode'/'confirmo', chame create_appointment IMEDIATAMENTE antes de responder, e avise que fica com status 'Agendado pela IA' para conferência da equipe."
+        : "Você PODE agendar novos horários na agenda do salão usando a ferramenta create_appointment. REGRA OBRIGATÓRIA: NUNCA diga 'vou registrar', 'vou agendar', 'agendado', 'marcado' ou 'confirmado' sem ANTES executar create_appointment nesta mesma resposta e receber 'AGENDAMENTO CRIADO COM SUCESSO'. Quando a cliente pedir explicitamente para agendar (ex.: 'agende manicure com a Ana hoje às 15h') ou responder 'sim'/'pode'/'ok'/'confirmo' para um horário que você ofereceu, CHAME create_appointment IMEDIATAMENTE nesta resposta antes de escrever o texto final. Se a cliente ainda não tiver nome cadastrado, peça o nome dela antes de finalizar. Ao concluir com sucesso, confirme os detalhes reais e avise que o horário ficou registrado como 'Agendado pela IA' para conferência da equipe.";
   const availabilityBlock = availability ? `\n${formatAvailabilityForPrompt(availability)}` : "";
   return [
     `Você é ${config.name}, recepcionista virtual do salão ${catalog.salon}.`,

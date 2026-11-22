@@ -108,6 +108,7 @@ export async function chatAsReceptionist(params: {
   history?: { role: "user" | "assistant"; text: string }[];
   tools?: OpenAI.Chat.Completions.ChatCompletionTool[];
   onToolCall?: (name: string, args: Record<string, unknown>) => Promise<string>;
+  validateResponse?: (text: string, meta: { calledTools: string[] }) => string | null;
   maxToolRounds?: number;
 }) {
   const client = createOpenAI(params.apiKey);
@@ -134,7 +135,10 @@ export async function chatAsReceptionist(params: {
     return text || null;
   }
 
-  const maxRounds = Math.min(3, Math.max(1, params.maxToolRounds ?? 3));
+  const maxRounds = Math.min(5, Math.max(1, params.maxToolRounds ?? 4));
+  const calledTools: string[] = [];
+  let validationRetriesLeft = 1;
+
   for (let round = 0; round < maxRounds; round++) {
     const completion = await client.chat.completions.create({
       model: "gpt-4o-mini",
@@ -150,6 +154,15 @@ export async function chatAsReceptionist(params: {
     const toolCalls = message.tool_calls ?? [];
     if (!toolCalls.length) {
       const text = message.content?.trim() ?? "";
+      if (text && params.validateResponse && validationRetriesLeft > 0) {
+        const correction = params.validateResponse(text, { calledTools });
+        if (correction) {
+          validationRetriesLeft -= 1;
+          messages.push({ role: "assistant", content: text });
+          messages.push({ role: "system", content: correction });
+          continue;
+        }
+      }
       return text || null;
     }
 
@@ -161,6 +174,7 @@ export async function chatAsReceptionist(params: {
 
     for (const toolCall of toolCalls.slice(0, 4)) {
       if (toolCall.type !== "function") continue;
+      calledTools.push(toolCall.function.name);
       let parsedArgs: Record<string, unknown> = {};
       try {
         const raw = JSON.parse(toolCall.function.arguments || "{}");

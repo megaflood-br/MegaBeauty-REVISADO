@@ -144,7 +144,9 @@ import {
   asksPrices,
   buildReceptionistSystemPrompt,
   localReceptionistReply,
+  looksLikeBookingConfirmationClaim,
   matchCatalogProfessional,
+  matchCatalogService,
   normalizeReceptionist,
   resolveAvailabilityIntentFromMessages,
   wantsCancelOrReschedule,
@@ -1720,6 +1722,29 @@ describe("recepcionista virtual", () => {
     });
     expect(swapReply.handover).toBe(true);
     expect(swapReply.text).toMatch(/equipe/i);
+
+    // Detecta falsas confirmações da IA quando a ferramenta create_appointment não foi chamada
+    expect(
+      looksLikeBookingConfirmationClaim(
+        "O horário de 15:00 com a Ana Clara está disponível. Vou registrar seu agendamento! 😊",
+      ),
+    ).toBe(true);
+    expect(looksLikeBookingConfirmationClaim("Prontinho! Seu agendamento foi confirmado com a Ana Clara às 15:00.")).toBe(true);
+    expect(looksLikeBookingConfirmationClaim("Agendei Manicure com a Ana Clara hoje às 15:00.")).toBe(true);
+    expect(
+      looksLikeBookingConfirmationClaim(
+        "A Ana Clara tem horário disponível para manicure às 15:00. Você gostaria de confirmar esse agendamento? 😊",
+      ),
+    ).toBe(false);
+    expect(looksLikeBookingConfirmationClaim("A Ana Clara tem horário livre às 15:00 hoje.")).toBe(false);
+
+    // Casa nome conciso de serviço único no catálogo (ex.: "manicure" -> "Manicure Tradicional")
+    const manicureCatalog = [
+      { name: "Manicure Tradicional", durationMin: 45, price: "R$ 45,00", professionals: ["Ana Clara"] },
+      { name: "Escova", durationMin: 45, price: "R$ 80,00", professionals: ["Camila Ferreira"] },
+    ];
+    expect(matchCatalogService("manicure", manicureCatalog)?.name).toBe("Manicure Tradicional");
+    expect(matchCatalogService("Manicure Tradicional", manicureCatalog)?.name).toBe("Manicure Tradicional");
   });
 
   it("interpreta datas futuras em português até 60 dias e rejeita datas inválidas ou fora da janela", () => {

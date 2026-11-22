@@ -38,6 +38,7 @@ import {
   buildReceptionistSystemPrompt,
   formatServicePrice,
   localReceptionistReply,
+  looksLikeBookingConfirmationClaim,
   matchCatalogProfessional,
   matchCatalogService,
   normalizeReceptionist,
@@ -233,6 +234,7 @@ export async function queryReceptionistAvailability(input: {
       where: { tenantId: input.tenantId, active: true },
       orderBy: { name: "asc" },
       select: {
+        id: true,
         name: true,
         durationMin: true,
         priceCents: true,
@@ -242,7 +244,15 @@ export async function queryReceptionistAvailability(input: {
     prisma.professional.findMany({
       where: { tenantId: input.tenantId, active: true, generateAgenda: true },
       orderBy: { name: "asc" },
-      select: { id: true, name: true, nickname: true, specialty: true, workStart: true, workEnd: true },
+      select: {
+        id: true,
+        name: true,
+        nickname: true,
+        specialty: true,
+        workStart: true,
+        workEnd: true,
+        serviceLinks: { select: { serviceId: true } },
+      },
     }),
     prisma.appointment.findMany({
       where: {
@@ -256,6 +266,7 @@ export async function queryReceptionistAvailability(input: {
   ]);
 
   const catalogServices = services.map((service) => ({
+    id: service.id,
     name: service.name,
     durationMin: service.durationMin,
     price: formatServicePrice(service.priceCents),
@@ -275,9 +286,11 @@ export async function queryReceptionistAvailability(input: {
     : clampDurationMin(input.durationMin, slotMinutes);
 
   let eligible = professionals;
-  if (matchedServiceFull && matchedServiceFull.professionalIds.length > 0) {
-    const allowedIds = new Set(matchedServiceFull.professionalIds);
-    eligible = eligible.filter((prof) => allowedIds.has(prof.id));
+  if (matchedServiceFull) {
+    eligible = eligible.filter((prof) => {
+      if (prof.serviceLinks.length === 0) return true;
+      return prof.serviceLinks.some((link) => link.serviceId === matchedServiceFull.id);
+    });
   }
 
   if (input.professionalName) {
@@ -415,6 +428,16 @@ function phoneVariants(phone: string) {
     variants.add(digits.slice(2));
   } else if (digits.length === 10 || digits.length === 11) {
     variants.add(`55${digits}`);
+  }
+  const local = digits.startsWith("55") && digits.length >= 12 ? digits.slice(2) : digits;
+  if (local.length === 11 && local[2] === "9") {
+    const withoutNine = `${local.slice(0, 2)}${local.slice(3)}`;
+    variants.add(withoutNine);
+    variants.add(`55${withoutNine}`);
+  } else if (local.length === 10) {
+    const withNine = `${local.slice(0, 2)}9${local.slice(2)}`;
+    variants.add(withNine);
+    variants.add(`55${withNine}`);
   }
   return Array.from(variants);
 }
@@ -575,9 +598,24 @@ export async function createReceptionistAppointment(input: {
   }
 
   if (missingServices.length || !matchedServices.length) {
+    const foldText = (v: string) =>
+      v
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .toLowerCase()
+        .trim();
+    const suggestions = missingServices
+      .flatMap((raw) => {
+        const q = foldText(raw);
+        return q.length >= 3 ? catalogServices.filter((s) => foldText(s.name).includes(q)).map((s) => s.name) : [];
+      })
+      .filter((v, i, arr) => arr.indexOf(v) === i);
+    const suggestionHint = suggestions.length
+      ? ` Opções semelhantes no catálogo: ${suggestions.join(", ")}.`
+      : ` Serviços ativos: ${catalogServices.slice(0, 12).map((s) => s.name).join(", ")}.`;
     return {
       ok: false,
-      error: `Serviço não encontrado no catálogo ativo: ${missingServices.join(", ") || "nenhum"}. Confirme o serviço exato do catálogo com a cliente.`,
+      error: `Serviço não encontrado ou ambíguo no catálogo ativo: ${missingServices.join(", ") || "nenhum"}.${suggestionHint} Confirme o nome exato do serviço com a cliente.`,
     };
   }
 
@@ -910,6 +948,9 @@ export async function generateReceptionistReply(input: {
     : undefined;
 
   let bookedAppointmentId: string | null = null;
+  let createAppointmentSucceeded = false;
+  let lastBookingError: string | null = null;
+  let lastBookingNeedsClientName = false;
 
   try {
     const openai = await chatAsReceptionist({
@@ -921,6 +962,15 @@ export async function generateReceptionistReply(input: {
       incoming: input.incoming,
       history: input.history,
       tools,
+      validateResponse:
+        input.tenantId && bookingMode !== "off"
+          ? (text) => {
+              if (!createAppointmentSucceeded && looksLikeBookingConfirmationClaim(text)) {
+                return "ERRO INTERNO: Você respondeu como se tivesse agendado ou fosse registrar o horário, mas NÃO executou create_appointment com sucesso! Chame a ferramenta create_appointment AGORA com date, time, serviceNames, professionalName (e clientName se conhecido/informado) antes de responder à cliente. Se faltar algum dado (por exemplo, o nome da cliente sem cadastro ou qual variação do serviço), pergunte esse dado à cliente em vez de dizer que agendou ou que vai registrar.";
+              }
+              return null;
+            }
+          : undefined,
       onToolCall: input.tenantId
         ? async (name, args) => {
             if (name === "check_availability") {
@@ -964,11 +1014,16 @@ export async function generateReceptionistReply(input: {
                 dryRun: bookingMode === "simulate",
               });
               if (bookingResult.ok) {
+                createAppointmentSucceeded = true;
+                lastBookingError = null;
+                lastBookingNeedsClientName = false;
                 if (bookingResult.appointmentId) {
                   bookedAppointmentId = bookingResult.appointmentId;
                 }
                 return bookingResult.message;
               }
+              lastBookingError = bookingResult.error;
+              lastBookingNeedsClientName = Boolean(bookingResult.needsClientName);
               return `NÃO FOI POSSÍVEL AGENDAR: ${bookingResult.error}`;
             }
 
@@ -976,9 +1031,20 @@ export async function generateReceptionistReply(input: {
           }
         : undefined,
     });
-    if (openai) return { text: openai.slice(0, 700), handover: false, source: "openai" as const, bookedAppointmentId };
-  } catch {
-    // fallback local
+    if (openai) {
+      // Hard safety net: never send a false booking confirmation if create_appointment did not succeed
+      if (input.tenantId && bookingMode !== "off" && !createAppointmentSucceeded && looksLikeBookingConfirmationClaim(openai)) {
+        const safeFallback = lastBookingNeedsClientName
+          ? "Para eu concluir o seu agendamento na agenda, qual é o seu nome completo?"
+          : lastBookingError
+            ? `Ainda não consegui registrar o horário: ${lastBookingError}`
+            : "Para eu registrar o seu agendamento agora na agenda, me confirme por favor o serviço, o dia, o horário e o seu nome.";
+        return { text: safeFallback.slice(0, 700), handover: false, source: "openai" as const, bookedAppointmentId };
+      }
+      return { text: openai.slice(0, 700), handover: false, source: "openai" as const, bookedAppointmentId };
+    }
+  } catch (err) {
+    console.error("[receptionist] openai error:", err);
   }
   return { text: local.text, handover: false, source: "local" as const, bookedAppointmentId };
 }
@@ -1004,18 +1070,20 @@ export async function maybeReplyAsReceptionist(input: {
   if (!conversation.messages.some((row) => row.direction === "IN")) return { skipped: "receptive" as const };
 
   const lastOut = conversation.messages.find((row) => row.direction === "OUT");
-  if (isConfirmReply(input.incoming) && lastOut && looksLikeReminderPrompt(lastOut.body)) {
-    await confirmNextAppointment(input.tenantId, conversation.clientId, conversation.phone);
-    const text = spin("{Recebi|Combinado|Fechado}! Horário confirmado, te esperamos.");
-    await sendSalonWhatsApp({ tenantId: input.tenantId, phone: input.phone, text, presence: true }).catch(() => null);
-    await prisma.message.create({
-      data: { conversationId: conversation.id, direction: "OUT", body: text, source: "BOT" },
-    });
-    await prisma.conversation.update({
-      where: { id: conversation.id },
-      data: { lastMessageAt: new Date() },
-    });
-    return { skipped: null, handover: false, source: "local" as const };
+  if (isConfirmReply(input.incoming) && lastOut && lastOut.source !== "BOT" && looksLikeReminderPrompt(lastOut.body)) {
+    const confirmed = await confirmNextAppointment(input.tenantId, conversation.clientId, conversation.phone);
+    if (confirmed) {
+      const text = spin("{Recebi|Combinado|Fechado}! Horário confirmado, te esperamos.");
+      await sendSalonWhatsApp({ tenantId: input.tenantId, phone: input.phone, text, presence: true }).catch(() => null);
+      await prisma.message.create({
+        data: { conversationId: conversation.id, direction: "OUT", body: text, source: "BOT" },
+      });
+      await prisma.conversation.update({
+        where: { id: conversation.id },
+        data: { lastMessageAt: new Date() },
+      });
+      return { skipped: null, handover: false, source: "local" as const };
+    }
   }
 
   const catalog = await loadReceptionistCatalog(input.tenantId);
@@ -1069,16 +1137,18 @@ export async function maybeReplyAsReceptionist(input: {
   };
 }
 
-async function confirmNextAppointment(tenantId: string, clientId: string | null, phone: string) {
+async function confirmNextAppointment(tenantId: string, clientId: string | null, phone: string): Promise<boolean> {
   let id = clientId;
   if (!id) {
+    const variants = phoneVariants(phone);
+    if (!variants.length) return false;
     const client = await prisma.client.findFirst({
-      where: { tenantId, phone: phone.replace(/\D/g, "") },
+      where: { tenantId, phone: { in: variants } },
       select: { id: true },
     });
     id = client?.id ?? null;
   }
-  if (!id) return;
+  if (!id) return false;
   const next = await prisma.appointment.findFirst({
     where: {
       tenantId,
@@ -1089,11 +1159,12 @@ async function confirmNextAppointment(tenantId: string, clientId: string | null,
     orderBy: { startAt: "asc" },
     select: { id: true },
   });
-  if (!next) return;
+  if (!next) return false;
   await prisma.appointment.update({
     where: { id: next.id },
     data: { status: "CONFIRMED" },
   });
+  return true;
 }
 
 /**
