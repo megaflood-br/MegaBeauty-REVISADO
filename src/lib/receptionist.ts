@@ -58,7 +58,14 @@ export type ReceptionistCatalog = {
   nowHHmm?: string;
   slotMinutes?: number;
   services: { name: string; durationMin: number; price: string; professionals: string[] }[];
-  professionals: { name: string; nickname: string | null; specialty: string | null; today: string[]; tomorrow: string[] }[];
+  professionals: {
+    name: string;
+    nickname: string | null;
+    specialty: string | null;
+    services?: string[];
+    today: string[];
+    tomorrow: string[];
+  }[];
 };
 
 export type ReceptionistHistoryItem = { role: "user" | "assistant"; text: string };
@@ -221,9 +228,184 @@ export function looksLikeBookingConfirmationClaim(text: string): boolean {
   ) {
     return false;
   }
-  return /(vou (registrar|agendar|marcar|reservar|anotar|confirmar) (o |a |seu |sua |esse |este )?(agendamento|horario|reserva|sessao)|estou (registrando|agendando|marcando|reservando)|(agendamento|horario|reserva) (foi |esta |ta |ficou )?(registrad|criad|confirmad|agendad|marcad|feit|realizad|garantid)[oa]|(agendei|marquei|registrei|reservei|anotei) (o |a |seu |sua |esse |para )?(agendamento|horario|manicure|pedicure|corte|escova|servico|voce|com\b)|ficou (agendad|marcad|registrad|reservad)[oa]|(esta|ta) (agendad|marcad|registrad|reservad)[oa])/.test(
+  return /(vou (registrar|agendar|marcar|reservar|anotar|confirmar) (o |a |seu |sua |esse |este )?(agendamento|horario|reserva|sessao)|estou (registrando|agendando|marcando|reservando)|(agendamento|horario|reserva) (foi |esta |ta |ficou )?(registrad|criad|confirmad|agendad|marcad|feit|realizad|garantid)[oa]|\b(agendamento|horario|reserva)\b[^?.!]{0,90}\b(foi|ficou)\s+(registrad|criad|confirmad|agendad|marcad|feit|realizad|garantid)[oa]|(agendei|marquei|registrei|reservei|anotei) (o |a |seu |sua |esse |para )?(agendamento|horario|manicure|pedicure|corte|escova|servico|voce|com\b)|ficou (agendad|marcad|registrad|reservad)[oa]|(esta|ta) (agendad|marcad|registrad|reservad)[oa])/.test(
     q,
   );
+}
+
+/**
+ * Returns only the turns AFTER the last completed booking confirmation in history,
+ * preventing services/times/professionals from a previous finished booking from leaking
+ * into a brand new booking request.
+ */
+export function sliceActiveBookingHistory(history?: ReceptionistHistoryItem[]): ReceptionistHistoryItem[] {
+  if (!history?.length) return [];
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    if (history[i].role === "assistant" && looksLikeBookingConfirmationClaim(history[i].text)) {
+      return history.slice(i + 1);
+    }
+  }
+  return history;
+}
+
+export function isAffirmativeBookingReply(text: string): boolean {
+  const q = fold(text);
+  if (!q) return false;
+  if (/\b(nao|nunca|prefiro\s+outro|prefiro\s+outra|outro\s+servico|outra\s+coisa)\b/.test(q)) {
+    return false;
+  }
+  return /(^|\b)(sim|pode(\s+(ser|agendar|marcar|confirmar|fazer))?|quero|isso|esse|essa|claro|fechado|combinado|confirmo|confirmado|ok|beleza|bora|perfeito|com\s+certeza|ta\s+bom|tudo\s+bem|por\s+favor)(\b|$)/.test(
+    q,
+  );
+}
+
+const SERVICE_TOKEN_STOPWORDS = new Set([
+  "para",
+  "pelo",
+  "pela",
+  "pelos",
+  "pelas",
+  "com",
+  "sem",
+  "mais",
+  "hoje",
+  "amanha",
+  "hora",
+  "horas",
+  "tarde",
+  "manha",
+  "noite",
+  "quero",
+  "pode",
+  "agendar",
+  "agende",
+  "marcar",
+  "marque",
+  "horario",
+  "horarios",
+  "fazer",
+  "atendimento",
+  "servico",
+  "servicos",
+  "simples",
+  "completa",
+  "completo",
+  "tradicional",
+  "feminino",
+  "feminina",
+  "masculino",
+  "masculina",
+  "express",
+]);
+
+function escapeRegex(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function textMentionsCatalogService(
+  text: string,
+  target: ReceptionistCatalog["services"][number],
+  allServices: ReceptionistCatalog["services"],
+): boolean {
+  const q = fold(text);
+  const name = fold(target.name);
+  if (!q || !name) return false;
+  if (name.length >= 3 && q.includes(name)) return true;
+  if (matchCatalogService(text, allServices)?.name === target.name) return true;
+
+  // Match distinctive whole-word tokens from multi-word service names (e.g., "limpeza" for "Limpeza de Pele")
+  const tokens = name
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length >= 4 && !SERVICE_TOKEN_STOPWORDS.has(token));
+  for (const token of tokens) {
+    if (new RegExp(`\\b${escapeRegex(token)}\\b`).test(q)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Returns the professional explicitly requested by the client in the current active booking window
+ * (prioritizing the current incoming message over older turns).
+ */
+export function findActiveRequestedProfessional(input: {
+  incoming: string;
+  history?: ReceptionistHistoryItem[];
+  professionals: ReceptionistCatalog["professionals"];
+}) {
+  const fromIncoming = matchCatalogProfessional(input.incoming, input.professionals);
+  if (fromIncoming) return fromIncoming;
+
+  const activeHistory = sliceActiveBookingHistory(input.history);
+  for (let i = activeHistory.length - 1; i >= 0; i -= 1) {
+    const item = activeHistory[i];
+    if (item.role !== "user") continue;
+    const match = matchCatalogProfessional(item.text, input.professionals);
+    if (match) return match;
+  }
+  return null;
+}
+
+/**
+ * Verifies that the client actually mentioned or affirmatively confirmed `serviceName`
+ * in the active booking window (after any prior completed booking), preventing the AI
+ * from guessing a service or reusing a service from an earlier booking/professional.
+ */
+export function hasClientConfirmedServiceInTurn(input: {
+  serviceName: string;
+  incoming: string;
+  history?: ReceptionistHistoryItem[];
+  catalogServices: ReceptionistCatalog["services"];
+  professionals?: ReceptionistCatalog["professionals"];
+  activeProfessionalName?: string | null;
+}): boolean {
+  const target = matchCatalogService(input.serviceName, input.catalogServices);
+  if (!target) return false;
+
+  if (textMentionsCatalogService(input.incoming, target, input.catalogServices)) {
+    return true;
+  }
+
+  const activeHistory = sliceActiveBookingHistory(input.history);
+  const lastAssistant = [...activeHistory].reverse().find((item) => item.role === "assistant");
+  const incomingProf = input.professionals?.length
+    ? matchCatalogProfessional(input.incoming, input.professionals)
+    : null;
+
+  // Client replied affirmatively ("sim", "pode ser", "quero") after assistant proposed this service
+  if (lastAssistant && isAffirmativeBookingReply(input.incoming)) {
+    if (textMentionsCatalogService(lastAssistant.text, target, input.catalogServices)) {
+      return true;
+    }
+  }
+
+  // Client picked a professional offered by the assistant for this service (e.g. "Com a Aline então")
+  if (lastAssistant && incomingProf && input.professionals?.length) {
+    const assistantMentionsService = textMentionsCatalogService(lastAssistant.text, target, input.catalogServices);
+    const assistantMentionsProf = matchCatalogProfessional(lastAssistant.text, [incomingProf]) !== null;
+    if (assistantMentionsService && assistantMentionsProf) {
+      return true;
+    }
+  }
+
+  // Check prior user turns in the active window without crossing a switch from a different professional
+  const targetProfName = incomingProf?.name ?? input.activeProfessionalName ?? null;
+  for (let i = activeHistory.length - 1; i >= 0; i -= 1) {
+    const item = activeHistory[i];
+    if (item.role !== "user") continue;
+    if (targetProfName && input.professionals?.length) {
+      const msgProf = matchCatalogProfessional(item.text, input.professionals);
+      if (msgProf && msgProf.name !== targetProfName) {
+        break;
+      }
+    }
+    if (textMentionsCatalogService(item.text, target, input.catalogServices)) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 export function matchCatalogService(text: string, services: ReceptionistCatalog["services"]) {
@@ -261,8 +443,8 @@ export function matchCatalogProfessional(text: string, professionals: Receptioni
 
 /**
  * Extracts target date, service, professional, and duration from the incoming message,
- * falling back to recent client turns in `history` so follow-ups like "e dia 28?" preserve
- * the previously requested service (e.g., a 3-hour procedure).
+ * falling back to recent client turns in the active booking window (never across a completed
+ * booking confirmation and never inheriting an incompatible service from another professional).
  */
 export function resolveAvailabilityIntentFromMessages(input: {
   incoming: string;
@@ -273,8 +455,9 @@ export function resolveAvailabilityIntentFromMessages(input: {
   const refDate = input.referenceDate ?? input.catalog.todayDate;
   const incomingDate = parseRequestedDate(input.incoming, refDate);
   const incomingTime = parseRequestedTime(input.incoming);
+  const incomingProf = matchCatalogProfessional(input.incoming, input.catalog.professionals);
   let service = matchCatalogService(input.incoming, input.catalog.services);
-  let professional = matchCatalogProfessional(input.incoming, input.catalog.professionals);
+  let professional = incomingProf;
   let explicitDurationMin = parseExplicitDurationMin(input.incoming);
   let dateMatch = incomingDate;
   let requestedTime = incomingTime;
@@ -283,7 +466,8 @@ export function resolveAvailabilityIntentFromMessages(input: {
   const asksForSlots = !asksOwn && (asksAvailability(input.incoming) || incomingDate !== null || incomingTime !== null);
   const asksForPrices = asksPrices(input.incoming);
 
-  const recentUserMessages = (input.history ?? [])
+  const activeHistory = sliceActiveBookingHistory(input.history);
+  const recentUserMessages = activeHistory
     .filter((item) => item.role === "user" && item.text.trim())
     .slice(-4)
     .reverse();
@@ -291,13 +475,24 @@ export function resolveAvailabilityIntentFromMessages(input: {
   // Only inherit context from prior turns when the current turn is clearly continuing a scheduling query
   if (!asksOwn && (asksForSlots || service || professional || explicitDurationMin)) {
     for (const msg of recentUserMessages) {
-      if (!service) {
-        service = matchCatalogService(msg.text, input.catalog.services);
+      const msgProf = matchCatalogProfessional(msg.text, input.catalog.professionals);
+      const switchedProfessional = Boolean(incomingProf && msgProf && msgProf.name !== incomingProf.name);
+
+      if (!service && !switchedProfessional) {
+        const candidateService = matchCatalogService(msg.text, input.catalog.services);
+        if (candidateService) {
+          const allowedByIncomingProf =
+            !incomingProf?.services?.length ||
+            incomingProf.services.some((allowed) => fold(allowed) === fold(candidateService.name));
+          if (allowedByIncomingProf) {
+            service = candidateService;
+          }
+        }
       }
       if (!professional) {
-        professional = matchCatalogProfessional(msg.text, input.catalog.professionals);
+        professional = msgProf;
       }
-      if (!explicitDurationMin && !service) {
+      if (!explicitDurationMin && !service && !switchedProfessional) {
         explicitDurationMin = parseExplicitDurationMin(msg.text);
       }
       if (!dateMatch && (service || professional || requestedTime) && !asksForPrices) {
@@ -390,6 +585,7 @@ export function buildReceptionistSystemPrompt(
     "IMPORTANTE SOBRE FAIXAS DE HORÁRIOS: uma faixa contínua como '13:30 até 18:00' significa que TODOS os horários de início dentro desse intervalo (ex.: 13:30, 14:00, 14:30, 15:00, ..., 18:00) estão LIVRES. NUNCA diga que um horário dentro de uma faixa livre está indisponível e NUNCA se contradiga.",
     "Se a consulta mostrar 'HORÁRIO PERGUNTADO HH:mm: DISPONÍVEL', confirme claramente que esse horário está livre. Só diga que um horário está indisponível se a consulta mostrar explicitamente que ele está ocupado ou indisponível.",
     bookingRule,
+    "REGRA DE SERVIÇO E PROFISSIONAL: NUNCA adivinhe um serviço nem reutilize o serviço de um agendamento anterior quando a cliente pedir para agendar com uma profissional sem dizer qual serviço deseja (ex.: 'agende com a Sandy'). Se a cliente não informou qual serviço quer neste pedido, PERGUNTE qual serviço ela deseja, listando apenas os serviços que essa profissional realmente realiza. NUNCA agende um serviço que a profissional não realiza e NUNCA troque a profissional escolhida pela cliente sem confirmação dela.",
     "REGRA ESTRITA: você NUNCA pode cancelar, desmarcar, trocar, remarcar ou alterar agendamentos já existentes. Se a cliente pedir cancelamento, troca ou remarcação, diga educadamente que vai passar para alguém da equipe do salão cuidar disso.",
     "Não revele dados de outras clientes, faturamento, estoque ou informações internas.",
     "Se pedirem uma pessoa da equipe, diga que vai chamar a recepção.",
@@ -425,7 +621,8 @@ export function formatReceptionistCatalog(catalog: ReceptionistCatalog) {
             ? `amanhã ${formatAvailabilitySlots(row.tomorrow, slotMinutes)}`
             : "amanhã sem vaga";
           const specialty = row.specialty ? ` (${row.specialty})` : "";
-          return `- ${row.name}${specialty}: ${today}; ${tomorrow}`;
+          const allowedServices = row.services?.length ? ` · realiza apenas: ${row.services.join(", ")}` : "";
+          return `- ${row.name}${specialty}${allowedServices}: ${today}; ${tomorrow}`;
         })
         .join("\n")
     : "- nenhuma profissional ativa";
@@ -434,7 +631,7 @@ export function formatReceptionistCatalog(catalog: ReceptionistCatalog) {
     `Horário: ${catalog.hours}`,
     "Serviços:",
     services,
-    `Profissionais e faixas contínuas de horários de início livres (cada faixa 'A até B' inclui TODOS os horários a cada ${slotMinutes} min de A até B; use check_availability para outras datas, horários específicos ou encaixe exato por duração):`,
+    `Profissionais e faixas contínuas de horários de início livres (cada faixa 'A até B' inclui TODOS os horários a cada ${slotMinutes} min de A até B; respeite rigorosamente os serviços que cada profissional realiza; use check_availability para outras datas, horários específicos ou encaixe exato por duração):`,
     team,
   ].join("\n");
 }

@@ -919,4 +919,64 @@ describe("isolamento multi-tenant automático no Prisma", () => {
       }
     }
   });
+
+  it("bloqueia agendamento de serviço que a profissional não realiza e lista os serviços reais dela no catálogo e no erro", async () => {
+    const aurora = await unscopedPrisma.tenant.findUnique({ where: { slug: "studio-aurora" } });
+    expect(aurora).toBeTruthy();
+
+    const [services, prof] = await Promise.all([
+      unscopedPrisma.service.findMany({
+        where: { tenantId: aurora!.id, active: true },
+        orderBy: { name: "asc" },
+        take: 2,
+      }),
+      unscopedPrisma.professional.findFirst({
+        where: { tenantId: aurora!.id, active: true, generateAgenda: true },
+        orderBy: { name: "asc" },
+      }),
+    ]);
+    expect(services.length).toBeGreaterThanOrEqual(2);
+    expect(prof).toBeTruthy();
+
+    const [allowedSvc, forbiddenSvc] = services;
+    const targetDay = shiftCalendarDate(calendarDate(), 22);
+    const originalLinks = await unscopedPrisma.professionalService.findMany({
+      where: { professionalId: prof!.id },
+    });
+
+    // Restringe a profissional exclusivamente ao primeiro serviço
+    await unscopedPrisma.professionalService.deleteMany({ where: { professionalId: prof!.id } });
+    await unscopedPrisma.professionalService.create({
+      data: { professionalId: prof!.id, serviceId: allowedSvc.id },
+    });
+
+    try {
+      const catalog = await loadReceptionistCatalog(aurora!.id);
+      const profInCatalog = catalog.professionals.find((p) => p.name === prof!.name);
+      expect(profInCatalog?.services).toEqual([allowedSvc.name]);
+
+      const rejected = await createReceptionistAppointment({
+        tenantId: aurora!.id,
+        date: targetDay,
+        time: "15:00",
+        serviceNames: [forbiddenSvc.name],
+        professionalName: prof!.name,
+        clientName: "Cliente Teste",
+        phone: "5511966665544",
+      });
+      expect(rejected.ok).toBe(false);
+      if (!rejected.ok) {
+        expect(rejected.error).toContain(prof!.name);
+        expect(rejected.error).toContain(forbiddenSvc.name);
+        expect(rejected.error).toContain(allowedSvc.name);
+      }
+    } finally {
+      await unscopedPrisma.professionalService.deleteMany({ where: { professionalId: prof!.id } });
+      if (originalLinks.length) {
+        await unscopedPrisma.professionalService.createMany({
+          data: originalLinks.map((l) => ({ professionalId: l.professionalId, serviceId: l.serviceId })),
+        });
+      }
+    }
+  });
 });

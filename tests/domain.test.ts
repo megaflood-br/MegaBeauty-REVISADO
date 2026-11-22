@@ -144,13 +144,17 @@ import {
   asksOwnAppointments,
   asksPrices,
   buildReceptionistSystemPrompt,
+  findActiveRequestedProfessional,
   formatClientAppointmentsForPrompt,
+  formatReceptionistCatalog,
+  hasClientConfirmedServiceInTurn,
   localReceptionistReply,
   looksLikeBookingConfirmationClaim,
   matchCatalogProfessional,
   matchCatalogService,
   normalizeReceptionist,
   resolveAvailabilityIntentFromMessages,
+  sliceActiveBookingHistory,
   wantsCancelOrReschedule,
   wantsHumanHandover,
 } from "@/lib/receptionist";
@@ -1797,6 +1801,166 @@ describe("recepcionista virtual", () => {
     expect(ownPromptBlock).toContain("HOJE");
     expect(ownPromptBlock).toContain("15:00");
     expect(ownPromptBlock).toContain("Agendado pela IA");
+  });
+
+  it("nunca herda serviço de agendamento anterior nem adivinha serviço incompatível ao agendar com outra profissional", () => {
+    const renoveCatalog = {
+      salon: "Renove Estética e Bem Estar",
+      city: "Atibaia",
+      hours: "09:00 às 19:00",
+      todayDate: "2026-11-22",
+      slotMinutes: 15,
+      services: [
+        { name: "Limpeza de Pele", durationMin: 60, price: "R$ 150,00", professionals: ["Sandy Alexandrino"] },
+        { name: "Manicure", durationMin: 45, price: "R$ 45,00", professionals: ["Aline"] },
+      ],
+      professionals: [
+        {
+          name: "Aline",
+          nickname: null,
+          specialty: "Manicure, Eyes Designer",
+          services: ["Manicure"],
+          today: ["15:00", "16:00"],
+          tomorrow: ["10:00"],
+        },
+        {
+          name: "Sandy Alexandrino",
+          nickname: "Sandy",
+          specialty: "Esteticista",
+          services: ["Limpeza de Pele"],
+          today: ["16:00", "17:00"],
+          tomorrow: ["11:00"],
+        },
+      ],
+    };
+
+    // 1. Catálogo formatado e prompt exibem explicitamente os serviços que cada profissional realiza
+    const catalogText = formatReceptionistCatalog(renoveCatalog);
+    expect(catalogText).toContain("Sandy Alexandrino (Esteticista) · realiza apenas: Limpeza de Pele");
+    expect(catalogText).toContain("Aline (Manicure, Eyes Designer) · realiza apenas: Manicure");
+
+    const prompt = buildReceptionistSystemPrompt({ ...DEFAULT_RECEPTIONIST, name: "Luna" }, renoveCatalog);
+    expect(prompt).toContain("NUNCA adivinhe um serviço nem reutilize o serviço de um agendamento anterior");
+    expect(prompt).toContain("Sandy Alexandrino (Esteticista) · realiza apenas: Limpeza de Pele");
+
+    // 2. Confirmação longa do agendamento anterior encerra o turno anterior
+    const priorBookingHistory = [
+      { role: "user" as const, text: "Agende manicure com a aline hoje as 15hs" },
+      { role: "assistant" as const, text: "Preciso do seu nome para agendar a manicure com a Aline às 15:00. Qual é o seu nome?" },
+      { role: "user" as const, text: "Carlos" },
+      {
+        role: "assistant" as const,
+        text: "Seu agendamento de manicure com a Aline hoje às 15:00 foi registrado com sucesso! 😊 Qualquer dúvida, estou aqui.",
+      },
+    ];
+    expect(looksLikeBookingConfirmationClaim(priorBookingHistory[3].text)).toBe(true);
+    expect(sliceActiveBookingHistory(priorBookingHistory)).toEqual([]);
+
+    // 3. Ao pedir "Agende com a Sandy hoje às 16h" logo depois, NÃO herda "Manicure" da Aline
+    const sandyIntent = resolveAvailabilityIntentFromMessages({
+      incoming: "Agende com a Sandy hoje às 16h",
+      history: priorBookingHistory,
+      catalog: renoveCatalog,
+      referenceDate: "2026-11-22",
+    });
+    expect(sandyIntent.professional?.name).toBe("Sandy Alexandrino");
+    expect(sandyIntent.service).toBeNull();
+    expect(sandyIntent.requestedTime).toBe("16:00");
+
+    // 4. Guarda de serviço bloqueia tanto "Manicure" (vazado do turno anterior) quanto "Limpeza de Pele" (não pedido ainda)
+    expect(
+      hasClientConfirmedServiceInTurn({
+        serviceName: "Manicure",
+        incoming: "Agende com a Sandy hoje às 16h",
+        history: priorBookingHistory,
+        catalogServices: renoveCatalog.services,
+        professionals: renoveCatalog.professionals,
+        activeProfessionalName: "Sandy Alexandrino",
+      }),
+    ).toBe(false);
+    expect(
+      hasClientConfirmedServiceInTurn({
+        serviceName: "Limpeza de Pele",
+        incoming: "Agende com a Sandy hoje às 16h",
+        history: priorBookingHistory,
+        catalogServices: renoveCatalog.services,
+        professionals: renoveCatalog.professionals,
+        activeProfessionalName: "Sandy Alexandrino",
+      }),
+    ).toBe(false);
+
+    // 5. Mesmo sem confirmação anterior, trocar de Aline para Sandy NÃO vaza "Manicure"
+    const switchedProfHistory = [
+      { role: "user" as const, text: "A Aline tem horário para manicure hoje?" },
+      { role: "assistant" as const, text: "A Aline tem horários hoje às 15:00 e 16:00." },
+    ];
+    expect(
+      resolveAvailabilityIntentFromMessages({
+        incoming: "Quero agendar com a Sandy hoje às 16h",
+        history: switchedProfHistory,
+        catalog: renoveCatalog,
+        referenceDate: "2026-11-22",
+      }).service,
+    ).toBeNull();
+    expect(
+      hasClientConfirmedServiceInTurn({
+        serviceName: "Manicure",
+        incoming: "Quero agendar com a Sandy hoje às 16h",
+        history: switchedProfHistory,
+        catalogServices: renoveCatalog.services,
+        professionals: renoveCatalog.professionals,
+        activeProfessionalName: "Sandy Alexandrino",
+      }),
+    ).toBe(false);
+
+    // 6. Depois que a IA pergunta e a cliente confirma ("Sim" ou "Pode ser limpeza"), a guarda libera "Limpeza de Pele" com Sandy
+    const afterBotAskedHistory = [
+      ...priorBookingHistory,
+      { role: "user" as const, text: "Agende com a Sandy hoje às 16h" },
+      {
+        role: "assistant" as const,
+        text: "A Sandy realiza Limpeza de Pele. Você gostaria de agendar Limpeza de Pele com a Sandy hoje às 16:00?",
+      },
+    ];
+    expect(
+      findActiveRequestedProfessional({
+        incoming: "Sim, pode ser",
+        history: afterBotAskedHistory,
+        professionals: renoveCatalog.professionals,
+      })?.name,
+    ).toBe("Sandy Alexandrino");
+    expect(
+      hasClientConfirmedServiceInTurn({
+        serviceName: "Limpeza de Pele",
+        incoming: "Sim, pode ser",
+        history: afterBotAskedHistory,
+        catalogServices: renoveCatalog.services,
+        professionals: renoveCatalog.professionals,
+        activeProfessionalName: "Sandy Alexandrino",
+      }),
+    ).toBe(true);
+    expect(
+      hasClientConfirmedServiceInTurn({
+        serviceName: "Manicure",
+        incoming: "Sim, pode ser",
+        history: afterBotAskedHistory,
+        catalogServices: renoveCatalog.services,
+        professionals: renoveCatalog.professionals,
+        activeProfessionalName: "Sandy Alexandrino",
+      }),
+    ).toBe(false);
+
+    // 7. Quando a cliente informa apenas o nome no 2º turno ("Carlos"), o serviço do turno ativo continua válido
+    expect(
+      hasClientConfirmedServiceInTurn({
+        serviceName: "Manicure",
+        incoming: "Carlos",
+        history: priorBookingHistory.slice(0, 2),
+        catalogServices: renoveCatalog.services,
+        professionals: renoveCatalog.professionals,
+        activeProfessionalName: "Aline",
+      }),
+    ).toBe(true);
   });
 
   it("interpreta datas futuras em português até 60 dias e rejeita datas inválidas ou fora da janela", () => {

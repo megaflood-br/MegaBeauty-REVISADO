@@ -38,8 +38,10 @@ import {
   DEFAULT_RECEPTIONIST,
   asksOwnAppointments,
   buildReceptionistSystemPrompt,
+  findActiveRequestedProfessional,
   formatClientAppointmentsForPrompt,
   formatServicePrice,
+  hasClientConfirmedServiceInTurn,
   localReceptionistReply,
   looksLikeBookingConfirmationClaim,
   matchCatalogProfessional,
@@ -125,7 +127,15 @@ export async function loadReceptionistCatalog(tenantId: string): Promise<Recepti
     prisma.professional.findMany({
       where: { tenantId, active: true, generateAgenda: true },
       orderBy: { name: "asc" },
-      select: { id: true, name: true, nickname: true, specialty: true, workStart: true, workEnd: true },
+      select: {
+        id: true,
+        name: true,
+        nickname: true,
+        specialty: true,
+        workStart: true,
+        workEnd: true,
+        serviceLinks: { select: { service: { select: { name: true, active: true } } } },
+      },
     }),
     prisma.appointment.findMany({
       where: {
@@ -159,10 +169,14 @@ export async function loadReceptionistCatalog(tenantId: string): Promise<Recepti
       const closeTime = row.workEnd || tenant.closeTime;
       const todayBusy = busyForDayRange(appointments, row.id, todayRange);
       const tomorrowBusy = busyForDayRange(appointments, row.id, tomorrowRange);
+      const allowedServices = row.serviceLinks
+        .filter((link) => link.service.active)
+        .map((link) => link.service.name);
       return {
         name: row.name,
         nickname: row.nickname,
         specialty: row.specialty,
+        services: allowedServices,
         today: contiguousSlotsForDuration({
           openTime,
           closeTime,
@@ -389,7 +403,7 @@ const CREATE_APPOINTMENT_TOOL: OpenAI.Chat.Completions.ChatCompletionTool = {
   function: {
     name: "create_appointment",
     description:
-      "Cria um NOVO agendamento na agenda do salão com status 'Agendado pela IA' para conferência da equipe. Use APENAS para novos agendamentos quando a cliente informar ou confirmar serviço(s), data e horário. NUNCA use para cancelar, trocar ou remarcar agendamentos existentes.",
+      "Cria um NOVO agendamento na agenda do salão com status 'Agendado pela IA' para conferência da equipe. Use APENAS quando a cliente tiver informado ou confirmado explicitamente NESTE pedido qual(is) serviço(s), data e horário deseja, e somente para serviço(s) que a profissional escolhida realmente realiza. Se faltar o serviço, PERGUNTE antes de chamar esta ferramenta — nunca adivinhe nem reutilize serviço de agendamento anterior. NUNCA use para cancelar, trocar ou remarcar agendamentos existentes.",
     parameters: {
       type: "object",
       properties: {
@@ -649,7 +663,12 @@ export async function createReceptionistAppointment(input: {
         specialty: true,
         workStart: true,
         workEnd: true,
-        serviceLinks: { select: { serviceId: true } },
+        serviceLinks: {
+          select: {
+            serviceId: true,
+            service: { select: { name: true, active: true } },
+          },
+        },
       },
     }),
     prisma.appointment.findMany({
@@ -750,9 +769,17 @@ export async function createReceptionistAppointment(input: {
     }
     const inEligible = eligibleProfessionals.find((row) => row.name === matchedProf.name);
     if (!inEligible) {
+      const fullProf = professionals.find((row) => row.name === matchedProf.name);
+      const profServices = (fullProf?.serviceLinks ?? [])
+        .filter((link) => link.service.active)
+        .map((link) => link.service.name);
+      const requestedLabel = matchedServices.map((s) => s.name).join(" + ");
+      const profServicesHint = profServices.length
+        ? ` Serviços que ${matchedProf.name} realiza: ${profServices.join(", ")}.`
+        : "";
       return {
         ok: false,
-        error: `${matchedProf.name} não realiza todos os serviços escolhidos. Profissionais disponíveis para isso: ${eligibleProfessionals.map((p) => p.name).join(", ")}.`,
+        error: `${matchedProf.name} não realiza ${requestedLabel}.${profServicesHint} NÃO troque de profissional nem adivinhe o serviço sem confirmar com a cliente: avise quais serviços ${matchedProf.name} realiza e pergunte qual ela deseja (ou se prefere ${requestedLabel} com ${eligibleProfessionals.map((p) => p.name).join(", ")}).`,
       };
     }
     candidateProfessionals = [inEligible];
@@ -1097,33 +1124,85 @@ export async function generateReceptionistReply(input: {
               const refDate = input.catalog.todayDate ?? calendarDate();
               const resolvedDate = isValidCalendarDate(rawDate) ? rawDate : parseRequestedDate(rawDate, refDate)?.date ?? "";
               if (!resolvedDate) return "Data inválida. Peça à cliente uma data válida (ex.: 28/11 ou sexta que vem).";
+              const toolServiceName = typeof args.serviceName === "string" ? args.serviceName.trim() : null;
+              const toolProfName = typeof args.professionalName === "string" ? args.professionalName.trim() : null;
               const result = await queryReceptionistAvailability({
                 tenantId: input.tenantId!,
                 date: resolvedDate,
                 requestedTime: typeof args.requestedTime === "string" ? args.requestedTime.trim() : null,
-                serviceName: typeof args.serviceName === "string" ? args.serviceName.trim() : null,
-                professionalName: typeof args.professionalName === "string" ? args.professionalName.trim() : null,
+                serviceName: toolServiceName,
+                professionalName: toolProfName,
                 durationMin: typeof args.durationMin === "number" ? args.durationMin : null,
                 referenceDate: refDate,
                 nowHHmm: input.catalog.nowHHmm,
               });
-              return formatAvailabilityForPrompt(result);
+              let promptText = formatAvailabilityForPrompt(result);
+              if (!result.professionals.length && toolProfName) {
+                const catalogProf = matchCatalogProfessional(toolProfName, input.catalog.professionals);
+                if (catalogProf?.services?.length) {
+                  promptText += `\nObservação importante: ${catalogProf.name} realiza apenas: ${catalogProf.services.join(", ")}.`;
+                }
+              }
+              return promptText;
             }
 
             if (name === "create_appointment" && bookingMode !== "off") {
               const rawDate = typeof args.date === "string" ? args.date.trim() : "";
               const rawTime = typeof args.time === "string" ? args.time.trim() : "";
+              const rawProfName = typeof args.professionalName === "string" ? args.professionalName.trim() : "";
               const serviceNames = Array.isArray(args.serviceNames)
                 ? args.serviceNames.map((v) => String(v ?? "").trim()).filter(Boolean)
                 : typeof args.serviceName === "string" && args.serviceName.trim()
                   ? [args.serviceName.trim()]
                   : [];
+
+              // Guard 1: Never silently omit or swap a professional explicitly requested by the client in the active turn
+              const activeRequestedProf = findActiveRequestedProfessional({
+                incoming: input.incoming,
+                history: input.history,
+                professionals: input.catalog.professionals,
+              });
+              const requestedToolProf = rawProfName
+                ? matchCatalogProfessional(rawProfName, input.catalog.professionals)
+                : null;
+              if (activeRequestedProf && (!requestedToolProf || requestedToolProf.name !== activeRequestedProf.name)) {
+                const allowedList = activeRequestedProf.services?.length
+                  ? ` Serviços que ${activeRequestedProf.name} realiza: ${activeRequestedProf.services.join(", ")}.`
+                  : "";
+                const err = `A cliente pediu explicitamente atendimento com ${activeRequestedProf.name}. NÃO troque nem omita a profissional sem confirmação da cliente.${allowedList} Pergunte à cliente como ela prefere prosseguir.`;
+                lastBookingError = err;
+                return `NÃO FOI POSSÍVEL AGENDAR: ${err}`;
+              }
+
+              // Guard 2: Every service passed to create_appointment MUST have been mentioned or affirmatively confirmed
+              // by the client in the active turn window (never guessed or leaked from a previous completed booking).
+              const targetProf = requestedToolProf ?? activeRequestedProf;
+              const unconfirmedServices = serviceNames.filter(
+                (svcName) =>
+                  !hasClientConfirmedServiceInTurn({
+                    serviceName: svcName,
+                    incoming: input.incoming,
+                    history: input.history,
+                    catalogServices: input.catalog.services,
+                    professionals: input.catalog.professionals,
+                    activeProfessionalName: targetProf?.name ?? null,
+                  }),
+              );
+              if (!serviceNames.length || unconfirmedServices.length > 0) {
+                const profServicesHint = targetProf?.services?.length
+                  ? `${targetProf.name} realiza apenas: ${targetProf.services.join(", ")}.`
+                  : `Serviços ativos: ${input.catalog.services.slice(0, 10).map((s) => s.name).join(", ")}.`;
+                const err = `A cliente ainda não informou nem confirmou qual serviço deseja agendar neste pedido (${unconfirmedServices.join(", ") || "serviço não informado"} não foi pedido pela cliente agora). NÃO adivinhe nem reutilize serviço de agendamentos anteriores. ${profServicesHint} Pergunte à cliente qual serviço ela deseja agendar.`;
+                lastBookingError = err;
+                return `NÃO FOI POSSÍVEL AGENDAR: ${err}`;
+              }
+
               const bookingResult = await createReceptionistAppointment({
                 tenantId: input.tenantId!,
                 date: rawDate,
                 time: rawTime,
                 serviceNames,
-                professionalName: typeof args.professionalName === "string" ? args.professionalName.trim() : null,
+                professionalName: rawProfName || null,
                 clientId: input.clientId,
                 clientName: typeof args.clientName === "string" ? args.clientName.trim() : input.knownClientName,
                 phone: input.phone,
