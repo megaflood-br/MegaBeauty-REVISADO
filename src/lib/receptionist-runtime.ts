@@ -1,6 +1,7 @@
 import { addMinutes } from "date-fns";
 import { revalidatePath } from "next/cache";
 import type OpenAI from "openai";
+import { STATUS_LABEL, type AppointmentStatus } from "@/lib/constants";
 import { hasConflict } from "@/lib/appointments";
 import { prisma } from "@/lib/db";
 import {
@@ -35,7 +36,9 @@ import {
 } from "@/lib/receptionist-availability";
 import {
   DEFAULT_RECEPTIONIST,
+  asksOwnAppointments,
   buildReceptionistSystemPrompt,
+  formatClientAppointmentsForPrompt,
   formatServicePrice,
   localReceptionistReply,
   looksLikeBookingConfirmationClaim,
@@ -45,6 +48,7 @@ import {
   resolveAvailabilityIntentFromMessages,
   wantsCancelOrReschedule,
   wantsHumanHandover,
+  type ClientUpcomingAppointment,
   type ReceptionistCatalog,
   type ReceptionistConfig,
   type ReceptionistHistoryItem,
@@ -420,6 +424,25 @@ const CREATE_APPOINTMENT_TOOL: OpenAI.Chat.Completions.ChatCompletionTool = {
   },
 };
 
+const GET_MY_APPOINTMENTS_TOOL: OpenAI.Chat.Completions.ChatCompletionTool = {
+  type: "function",
+  function: {
+    name: "get_my_appointments",
+    description:
+      "Consulta os agendamentos futuros DESTA cliente (somente da cliente desta conversa). Use sempre que a cliente perguntar qual é o horário dela, quando é o agendamento dela, ou se tem algum horário marcado.",
+    parameters: {
+      type: "object",
+      properties: {
+        date: {
+          type: "string",
+          description: "Opcional: filtrar por uma data específica (YYYY-MM-DD ou 'hoje'/'amanhã'). Deixe vazio para listar todos os próximos agendamentos.",
+        },
+      },
+      required: [],
+    },
+  },
+};
+
 function phoneVariants(phone: string) {
   const digits = phone.replace(/\D/g, "");
   if (!digits) return [];
@@ -449,6 +472,75 @@ function safeRevalidateAgenda() {
   } catch {
     // Ignore outside Next.js request lifecycle (e.g., unit tests or CLI scripts)
   }
+}
+
+/**
+ * Loads upcoming non-cancelled appointments strictly scoped to the current client
+ * (by verified `clientId` or `phoneVariants(phone)` inside the same `tenantId`).
+ */
+export async function loadClientUpcomingAppointments(input: {
+  tenantId: string;
+  clientId?: string | null;
+  phone?: string | null;
+  dateFilter?: string | null;
+  now?: Date;
+  limit?: number;
+}): Promise<ClientUpcomingAppointment[]> {
+  const now = input.now ?? new Date();
+  let resolvedClientId = input.clientId ?? null;
+  if (!resolvedClientId && input.phone) {
+    const variants = phoneVariants(input.phone);
+    if (variants.length) {
+      const client = await prisma.client.findFirst({
+        where: { tenantId: input.tenantId, phone: { in: variants } },
+        select: { id: true },
+      });
+      resolvedClientId = client?.id ?? null;
+    }
+  }
+  if (!resolvedClientId) return [];
+
+  let dateClause: { gte: Date; lt: Date } | undefined;
+  if (input.dateFilter?.trim()) {
+    const today = calendarDate(now);
+    const raw = input.dateFilter.trim();
+    const resolvedDate = isValidCalendarDate(raw) ? raw : parseRequestedDate(raw, today)?.date ?? null;
+    if (resolvedDate) {
+      const range = rangeOfCalendarDate(resolvedDate);
+      dateClause = { gte: range.start, lt: range.end };
+    }
+  }
+
+  const rows = await prisma.appointment.findMany({
+    where: {
+      tenantId: input.tenantId,
+      clientId: resolvedClientId,
+      status: { notIn: ["CANCELLED", "NO_SHOW"] },
+      ...(dateClause ? { startAt: dateClause } : { endAt: { gt: now } }),
+    },
+    include: {
+      professional: { select: { name: true } },
+      items: { include: { service: { select: { name: true } } } },
+    },
+    orderBy: { startAt: "asc" },
+    take: input.limit ?? 8,
+  });
+
+  return rows.map((row) => {
+    const apptDate = calendarDate(row.startAt);
+    const statusKey = row.status as AppointmentStatus;
+    return {
+      id: row.id,
+      date: apptDate,
+      dateLabel: formatDayLabel(apptDate),
+      startTime: formatTime(row.startAt),
+      endTime: formatTime(row.endAt),
+      professionalName: row.professional.name,
+      serviceNames: row.items.map((item) => item.service.name),
+      status: row.status,
+      statusLabel: STATUS_LABEL[statusKey] ?? row.status,
+    };
+  });
 }
 
 export type ReceptionistBookingResult =
@@ -885,8 +977,19 @@ export async function generateReceptionistReply(input: {
     };
   }
 
+  const isCheckingOwnAppointments = asksOwnAppointments(input.incoming);
+  const canLookupOwnAppointments = Boolean(input.tenantId && (input.clientId || input.phone));
+
+  const clientAppointments = canLookupOwnAppointments
+    ? await loadClientUpcomingAppointments({
+        tenantId: input.tenantId!,
+        clientId: input.clientId,
+        phone: input.phone,
+      })
+    : null;
+
   let precomputedAvailability: AvailabilityDayResult | null = null;
-  if (input.tenantId) {
+  if (input.tenantId && !isCheckingOwnAppointments) {
     const intent = resolveAvailabilityIntentFromMessages({
       incoming: input.incoming,
       history: input.history,
@@ -895,9 +998,10 @@ export async function generateReceptionistReply(input: {
     });
 
     const shouldQueryAvailability =
-      Boolean(intent.dateMatch) ||
-      Boolean(intent.requestedTime) ||
-      (intent.asksForSlots && Boolean(intent.service || intent.professional || intent.explicitDurationMin));
+      !intent.asksOwnAppointments &&
+      (Boolean(intent.dateMatch) ||
+        Boolean(intent.requestedTime) ||
+        (intent.asksForSlots && Boolean(intent.service || intent.professional || intent.explicitDurationMin)));
 
     if (shouldQueryAvailability) {
       const today = input.catalog.todayDate ?? calendarDate();
@@ -938,13 +1042,16 @@ export async function generateReceptionistReply(input: {
     catalog: input.catalog,
     incoming: input.incoming,
     availability: precomputedAvailability,
+    clientAppointments,
   });
 
   const bookingMode = input.bookingMode ?? (input.tenantId && input.phone ? "live" : "off");
   const tools: OpenAI.Chat.Completions.ChatCompletionTool[] | undefined = input.tenantId
-    ? bookingMode !== "off"
-      ? [CHECK_AVAILABILITY_TOOL, CREATE_APPOINTMENT_TOOL]
-      : [CHECK_AVAILABILITY_TOOL]
+    ? [
+        CHECK_AVAILABILITY_TOOL,
+        ...(bookingMode !== "off" ? [CREATE_APPOINTMENT_TOOL] : []),
+        ...(canLookupOwnAppointments ? [GET_MY_APPOINTMENTS_TOOL] : []),
+      ]
     : undefined;
 
   let bookedAppointmentId: string | null = null;
@@ -958,12 +1065,13 @@ export async function generateReceptionistReply(input: {
       system: buildReceptionistSystemPrompt(input.config, input.catalog, precomputedAvailability, {
         bookingMode,
         knownClientName: input.knownClientName,
+        clientAppointments,
       }),
       incoming: input.incoming,
       history: input.history,
       tools,
       validateResponse:
-        input.tenantId && bookingMode !== "off"
+        input.tenantId && bookingMode !== "off" && !isCheckingOwnAppointments
           ? (text) => {
               if (!createAppointmentSucceeded && looksLikeBookingConfirmationClaim(text)) {
                 return "ERRO INTERNO: Você respondeu como se tivesse agendado ou fosse registrar o horário, mas NÃO executou create_appointment com sucesso! Chame a ferramenta create_appointment AGORA com date, time, serviceNames, professionalName (e clientName se conhecido/informado) antes de responder à cliente. Se faltar algum dado (por exemplo, o nome da cliente sem cadastro ou qual variação do serviço), pergunte esse dado à cliente em vez de dizer que agendou ou que vai registrar.";
@@ -973,6 +1081,17 @@ export async function generateReceptionistReply(input: {
           : undefined,
       onToolCall: input.tenantId
         ? async (name, args) => {
+            if (name === "get_my_appointments" && canLookupOwnAppointments) {
+              const dateFilter = typeof args.date === "string" ? args.date.trim() : null;
+              const fresh = await loadClientUpcomingAppointments({
+                tenantId: input.tenantId!,
+                clientId: input.clientId,
+                phone: input.phone,
+                dateFilter,
+              });
+              return formatClientAppointmentsForPrompt(fresh, input.catalog.todayDate);
+            }
+
             if (name === "check_availability") {
               const rawDate = typeof args.date === "string" ? args.date.trim() : "";
               const refDate = input.catalog.todayDate ?? calendarDate();
@@ -1033,7 +1152,13 @@ export async function generateReceptionistReply(input: {
     });
     if (openai) {
       // Hard safety net: never send a false booking confirmation if create_appointment did not succeed
-      if (input.tenantId && bookingMode !== "off" && !createAppointmentSucceeded && looksLikeBookingConfirmationClaim(openai)) {
+      if (
+        input.tenantId &&
+        bookingMode !== "off" &&
+        !isCheckingOwnAppointments &&
+        !createAppointmentSucceeded &&
+        looksLikeBookingConfirmationClaim(openai)
+      ) {
         const safeFallback = lastBookingNeedsClientName
           ? "Para eu concluir o seu agendamento na agenda, qual é o seu nome completo?"
           : lastBookingError

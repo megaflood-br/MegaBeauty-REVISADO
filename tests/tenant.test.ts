@@ -12,6 +12,7 @@ import {
 import {
   createReceptionistAppointment,
   generateReceptionistReply,
+  loadClientUpcomingAppointments,
   loadReceptionistCatalog,
   queryReceptionistAvailability,
 } from "@/lib/receptionist-runtime";
@@ -852,8 +853,37 @@ describe("isolamento multi-tenant automático no Prisma", () => {
         expect(conflictRes.error).toMatch(/Conflito|ocupad/i);
       }
 
-      // 5. Cancelar ou trocar horário via recepcionista deve acionar handover humano imediatamente
+      // 4.5. Consultar o próprio agendamento retorna o horário real da cliente (inclusive sem o 9º dígito) e isola de outras clientes
+      const ownList = await loadClientUpcomingAppointments({
+        tenantId: aurora!.id,
+        phone: "1177776655", // variação sem 55 e sem o 9º dígito de 5511977776655
+      });
+      expect(ownList.some((a) => a.id === bookedId && a.startTime === "14:00" && a.status === "AI_BOOKED")).toBe(true);
+
+      const otherClientList = await loadClientUpcomingAppointments({
+        tenantId: aurora!.id,
+        phone: "5511977776644",
+      });
+      expect(otherClientList.some((a) => a.id === bookedId)).toBe(false);
+
+      // Perguntar "Pode verificar qual meu horario?" logo após agendar responde com o horário dela e NÃO diz "indisponível"
       const catalog = await loadReceptionistCatalog(aurora!.id);
+      const checkOwnReply = await generateReceptionistReply({
+        tenantId: aurora!.id,
+        config: { ...DEFAULT_RECEPTIONIST, enabled: true },
+        catalog,
+        incoming: "Pode verificar qual meu horario?",
+        history: [{ role: "user", text: `Agende ${service!.name} com ${prof!.name} dia ${targetDay} às 14:00` }],
+        bookingMode: "live",
+        phone: newClientPhone,
+        apiKey: null,
+      });
+      expect(checkOwnReply.handover).toBe(false);
+      expect(checkOwnReply.text).toContain("14:00");
+      expect(checkOwnReply.text).toContain(prof!.name);
+      expect(checkOwnReply.text).not.toMatch(/indisponível/i);
+
+      // 5. Cancelar ou trocar horário via recepcionista deve acionar handover humano imediatamente
       const cancelReply = await generateReceptionistReply({
         tenantId: aurora!.id,
         config: { ...DEFAULT_RECEPTIONIST, enabled: true },

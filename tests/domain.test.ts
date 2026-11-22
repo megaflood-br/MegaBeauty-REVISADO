@@ -141,8 +141,10 @@ import { evolutionWebhookToken, verifyEvolutionWebhookAuth } from "@/lib/evoluti
 import {
   DEFAULT_RECEPTIONIST,
   asksAvailability,
+  asksOwnAppointments,
   asksPrices,
   buildReceptionistSystemPrompt,
+  formatClientAppointmentsForPrompt,
   localReceptionistReply,
   looksLikeBookingConfirmationClaim,
   matchCatalogProfessional,
@@ -1745,6 +1747,56 @@ describe("recepcionista virtual", () => {
     ];
     expect(matchCatalogService("manicure", manicureCatalog)?.name).toBe("Manicure Tradicional");
     expect(matchCatalogService("Manicure Tradicional", manicureCatalog)?.name).toBe("Manicure Tradicional");
+
+    // Detecta consultas sobre o próprio agendamento sem confundir com novo agendamento
+    expect(asksOwnAppointments("Pode verificar qual meu horario hoje?")).toBe(true);
+    expect(asksOwnAppointments("Quando seria o meu agendamento?")).toBe(true);
+    expect(asksOwnAppointments("Que horas é o meu horário?")).toBe(true);
+    expect(asksOwnAppointments("Tenho algum horário marcado?")).toBe(true);
+    expect(asksOwnAppointments("Agende manicure com a aline hoje as 15hs")).toBe(false);
+    expect(asksOwnAppointments("Quero marcar meu horário amanhã às 10h")).toBe(false);
+    expect(asksOwnAppointments("A Aline tem horário hoje?")).toBe(false);
+
+    // Ao perguntar "qual meu horario hoje?" após agendar às 15h, NÃO deve herdar pedido de slot livre às 15h
+    const ownIntent = resolveAvailabilityIntentFromMessages({
+      incoming: "Pode verificar qual meu horario hoje?",
+      history: [{ role: "user", text: "Agende escova com a Camila hoje as 15hs" }],
+      catalog,
+      referenceDate: "2026-11-22",
+    });
+    expect(ownIntent.asksOwnAppointments).toBe(true);
+    expect(ownIntent.asksForSlots).toBe(false);
+    expect(ownIntent.requestedTime).toBeNull();
+
+    // Resposta local e prompt incluem o horário real da própria cliente (e nunca dizem "indisponível")
+    const ownAppointments = [
+      {
+        id: "appt-1",
+        date: "2026-11-22",
+        dateLabel: "domingo, 22 de novembro",
+        startTime: "15:00",
+        endTime: "15:45",
+        professionalName: "Camila Ferreira",
+        serviceNames: ["Escova"],
+        status: "AI_BOOKED",
+        statusLabel: "Agendado pela IA",
+      },
+    ];
+    const ownReply = localReceptionistReply({
+      config,
+      catalog: { ...catalog, todayDate: "2026-11-22" },
+      incoming: "Pode verificar qual meu horario hoje?",
+      clientAppointments: ownAppointments,
+    });
+    expect(ownReply.handover).toBe(false);
+    expect(ownReply.text).toContain("15:00");
+    expect(ownReply.text).toContain("Camila Ferreira");
+    expect(ownReply.text).not.toMatch(/indisponível/i);
+
+    const ownPromptBlock = formatClientAppointmentsForPrompt(ownAppointments, "2026-11-22");
+    expect(ownPromptBlock).toContain("HOJE");
+    expect(ownPromptBlock).toContain("15:00");
+    expect(ownPromptBlock).toContain("Agendado pela IA");
   });
 
   it("interpreta datas futuras em português até 60 dias e rejeita datas inválidas ou fora da janela", () => {
