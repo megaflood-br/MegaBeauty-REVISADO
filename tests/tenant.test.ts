@@ -18,7 +18,8 @@ import {
   queryReceptionistAvailability,
 } from "@/lib/receptionist-runtime";
 import { DEFAULT_RECEPTIONIST } from "@/lib/receptionist";
-import { notifyAppointmentStatusChange } from "@/lib/appointment-status-notify";
+import { notifyAppointmentRescheduled, notifyAppointmentStatusChange } from "@/lib/appointment-status-notify";
+import { ensureWhatsAppCampaigns } from "@/lib/ensure-campaigns";
 import { getPublicBookingBusySlots, publicBook } from "@/app/actions/booking";
 import { calendarDate, shiftCalendarDate, zonedDateTime } from "@/lib/dates";
 import { handleEvolutionWebhookRequest } from "@/lib/evolution-webhook-http";
@@ -1116,8 +1117,44 @@ describe("isolamento multi-tenant automático no Prisma", () => {
         where: { tenantId: aurora!.id, phone: { in: [localPhone, fullPhone] } },
       });
       expect(convCount).toBe(1);
+
+      // 4. Campanhas de Marketing controlam envio e texto personalizado de cancelamento e remarcação
+      await ensureWhatsAppCampaigns(aurora!.id);
+      await unscopedPrisma.automation.updateMany({
+        where: { tenantId: aurora!.id, trigger: "APPOINTMENT_CANCELLED" },
+        data: { active: false },
+      });
+      const cancelledDisabled = await notifyAppointmentStatusChange({
+        tenantId: aurora!.id,
+        appointmentId: testAppt.id,
+        previousStatus: "CONFIRMED",
+        nextStatus: "CANCELLED",
+      });
+      expect(cancelledDisabled).toEqual({ skipped: "disabled" });
+
+      await unscopedPrisma.automation.updateMany({
+        where: { tenantId: aurora!.id, trigger: "APPOINTMENT_RESCHEDULED" },
+        data: {
+          active: true,
+          template: "Olá {{nome}}, seu horário de {{servico}} foi remarcado para {{hora}} no {{salao}}!",
+        },
+      });
+      const rescheduledRes = await notifyAppointmentRescheduled({
+        tenantId: aurora!.id,
+        appointmentId: testAppt.id,
+        status: "CONFIRMED",
+      });
+      expect(rescheduledRes).toMatchObject({ ok: true, mocked: false, conversationId: existingConv.id });
+      if ("body" in rescheduledRes) {
+        expect(rescheduledRes.body).toContain("foi remarcado para 15:00");
+        expect(rescheduledRes.body).toContain(service!.name);
+      }
     } finally {
       fetchSpy.mockRestore();
+      await unscopedPrisma.automation.updateMany({
+        where: { tenantId: aurora!.id, trigger: { in: ["APPOINTMENT_CANCELLED", "APPOINTMENT_RESCHEDULED"] } },
+        data: { active: true },
+      }).catch(() => null);
       await unscopedPrisma.appointment.delete({ where: { id: testAppt.id } }).catch(() => null);
       await unscopedPrisma.message.deleteMany({ where: { conversationId: existingConv.id } }).catch(() => null);
       await unscopedPrisma.conversation.delete({ where: { id: existingConv.id } }).catch(() => null);

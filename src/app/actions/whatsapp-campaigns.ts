@@ -87,6 +87,7 @@ export async function sendCampaignTest(formData: FormData) {
         hora: "14:00",
         profissional: "Equipe",
         servico: catalog?.title ?? "Serviço",
+        status: "Confirmado",
         valor: "R$ 50,00",
         pin: "1234",
       },

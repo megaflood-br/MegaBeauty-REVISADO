@@ -19,6 +19,7 @@ export type CampaignVars = {
   hora?: string;
   profissional?: string;
   servico?: string;
+  status?: string;
   valor?: string;
   link?: string;
   pin?: string;
@@ -77,6 +78,7 @@ export async function dispatchCampaign(input: {
     hora: input.vars?.hora,
     profissional: input.vars?.profissional,
     servico: input.vars?.servico,
+    status: input.vars?.status,
     valor: input.vars?.valor,
     link: input.vars?.link || bookingLink(server.publicAppUrl, tenant.slug),
     pin: input.vars?.pin,

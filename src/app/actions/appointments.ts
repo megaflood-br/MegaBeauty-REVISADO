@@ -14,7 +14,7 @@ import { applyCatalogPrice } from "@/lib/promotions";
 import { loadPromoRules } from "@/lib/promo-load";
 import { APPOINTMENT_STATUSES, type AppointmentStatus } from "@/lib/constants";
 import { appointmentCampaignVars, safeDispatch } from "@/lib/dispatch-whatsapp-campaign";
-import { safeNotifyAppointmentStatusChange } from "@/lib/appointment-status-notify";
+import { safeNotifyAppointmentRescheduled, safeNotifyAppointmentStatusChange } from "@/lib/appointment-status-notify";
 
 export type AppointmentItemInput = {
   serviceId: string;
@@ -116,10 +116,14 @@ export async function saveAppointment(payload: {
 
   let id = payload.id;
   let previousStatus: string | null = null;
+  let rescheduled = false;
   if (id) {
     const existing = await prisma.appointment.findFirst({ where: { id, tenantId: session.tenantId } });
     if (!existing) return { error: "Agendamento não encontrado." };
     previousStatus = existing.status;
+    rescheduled =
+      existing.startAt.getTime() !== startAt.getTime() ||
+      existing.professionalId !== professionalId;
     await prisma.appointment.update({ where: { id }, data: { ...data, source: existing.source } });
     await prisma.appointmentItem.deleteMany({ where: { appointmentId: id } });
   } else {
@@ -149,6 +153,12 @@ export async function saveAppointment(payload: {
       appointmentId: id!,
       previousStatus,
       nextStatus: data.status,
+    });
+  } else if (previousStatus && rescheduled) {
+    safeNotifyAppointmentRescheduled({
+      tenantId: session.tenantId,
+      appointmentId: id!,
+      status: data.status,
     });
   } else if (!previousStatus) {
     const appointment = await prisma.appointment.findFirst({

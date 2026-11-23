@@ -20,6 +20,7 @@ import { allocatePayments, comandaTotal, paymentChange } from "@/lib/comandas";
 import { centsToPoints, defaultCashbackConfig, earnCashbackCents, maxRedeemCents, pointsToCents } from "@/lib/cashback";
 import { parseSettingsTab, settingsPath } from "@/lib/settings";
 import {
+  appointmentStatusTrigger,
   CAMPAIGN_CATALOG,
   normalizeCampaignTrigger,
   normalizeWhatsAppPhone,
@@ -559,11 +560,21 @@ describe("comandas", () => {
     expect(brandTheme("#ff0447").faviconUrl).toBeNull();
     expect(atendimentoPath()).toBe("/atendimento");
     expect(normalizeCampaignTrigger("APPOINTMENT_CREATED")).toBe("INFORMED");
-    expect(CAMPAIGN_CATALOG).toHaveLength(13);
+    expect(CAMPAIGN_CATALOG).toHaveLength(19);
+    expect(appointmentStatusTrigger("CONFIRMED")).toBe("APPOINTMENT_CONFIRMED");
+    expect(appointmentStatusTrigger("CANCELLED")).toBe("APPOINTMENT_CANCELLED");
+    expect(appointmentStatusTrigger("IN_PROGRESS")).toBe("APPOINTMENT_IN_PROGRESS");
+    expect(appointmentStatusTrigger("COMPLETED")).toBe("APPOINTMENT_COMPLETED");
+    expect(appointmentStatusTrigger("NO_SHOW")).toBe("APPOINTMENT_NO_SHOW");
     expect(CAMPAIGN_CATALOG.find((item) => item.trigger === "REMINDER")?.template).toMatch(/responder com 1/i);
-    expect(renderCampaignTemplate("Oi {{nome}} no {{salao}}{{profissional}}", { nome: "Ana", salao: "Aurora", profissional: "Bruno" })).toBe(
-      "Oi Ana no Aurora com Bruno",
-    );
+    expect(
+      renderCampaignTemplate("Oi {{nome}} no {{salao}}{{profissional}} ({{status}})", {
+        nome: "Ana",
+        salao: "Aurora",
+        profissional: "Bruno",
+        status: "Confirmado",
+      }),
+    ).toBe("Oi Ana no Aurora com Bruno (Confirmado)");
     expect(normalizeWhatsAppPhone("55 11 98552-1672")).toBe("11985521672");
     expect(normalizeWhatsAppPhone("11985521672")).toBe("11985521672");
     expect(whatsappPhoneCandidates("11985521672")).toEqual(["11985521672", "5511985521672"]);

@@ -17,25 +17,47 @@ export function parseWhatsAppTab(value?: string | null): WhatsAppTab {
 }
 
 export const CAMPAIGN_TRIGGERS = [
+  "INFORMED",
+  "APPOINTMENT_CONFIRMED",
+  "APPOINTMENT_RESCHEDULED",
+  "APPOINTMENT_CANCELLED",
+  "APPOINTMENT_IN_PROGRESS",
+  "APPOINTMENT_COMPLETED",
+  "APPOINTMENT_NO_SHOW",
+  "REMINDER",
+  "PIN",
   "BIRTHDAY",
   "WINBACK",
-  "REMINDER",
   "NURTURE",
   "RETURN",
-  "INFORMED",
   "WELCOME",
   "BOOK_ONLINE",
   "CASHBACK",
   "PACKAGE_EXPIRING",
   "CHARGE",
   "REVIEW",
-  "PIN",
 ] as const;
 
 export type CampaignTrigger = (typeof CAMPAIGN_TRIGGERS)[number];
 
+export type CampaignCategory = "agendamento" | "relacionamento";
+
+export const CAMPAIGN_SECTIONS: { id: CampaignCategory; title: string; description: string }[] = [
+  {
+    id: "agendamento",
+    title: "Avisos de agendamento",
+    description: "Mensagens automáticas disparadas ao marcar, confirmar, remarcar, iniciar, concluir ou cancelar horários.",
+  },
+  {
+    id: "relacionamento",
+    title: "Relacionamento, retorno e cobrança",
+    description: "Campanhas automáticas para aniversário, boas-vindas, pós-atendimento, retorno e cobranças.",
+  },
+];
+
 export type CampaignDefinition = {
   trigger: CampaignTrigger;
+  category: CampaignCategory;
   title: string;
   description: string;
   icon: string;
@@ -54,25 +76,92 @@ export function normalizeCampaignTrigger(value: string): CampaignTrigger | null 
   return LEGACY_TRIGGERS[value] ?? null;
 }
 
+export function appointmentStatusTrigger(status: string): CampaignTrigger {
+  switch (status) {
+    case "CONFIRMED":
+      return "APPOINTMENT_CONFIRMED";
+    case "IN_PROGRESS":
+      return "APPOINTMENT_IN_PROGRESS";
+    case "COMPLETED":
+      return "APPOINTMENT_COMPLETED";
+    case "CANCELLED":
+      return "APPOINTMENT_CANCELLED";
+    case "NO_SHOW":
+      return "APPOINTMENT_NO_SHOW";
+    case "PENDING":
+    case "AI_BOOKED":
+    default:
+      return "INFORMED";
+  }
+}
+
 export const CAMPAIGN_CATALOG: CampaignDefinition[] = [
   {
-    trigger: "BIRTHDAY",
-    title: "Parabenize seus clientes",
-    description: "Reforce o laço com seus clientes e receba o quanto eles são especiais. Envie uma mensagem automática parabenizando o aniversariante do dia.",
-    icon: "gift",
-    defaultActive: false,
-    template: "Oi {{nome}}! Feliz aniversário! 🎉 O {{salao}} preparou um mimo para você. Que tal comemorar com a gente?",
+    trigger: "INFORMED",
+    category: "agendamento",
+    title: "Novo agendamento",
+    description: "Envie um aviso automático assim que um novo horário for marcado no salão ou pelo agendamento online.",
+    icon: "calendarPlus",
+    defaultActive: true,
+    template: "Oi {{nome}}! Seu horário no {{salao}} está marcado para {{data}} às {{hora}}{{profissional}}. Responda SIM para confirmar.",
   },
   {
-    trigger: "WINBACK",
-    title: "Reconquiste clientes",
-    description: "Já faz um tempo que o cliente não vem? Recupere quem sumiu com uma campanha para quem não retornou depois de um período.",
-    icon: "user",
+    trigger: "APPOINTMENT_CONFIRMED",
+    category: "agendamento",
+    title: "Agendamento confirmado",
+    description: "Avise o cliente automaticamente no WhatsApp quando o agendamento for confirmado na agenda.",
+    icon: "calendar",
     defaultActive: true,
-    template: "Sentimos sua falta, {{nome}}! Que tal um horário esta semana no {{salao}}? Temos novidades para você.",
+    template: "Oi {{nome}}! Seu agendamento no {{salao}} ({{servico}}{{profissional}} em {{data}} às {{hora}}) foi confirmado. Te esperamos!",
+  },
+  {
+    trigger: "APPOINTMENT_RESCHEDULED",
+    category: "agendamento",
+    title: "Agendamento remarcado",
+    description: "Notifique o cliente automaticamente quando a data, o horário ou o profissional do agendamento for alterado.",
+    icon: "calendarClock",
+    defaultActive: true,
+    template: "Oi {{nome}}! Seu agendamento no {{salao}} ({{servico}}{{profissional}}) foi remarcado para {{data}} às {{hora}}. Qualquer dúvida, é só responder por aqui.",
+  },
+  {
+    trigger: "APPOINTMENT_CANCELLED",
+    category: "agendamento",
+    title: "Agendamento cancelado",
+    description: "Avise o cliente automaticamente quando o agendamento for cancelado na agenda e facilite a remarcação.",
+    icon: "calendarX",
+    defaultActive: true,
+    template: "Oi {{nome}}! Informamos que o seu agendamento no {{salao}} ({{servico}}{{profissional}} em {{data}} às {{hora}}) foi cancelado. Se quiser remarcar um novo horário, é só responder esta mensagem.",
+  },
+  {
+    trigger: "APPOINTMENT_IN_PROGRESS",
+    category: "agendamento",
+    title: "Atendimento iniciado",
+    description: "Envie uma mensagem automática quando o agendamento mudar para o status Em atendimento.",
+    icon: "playCircle",
+    defaultActive: true,
+    template: "Oi {{nome}}! Seu atendimento no {{salao}} ({{servico}}{{profissional}} em {{data}} às {{hora}}) foi iniciado. Bom atendimento!",
+  },
+  {
+    trigger: "APPOINTMENT_COMPLETED",
+    category: "agendamento",
+    title: "Atendimento concluído",
+    description: "Avise o cliente automaticamente quando o atendimento for marcado como concluído na agenda.",
+    icon: "checkCircle",
+    defaultActive: true,
+    template: "Oi {{nome}}! Seu atendimento no {{salao}} ({{servico}}{{profissional}} em {{data}} às {{hora}}) foi concluído. Obrigado pela visita e até a próxima!",
+  },
+  {
+    trigger: "APPOINTMENT_NO_SHOW",
+    category: "agendamento",
+    title: "Não comparecimento",
+    description: "Avise o cliente quando o agendamento for marcado como Não compareceu e convide para remarcar.",
+    icon: "userX",
+    defaultActive: true,
+    template: "Oi {{nome}}! Registramos que você não pôde comparecer ao agendamento no {{salao}} ({{servico}}{{profissional}} em {{data}} às {{hora}}). Se quiser remarcar para outro dia, é só responder por aqui.",
   },
   {
     trigger: "REMINDER",
+    category: "agendamento",
     title: "Evite esquecimentos",
     description: "Lembrete no dia anterior, só para quem já conversou neste WhatsApp. Pede um 1 de confirmação para proteger o número.",
     icon: "bell",
@@ -81,7 +170,35 @@ export const CAMPAIGN_CATALOG: CampaignDefinition[] = [
       "{Oi|Olá|Oi oi} {{nome}}! {Passando para lembrar|Só lembrando} do seu horário amanhã às {{hora}} no {{salao}}{{profissional}}. Pode me responder com 1 para confirmar?",
   },
   {
+    trigger: "PIN",
+    category: "agendamento",
+    title: "Enviar código PIN",
+    description: "Envie o código PIN pelo WhatsApp, facilitando o acesso ao agendamento online.",
+    icon: "key",
+    defaultActive: true,
+    template: "Seu código PIN do {{salao}} é {{pin}}. Use para acessar o agendamento online.",
+  },
+  {
+    trigger: "BIRTHDAY",
+    category: "relacionamento",
+    title: "Parabenize seus clientes",
+    description: "Reforce o laço com seus clientes e receba o quanto eles são especiais. Envie uma mensagem automática parabenizando o aniversariante do dia.",
+    icon: "gift",
+    defaultActive: false,
+    template: "Oi {{nome}}! Feliz aniversário! 🎉 O {{salao}} preparou um mimo para você. Que tal comemorar com a gente?",
+  },
+  {
+    trigger: "WINBACK",
+    category: "relacionamento",
+    title: "Reconquiste clientes",
+    description: "Já faz um tempo que o cliente não vem? Recupere quem sumiu com uma campanha para quem não retornou depois de um período.",
+    icon: "user",
+    defaultActive: true,
+    template: "Sentimos sua falta, {{nome}}! Que tal um horário esta semana no {{salao}}? Temos novidades para você.",
+  },
+  {
     trigger: "NURTURE",
+    category: "relacionamento",
     title: "Cuide dos relacionamentos",
     description: "Fortaleça o relacionamento enviando uma mensagem depois do atendimento. Essas mensagens vão apenas para o agendamento concluído.",
     icon: "heart",
@@ -90,6 +207,7 @@ export const CAMPAIGN_CATALOG: CampaignDefinition[] = [
   },
   {
     trigger: "RETURN",
+    category: "relacionamento",
     title: "Garanta retornos",
     description: "Já passou o tempo e está na hora do cliente voltar para fazer de novo o serviço. Esta campanha lembra quem ainda não retornou.",
     icon: "rotate",
@@ -97,15 +215,8 @@ export const CAMPAIGN_CATALOG: CampaignDefinition[] = [
     template: "Oi {{nome}}! Já está na hora de retocar no {{salao}}. Quer que eu reserve um horário para você?",
   },
   {
-    trigger: "INFORMED",
-    title: "Cliente bem informado",
-    description: "Atualize o cliente sobre o agendamento: horário marcado, mudança ou status. Evite mensagens manuais a cada alteração.",
-    icon: "calendar",
-    defaultActive: true,
-    template: "Oi {{nome}}! Seu horário no {{salao}} está marcado para {{data}} às {{hora}}{{profissional}}. Responda SIM para confirmar.",
-  },
-  {
     trigger: "WELCOME",
+    category: "relacionamento",
     title: "Boas-vindas a novos clientes",
     description: "Que tal dar boas-vindas e oferecer um desconto no primeiro atendimento? Esta campanha é enviada no cadastro ou na primeira compra.",
     icon: "sparkles",
@@ -114,6 +225,7 @@ export const CAMPAIGN_CATALOG: CampaignDefinition[] = [
   },
   {
     trigger: "BOOK_ONLINE",
+    category: "relacionamento",
     title: "Convide o cliente para agendar online",
     description: "Incentive o cliente a marcar sozinho pelo link. Esta campanha envia o endereço do agendamento online.",
     icon: "link",
@@ -122,6 +234,7 @@ export const CAMPAIGN_CATALOG: CampaignDefinition[] = [
   },
   {
     trigger: "CASHBACK",
+    category: "relacionamento",
     title: "Cashback",
     description: "Envie ao cliente uma mensagem avisando o saldo ou a atualização de cashback.",
     icon: "coins",
@@ -130,6 +243,7 @@ export const CAMPAIGN_CATALOG: CampaignDefinition[] = [
   },
   {
     trigger: "PACKAGE_EXPIRING",
+    category: "relacionamento",
     title: "Pacote expirando",
     description: "Avise o cliente que o pacote está acabando ou perto do vencimento.",
     icon: "package",
@@ -138,6 +252,7 @@ export const CAMPAIGN_CATALOG: CampaignDefinition[] = [
   },
   {
     trigger: "CHARGE",
+    category: "relacionamento",
     title: "Realize cobranças",
     description: "Se o cliente deixou uma comanda em aberto, cobre com uma mensagem automática pedindo para quitar.",
     icon: "receipt",
@@ -146,19 +261,12 @@ export const CAMPAIGN_CATALOG: CampaignDefinition[] = [
   },
   {
     trigger: "REVIEW",
+    category: "relacionamento",
     title: "Solicite avaliações dos clientes",
     description: "Peça um depoimento depois do atendimento e aumente a credibilidade do salão.",
     icon: "star",
     defaultActive: true,
     template: "Oi {{nome}}, gostou do atendimento no {{salao}}? Sua avaliação nos ajuda muito. Responde com uma nota de 1 a 5?",
-  },
-  {
-    trigger: "PIN",
-    title: "Enviar código PIN",
-    description: "Envie o código PIN pelo WhatsApp, facilitando o acesso ao agendamento online.",
-    icon: "key",
-    defaultActive: true,
-    template: "Seu código PIN do {{salao}} é {{pin}}. Use para acessar o agendamento online.",
   },
 ];
 
@@ -169,6 +277,7 @@ export const CAMPAIGN_VARIABLES = [
   { key: "hora", label: "Hora" },
   { key: "profissional", label: "Profissional" },
   { key: "servico", label: "Serviço ou pacote" },
+  { key: "status", label: "Status do agendamento" },
   { key: "valor", label: "Valor" },
   { key: "link", label: "Link de agendamento" },
   { key: "pin", label: "Código PIN" },

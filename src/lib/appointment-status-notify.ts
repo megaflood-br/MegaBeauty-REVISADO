@@ -1,7 +1,15 @@
 import { prisma } from "@/lib/db";
 import { APPOINTMENT_STATUSES, STATUS_LABEL, type AppointmentStatus } from "@/lib/constants";
 import { calendarDate, formatDayLabel, formatTime } from "@/lib/dates";
-import { normalizeWhatsAppPhone } from "@/lib/whatsapp-campaigns";
+import {
+  appointmentPin,
+  appointmentStatusTrigger,
+  campaignByTrigger,
+  normalizeWhatsAppPhone,
+  renderCampaignTemplate,
+  type CampaignTrigger,
+} from "@/lib/whatsapp-campaigns";
+import { spin } from "@/lib/whatsapp-copy";
 import { conversationPhoneCandidates } from "@/lib/whatsapp-inbound";
 import { sendSalonWhatsApp } from "@/lib/whatsapp-send";
 
@@ -43,17 +51,28 @@ export function formatAppointmentStatusMessage(input: FormatAppointmentStatusMes
   }
 }
 
-export async function notifyAppointmentStatusChange(input: {
+async function resolveCampaignConfig(tenantId: string, trigger: CampaignTrigger) {
+  const automation = await prisma.automation.findFirst({
+    where: { tenantId, trigger },
+    select: { active: true, template: true },
+  });
+  const catalog = campaignByTrigger(trigger);
+  const active = automation ? automation.active : (catalog?.defaultActive ?? true);
+  const template = automation?.template?.trim() || catalog?.template || "";
+  return { active, template };
+}
+
+async function sendAppointmentWhatsAppNotice(input: {
   tenantId: string;
   appointmentId: string;
+  trigger: CampaignTrigger;
+  status: AppointmentStatus;
   previousStatus?: string | null;
-  nextStatus: string;
+  preferStatusFallback?: boolean;
 }) {
-  if (!APPOINTMENT_STATUSES.includes(input.nextStatus as AppointmentStatus)) {
-    return { skipped: "invalid_status" as const };
-  }
-  if (input.previousStatus && input.previousStatus === input.nextStatus) {
-    return { skipped: "unchanged" as const };
+  const config = await resolveCampaignConfig(input.tenantId, input.trigger);
+  if (!config.active) {
+    return { skipped: "disabled" as const };
   }
 
   const appointment = await prisma.appointment.findFirst({
@@ -79,17 +98,39 @@ export async function notifyAppointmentStatusChange(input: {
   const dateLabel = formatDayLabel(dateStr);
   const time = formatTime(appointment.startAt);
   const serviceNames = appointment.items.map((item) => item.service.name).filter(Boolean);
+  const firstName = appointment.client.name.trim().split(/\s+/)[0] || "cliente";
+  const servicePart = serviceNames.length ? serviceNames.join(" + ") : "Atendimento";
 
-  const body = formatAppointmentStatusMessage({
-    clientName: appointment.client.name,
-    salonName: appointment.tenant.name,
-    status: input.nextStatus as AppointmentStatus,
-    previousStatus: input.previousStatus,
-    dateLabel,
-    time,
-    professionalName: appointment.professional?.name ?? null,
-    serviceNames,
-  });
+  let body: string;
+  if (!input.preferStatusFallback && config.template) {
+    body = spin(
+      renderCampaignTemplate(config.template, {
+        nome: firstName,
+        salao: appointment.tenant.name.trim() || "salão",
+        data: dateLabel,
+        hora: time,
+        profissional: appointment.professional?.name?.trim() ?? "",
+        servico: servicePart,
+        status: STATUS_LABEL[input.status] ?? input.status,
+        pin: appointmentPin(appointment.id),
+      }),
+    );
+  } else {
+    body = formatAppointmentStatusMessage({
+      clientName: appointment.client.name,
+      salonName: appointment.tenant.name,
+      status: input.status,
+      previousStatus: input.previousStatus,
+      dateLabel,
+      time,
+      professionalName: appointment.professional?.name ?? null,
+      serviceNames,
+    });
+  }
+
+  if (!body) {
+    return { skipped: "empty_body" as const };
+  }
 
   const candidates = conversationPhoneCandidates(normalizedPhone);
   const existingConv = candidates.length
@@ -147,8 +188,58 @@ export async function notifyAppointmentStatusChange(input: {
   };
 }
 
+export async function notifyAppointmentStatusChange(input: {
+  tenantId: string;
+  appointmentId: string;
+  previousStatus?: string | null;
+  nextStatus: string;
+}) {
+  if (!APPOINTMENT_STATUSES.includes(input.nextStatus as AppointmentStatus)) {
+    return { skipped: "invalid_status" as const };
+  }
+  if (input.previousStatus && input.previousStatus === input.nextStatus) {
+    return { skipped: "unchanged" as const };
+  }
+
+  const nextStatus = input.nextStatus as AppointmentStatus;
+  const trigger = appointmentStatusTrigger(nextStatus);
+  const preferStatusFallback = nextStatus === "PENDING" || nextStatus === "AI_BOOKED";
+
+  return sendAppointmentWhatsAppNotice({
+    tenantId: input.tenantId,
+    appointmentId: input.appointmentId,
+    trigger,
+    status: nextStatus,
+    previousStatus: input.previousStatus,
+    preferStatusFallback,
+  });
+}
+
+export async function notifyAppointmentRescheduled(input: {
+  tenantId: string;
+  appointmentId: string;
+  status?: string | null;
+}) {
+  const status = APPOINTMENT_STATUSES.includes(input.status as AppointmentStatus)
+    ? (input.status as AppointmentStatus)
+    : "PENDING";
+
+  return sendAppointmentWhatsAppNotice({
+    tenantId: input.tenantId,
+    appointmentId: input.appointmentId,
+    trigger: "APPOINTMENT_RESCHEDULED",
+    status,
+  });
+}
+
 export function safeNotifyAppointmentStatusChange(input: Parameters<typeof notifyAppointmentStatusChange>[0]) {
   void notifyAppointmentStatusChange(input).catch((error) => {
     console.error("[appointment-status-notify] failed:", error);
+  });
+}
+
+export function safeNotifyAppointmentRescheduled(input: Parameters<typeof notifyAppointmentRescheduled>[0]) {
+  void notifyAppointmentRescheduled(input).catch((error) => {
+    console.error("[appointment-rescheduled-notify] failed:", error);
   });
 }
