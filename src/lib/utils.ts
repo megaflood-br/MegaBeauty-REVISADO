@@ -55,3 +55,10 @@ export function redactPhone(value: string | null | undefined, hidden: boolean) {
 export function formAction<T>(fn: (formData: FormData) => Promise<T>) {
   return fn as (formData: FormData) => Promise<void>;
 }
+
+export function createClientKey() {
+  if (typeof globalThis !== "undefined" && typeof globalThis.crypto?.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
+  return `k_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+}

@@ -7,7 +7,8 @@ const CANONICAL_HOSTS: Record<string, string> = {
 };
 
 export function publicAppOrigin(url?: string | null, fallback = true) {
-  const raw = (url || (fallback ? process.env.APP_URL || DEFAULT_APP_ORIGIN : "")).trim();
+  const envOrigin = typeof process !== "undefined" ? process.env?.APP_URL : undefined;
+  const raw = (url || (fallback ? envOrigin || DEFAULT_APP_ORIGIN : "")).trim();
   if (!raw) return "";
   try {
     const parsed = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);

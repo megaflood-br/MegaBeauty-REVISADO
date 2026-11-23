@@ -9,6 +9,7 @@ import { invoiceComanda, upsertComanda } from "@/app/actions/comandas";
 import { formatBRL, parseBRLToCents } from "@/lib/money";
 import { comandaTotal, itemLineTotal } from "@/lib/comandas";
 import { calendarDate } from "@/lib/dates";
+import { createClientKey } from "@/lib/utils";
 import { PaymentDrawer } from "@/components/comandas/payment-drawer";
 import { useConfirm } from "@/components/confirm-dialog";
 import type { ComandaFormValue, ComandaItemDraft, PaymentDraft, PaymentMethodOption } from "@/components/comandas/types";
@@ -27,7 +28,7 @@ function itemDiscountCents(item: ComandaItemDraft) {
 
 function emptyItem(professionalId = ""): ComandaItemDraft {
   return {
-    key: crypto.randomUUID(),
+    key: createClientKey(),
     type: "SERVICE",
     catalogId: "",
     professionalId,
