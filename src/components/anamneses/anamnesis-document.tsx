@@ -8,7 +8,7 @@ import {
   anamnesisDocumentItems,
   parseAnswers,
   type AnamnesisStatus,
-} from "@/lib/anamnesis";
+} from "@/lib/anamnesis-shared";
 import { formatMediumDate, zonedDateTime } from "@/lib/dates";
 import { cn, displayPhoneBR } from "@/lib/utils";
 import type { AnamnesisFormRow, AnamnesisRow } from "@/components/anamneses/types";

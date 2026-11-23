@@ -8,7 +8,7 @@ import { SearchSelect } from "@/components/search-select";
 import { saveTransaction } from "@/app/actions/finance";
 import { calendarDate } from "@/lib/dates";
 import { cn } from "@/lib/utils";
-import type { CatalogAccount, CatalogCategory, CatalogMethod } from "@/lib/finance-catalog";
+import type { CatalogAccount, CatalogCategory, CatalogMethod } from "@/lib/finance-catalog-shared";
 import type { TransactionFormValue } from "@/components/finance/types";
 
 function centsToInput(cents: number) {

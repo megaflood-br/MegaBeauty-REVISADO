@@ -11,7 +11,7 @@ import {
   type AnamnesisAnswer,
   type AnamnesisAnswers,
   type AnamnesisQuestion,
-} from "@/lib/anamnesis";
+} from "@/lib/anamnesis-shared";
 
 export function PublicAnamnesisForm({
   token,

@@ -15,7 +15,7 @@ import {
   serializeAnswers,
   type AnamnesisAnswer,
   type AnamnesisAnswers,
-} from "@/lib/anamnesis";
+} from "@/lib/anamnesis-shared";
 import { calendarDate } from "@/lib/dates";
 import type { AnamnesisFormRow, AnamnesisRow } from "@/components/anamneses/types";
 import { QuestionField } from "@/components/anamneses/question-field";

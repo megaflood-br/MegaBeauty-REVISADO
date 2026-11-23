@@ -9,8 +9,8 @@ import { MethodDrawer } from "@/components/cadastros/method-drawer";
 import { CategoryDrawer } from "@/components/cadastros/category-drawer";
 import { deleteFinanceAccount, deleteFinanceCategory, deletePaymentMethod, togglePaymentFavorite } from "@/app/actions/cadastros";
 import { useConfirm } from "@/components/confirm-dialog";
-import { accountDetailsLabel, feePercentLabel } from "@/lib/finance-catalog";
-import { settlementLabel } from "@/lib/ledger";
+import { accountDetailsLabel, feePercentLabel } from "@/lib/finance-catalog-shared";
+import { settlementLabel } from "@/lib/ledger-shared";
 import { cn } from "@/lib/utils";
 import type { AccountRow, CategoryRow, MethodRow } from "@/components/cadastros/types";
 

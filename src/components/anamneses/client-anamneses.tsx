@@ -11,7 +11,7 @@ import {
   ANAMNESIS_STATUS_COLOR,
   ANAMNESIS_STATUS_LABEL,
   type AnamnesisStatus,
-} from "@/lib/anamnesis";
+} from "@/lib/anamnesis-shared";
 import { formatMediumDate, zonedDateTime } from "@/lib/dates";
 import type { AnamnesisFormRow, AnamnesisRow } from "@/components/anamneses/types";
 

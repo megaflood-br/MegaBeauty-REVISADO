@@ -1,40 +1,9 @@
 import { prisma } from "@/lib/db";
 import { EXPENSE_CATEGORIES, INCOME_CATEGORIES } from "@/lib/constants";
 import { slugify } from "@/lib/utils";
+import type { CatalogAccount, CatalogCategory, CatalogMethod } from "@/lib/finance-catalog-shared";
 
-export type CatalogAccount = {
-  id: string;
-  name: string;
-  details: string;
-  adminOnly: boolean;
-  isDefault: boolean;
-  active: boolean;
-  sortOrder: number;
-};
-
-export type CatalogMethod = {
-  id: string;
-  name: string;
-  code: string;
-  group: "CASH" | "CARD" | "OTHER" | string;
-  feeBps: number;
-  accountId: string;
-  accountName: string;
-  settlementDays: number;
-  autoSettle: boolean;
-  favorite: boolean;
-  active: boolean;
-  sortOrder: number;
-};
-
-export type CatalogCategory = {
-  id: string;
-  name: string;
-  type: string;
-  slug: string;
-  active: boolean;
-  sortOrder: number;
-};
+export { accountDetailsLabel, feePercentLabel, type CatalogAccount, type CatalogCategory, type CatalogMethod } from "@/lib/finance-catalog-shared";
 
 const DEFAULT_ACCOUNTS = [
   { name: "Banco C6", details: "Somente para administrador", adminOnly: true },
@@ -257,13 +226,4 @@ export async function loadFinanceCatalog(tenantId: string) {
       }),
     ),
   };
-}
-
-export function accountDetailsLabel(account: { details: string; adminOnly: boolean; name: string }) {
-  if (account.adminOnly) return account.details || "Somente para administrador";
-  return account.details || account.name;
-}
-
-export function feePercentLabel(feeBps: number) {
-  return `${(feeBps / 100).toFixed(2).replace(".", ",")}%`;
 }

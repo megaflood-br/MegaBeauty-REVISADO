@@ -6,7 +6,7 @@ import { Check, Copy, Link2, MessageCircle, X } from "lucide-react";
 import { Button, Field } from "@/components/ui";
 import { SearchSelect } from "@/components/search-select";
 import { createAnamnesisInvite } from "@/app/actions/anamnesis";
-import { ANAMNESIS_AREA_LABEL } from "@/lib/anamnesis";
+import { ANAMNESIS_AREA_LABEL } from "@/lib/anamnesis-shared";
 import type { AnamnesisFormRow } from "@/components/anamneses/types";
 
 export function AnamnesisInviteButton({

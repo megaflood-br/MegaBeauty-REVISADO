@@ -7,7 +7,7 @@ import { Card } from "@/components/ui";
 import { TransactionDrawer } from "@/components/finance/transaction-drawer";
 import { formatBRL } from "@/lib/money";
 import { cn } from "@/lib/utils";
-import type { CatalogAccount, CatalogCategory, CatalogMethod } from "@/lib/finance-catalog";
+import type { CatalogAccount, CatalogCategory, CatalogMethod } from "@/lib/finance-catalog-shared";
 import type { TransactionFormValue, TransactionListRow } from "@/components/finance/types";
 
 export function FinanceTransactions({

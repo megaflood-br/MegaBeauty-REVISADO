@@ -1,7 +1,7 @@
 import { Card } from "@/components/ui";
 import { formatBRL } from "@/lib/money";
 import { cn } from "@/lib/utils";
-import type { AccountBalanceRow } from "@/lib/ledger";
+import type { AccountBalanceRow } from "@/lib/ledger-shared";
 
 export function AccountBalances({ rows }: { rows: AccountBalanceRow[] }) {
   if (!rows.length) return null;

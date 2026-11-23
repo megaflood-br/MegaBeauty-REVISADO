@@ -12,7 +12,7 @@ import { formatBRL } from "@/lib/money";
 import { formatShortDate } from "@/lib/dates";
 import { cn } from "@/lib/utils";
 import type { CommissionRow, CommissionRule } from "@/components/comissoes/types";
-import type { CatalogAccount, CatalogMethod } from "@/lib/finance-catalog";
+import type { CatalogAccount, CatalogMethod } from "@/lib/finance-catalog-shared";
 
 type Tab = "detalhadas" | "resumidas" | "pagas" | "config";
 

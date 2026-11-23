@@ -1,4 +1,4 @@
-import type { AnamnesisArea, AnamnesisQuestion, AnamnesisStatus } from "@/lib/anamnesis";
+import type { AnamnesisArea, AnamnesisQuestion, AnamnesisStatus } from "@/lib/anamnesis-shared";
 
 export type AnamnesisFormRow = {
   id: string;

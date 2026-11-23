@@ -7,7 +7,7 @@ import { formatBRL, parseBRLToCents } from "@/lib/money";
 import { calendarDate, formatShortDate } from "@/lib/dates";
 import { paymentChange } from "@/lib/comandas";
 import { PAYMENT_LABEL, type PaymentMethod } from "@/lib/constants";
-import { feePercentLabel } from "@/lib/finance-catalog";
+import { feePercentLabel } from "@/lib/finance-catalog-shared";
 import type { PaymentDraft, PaymentMethodOption } from "@/components/comandas/types";
 import { useConfirm } from "@/components/confirm-dialog";
 

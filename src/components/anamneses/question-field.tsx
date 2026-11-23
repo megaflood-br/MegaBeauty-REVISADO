@@ -1,7 +1,7 @@
 "use client";
 
 import { Input, Textarea } from "@/components/ui";
-import type { AnamnesisAnswer, AnamnesisQuestion } from "@/lib/anamnesis";
+import type { AnamnesisAnswer, AnamnesisQuestion } from "@/lib/anamnesis-shared";
 import { cn } from "@/lib/utils";
 
 export function QuestionField({

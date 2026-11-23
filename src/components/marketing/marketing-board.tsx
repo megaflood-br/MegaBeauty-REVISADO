@@ -24,7 +24,7 @@ import {
   parseMarketingAudience,
   summarizeMarketing,
   type MarketingAudience,
-} from "@/lib/marketing";
+} from "@/lib/marketing-shared";
 import { cn, displayPhoneBR } from "@/lib/utils";
 
 function isSendOk(result: MarketingSendResult): result is Extract<MarketingSendResult, { ok: true }> {

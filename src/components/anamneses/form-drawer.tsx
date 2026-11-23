@@ -14,7 +14,7 @@ import {
   serializeQuestions,
   type AnamnesisQuestion,
   type QuestionType,
-} from "@/lib/anamnesis";
+} from "@/lib/anamnesis-shared";
 import { cn, slugify } from "@/lib/utils";
 import type { AnamnesisFormRow } from "@/components/anamneses/types";
 
