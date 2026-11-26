@@ -35,7 +35,7 @@ export const PERMISSION_MODULES = [
   {
     id: "comandas",
     label: "Comandas",
-    description: "Abrir, editar e faturar comandas.",
+    description: "Abrir, editar e faturar comandas. Reabrir comandas fechadas fica só com o administrador.",
     href: "/comandas",
     extras: [] as const,
   },
@@ -357,6 +357,10 @@ export function canViewAllGoals(access: Pick<Access, "isAdmin" | "grants">) {
 }
 
 export function canManageCommissions(access: Pick<Access, "isAdmin" | "grants">) {
+  return access.isAdmin;
+}
+
+export function canReopenComandas(access: Pick<Access, "isAdmin" | "grants">) {
   return access.isAdmin;
 }
 

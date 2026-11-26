@@ -16,8 +16,9 @@ import { calendarDate } from "@/lib/dates";
 import { decorateCatalogItem } from "@/lib/promotions";
 import { loadPromoRules } from "@/lib/promo-load";
 import { financeMethodLabel } from "@/lib/finance";
-import { canAccess, shouldHidePhones } from "@/lib/permissions";
+import { canAccess, canReopenComandas, shouldHidePhones } from "@/lib/permissions";
 import { loadClientActivePackageBalances } from "@/lib/packages";
+import { ReopenComandaButton } from "@/components/comandas/reopen-comanda-button";
 import { Package, Trash2 } from "lucide-react";
 
 export default async function ComandaPage({ params }: { params: Promise<{ id: string }> }) {
@@ -55,6 +56,7 @@ export default async function ComandaPage({ params }: { params: Promise<{ id: st
 
   const open = comanda.status === "OPEN";
   const canEdit = canAccess(access, "comandas", "edit");
+  const canReopen = comanda.status === "CLOSED" && canReopenComandas(access);
   const subtotal = comandaSubtotal(comanda.items);
   const total = comandaTotal({
     items: comanda.items,
@@ -254,6 +256,9 @@ export default async function ComandaPage({ params }: { params: Promise<{ id: st
               <p className="text-sm text-ink-soft">
                 Paga via {financeMethodLabel(comanda.paymentMethod ?? "", catalog.methods.find((m) => m.code === comanda.paymentMethod)?.name)}
               </p>
+              {canReopen ? (
+                <ReopenComandaButton comandaId={comanda.id} comandaNumber={comanda.number} />
+              ) : null}
               {canEdit ? (
                 <form action={formAction(emitComandaInvoice)}>
                   <input type="hidden" name="comandaId" value={comanda.id} />

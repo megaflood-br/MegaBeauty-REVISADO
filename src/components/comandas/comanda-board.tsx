@@ -5,6 +5,7 @@ import Link from "next/link";
 import { CirclePlay, Plus } from "lucide-react";
 import { Badge, Button, Input } from "@/components/ui";
 import { ComandaDrawer } from "@/components/comandas/comanda-drawer";
+import { ReopenComandaButton } from "@/components/comandas/reopen-comanda-button";
 import { formatBRL } from "@/lib/money";
 import { formatShortDate } from "@/lib/dates";
 import { COMANDA_STATUS_COLOR, COMANDA_STATUS_LABEL, PAYMENT_LABEL, type ComandaStatus } from "@/lib/constants";
@@ -22,6 +23,7 @@ export function ComandaBoard({
   paymentMethods = [],
   canCreate = true,
   canEdit = true,
+  canReopen = false,
   hidePhones = false,
 }: {
   comandas: ComandaFormValue[];
@@ -34,9 +36,11 @@ export function ComandaBoard({
   paymentMethods?: PaymentMethodOption[];
   canCreate?: boolean;
   canEdit?: boolean;
+  canReopen?: boolean;
   hidePhones?: boolean;
 }) {
   const [editing, setEditing] = useState<ComandaFormValue | null | undefined>(undefined);
+  const [reopenError, setReopenError] = useState<string | null>(null);
   const [showOpen, setShowOpen] = useState(true);
   const [showClosed, setShowClosed] = useState(true);
   const [showCancelled, setShowCancelled] = useState(false);
@@ -108,36 +112,71 @@ export function ComandaBoard({
         </aside>
 
         <div className="overflow-hidden rounded-2xl border border-line bg-white">
+          {reopenError ? (
+            <div className="flex items-center justify-between gap-2 border-b border-red-200 bg-red-50 px-4 py-2.5 text-sm text-red-700">
+              <span>{reopenError}</span>
+              <button
+                type="button"
+                onClick={() => setReopenError(null)}
+                className="text-xs font-medium text-red-700 underline"
+              >
+                Fechar
+              </button>
+            </div>
+          ) : null}
           {visible.length === 0 ? (
             <p className="px-4 py-12 text-center text-sm text-ink-soft">Nenhuma comanda neste filtro.</p>
           ) : (
             <div className="overflow-x-auto">
-              <div className="grid min-w-[540px] grid-cols-[80px_1fr_120px_120px_110px] items-center gap-2 border-b border-line px-4 py-2.5 text-sm font-medium text-ink-soft">
+              <div
+                className={`grid items-center gap-2 border-b border-line px-4 py-2.5 text-sm font-medium text-ink-soft ${
+                  canReopen
+                    ? "min-w-[650px] grid-cols-[80px_1fr_120px_120px_110px_104px]"
+                    : "min-w-[540px] grid-cols-[80px_1fr_120px_120px_110px]"
+                }`}
+              >
                 <span>Ticket</span>
                 <span>Cliente</span>
                 <span>Status</span>
                 <span className="text-right">Total</span>
                 <span className="text-right">Data</span>
+                {canReopen ? <span className="text-right">Ações</span> : null}
               </div>
-              <ul className="min-w-[540px]">
+              <ul className={canReopen ? "min-w-[650px]" : "min-w-[540px]"}>
                 {visible.map((c) => (
-                  <li key={c.id} className="border-b border-line last:border-0">
+                  <li key={c.id} className="flex items-center border-b border-line last:border-0 hover:bg-slate-50">
                     {c.status === "OPEN" && canEdit ? (
                       <button
                         type="button"
                         onClick={() => setEditing(c)}
-                        className="grid w-full grid-cols-[80px_1fr_120px_120px_110px] items-center gap-2 px-4 py-3 text-left hover:bg-slate-50"
+                        className={`grid min-w-0 flex-1 grid-cols-[80px_1fr_120px_120px_110px] items-center gap-2 py-3 text-left ${
+                          canReopen ? "pl-4 pr-2" : "px-4"
+                        }`}
                       >
                         <Row comanda={c} />
                       </button>
                     ) : (
                       <Link
                         href={`/comandas/${c.id}`}
-                        className="grid grid-cols-[80px_1fr_120px_120px_110px] items-center gap-2 px-4 py-3 hover:bg-slate-50"
+                        className={`grid min-w-0 flex-1 grid-cols-[80px_1fr_120px_120px_110px] items-center gap-2 py-3 ${
+                          canReopen ? "pl-4 pr-2" : "px-4"
+                        }`}
                       >
                         <Row comanda={c} />
                       </Link>
                     )}
+                    {canReopen ? (
+                      <div className="flex w-[120px] shrink-0 justify-end pr-4">
+                        {c.status === "CLOSED" ? (
+                          <ReopenComandaButton
+                            comandaId={c.id}
+                            comandaNumber={c.number}
+                            compact
+                            onError={setReopenError}
+                          />
+                        ) : null}
+                      </div>
+                    ) : null}
                   </li>
                 ))}
               </ul>

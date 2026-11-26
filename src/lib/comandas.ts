@@ -32,3 +32,46 @@ export function allocatePayments<T extends { amountCents: number }>(totalCents: 
     return { ...payment, appliedCents };
   });
 }
+
+export function reopenComandaGuards(input: {
+  status: string;
+  commissions: { status: string }[];
+  invoices: { status: string }[];
+}): { ok: true } | { ok: false; error: string } {
+  if (input.status !== "CLOSED") {
+    return { ok: false, error: "Somente comandas fechadas podem ser reabertas." };
+  }
+  if (input.commissions.some((c) => c.status === "PAID")) {
+    return { ok: false, error: "Não é possível reabrir: há comissão já paga para esta comanda." };
+  }
+  if (input.invoices.some((i) => i.status === "AUTHORIZED" || i.status === "PROCESSING")) {
+    return { ok: false, error: "Cancele a nota fiscal emitida antes de reabrir esta comanda." };
+  }
+  return { ok: true };
+}
+
+export function computeReopenedBalances(input: {
+  clientCreditCents: number;
+  clientCashbackCents: number;
+  comandaCreditCents: number;
+  cashbackMovements: { amountCents: number }[];
+}) {
+  const netCashbackDelta = input.cashbackMovements.reduce((sum, m) => sum + m.amountCents, 0);
+  return {
+    creditCents: Math.max(0, input.clientCreditCents) + Math.max(0, input.comandaCreditCents),
+    cashbackCents: Math.max(0, input.clientCashbackCents - netCashbackDelta),
+  };
+}
+
+export function aggregateStockReversal(moves: { productId: string; type: string; quantity: number }[]) {
+  const deltas = new Map<string, number>();
+  for (const move of moves) {
+    const current = deltas.get(move.productId) ?? 0;
+    if (move.type === "OUT") {
+      deltas.set(move.productId, current + move.quantity);
+    } else if (move.type === "IN") {
+      deltas.set(move.productId, current - move.quantity);
+    }
+  }
+  return deltas;
+}

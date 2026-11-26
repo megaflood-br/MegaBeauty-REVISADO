@@ -6,7 +6,14 @@ import { prisma } from "@/lib/db";
 import { requireTenant } from "@/lib/tenant";
 import { calculateCommission } from "@/lib/commissions";
 import { nextStock } from "@/lib/stock";
-import { allocatePayments, comandaSubtotal, comandaTotal } from "@/lib/comandas";
+import {
+  aggregateStockReversal,
+  allocatePayments,
+  comandaSubtotal,
+  comandaTotal,
+  computeReopenedBalances,
+  reopenComandaGuards,
+} from "@/lib/comandas";
 import { parseBRLToCents, formatBRL } from "@/lib/money";
 import { calendarDate, zonedDateTime } from "@/lib/dates";
 import { PAYMENT_METHODS } from "@/lib/constants";
@@ -22,7 +29,7 @@ import { applyCatalogPrice } from "@/lib/promotions";
 import { loadPromoRules } from "@/lib/promo-load";
 import { moneyVar, safeDispatch } from "@/lib/dispatch-whatsapp-campaign";
 import { safeNotifyAppointmentStatusChange } from "@/lib/appointment-status-notify";
-import { canAccess } from "@/lib/permissions";
+import { canAccess, canReopenComandas } from "@/lib/permissions";
 import { loadClientActivePackageBalances } from "@/lib/packages";
 import { isClientPackageExpired, matchAvailablePackageItem } from "@/lib/packages-shared";
 
@@ -843,4 +850,163 @@ export async function closeComanda(formData: FormData) {
       : [],
     discountCents,
   );
+}
+
+export async function reopenComanda(comandaId: string) {
+  const { session, access } = await requireTenant();
+  if (!canReopenComandas(access)) {
+    return { error: "Apenas administradores podem reabrir comandas fechadas." };
+  }
+  const id = String(comandaId ?? "").trim();
+  if (!id) return { error: "Comanda inválida." };
+
+  const tenantId = session.tenantId;
+
+  const result = await prisma.$transaction(async (tx) => {
+    const comanda = await tx.comanda.findFirst({
+      where: { id, tenantId },
+      include: {
+        client: true,
+        appointment: { select: { id: true, status: true } },
+        commissions: { select: { id: true, status: true } },
+        invoices: { select: { id: true, status: true } },
+        stockMoves: { select: { id: true, productId: true, type: true, quantity: true } },
+        packageUsages: {
+          include: {
+            clientPackageItem: {
+              select: { id: true, clientPackageId: true, totalQty: true, remainingQty: true },
+            },
+          },
+        },
+      },
+    });
+    if (!comanda) return { error: "Comanda não encontrada." } as const;
+
+    const guard = reopenComandaGuards({
+      status: comanda.status,
+      commissions: comanda.commissions,
+      invoices: comanda.invoices,
+    });
+    if (!guard.ok) return { error: guard.error } as const;
+
+    const claimed = await tx.comanda.updateMany({
+      where: { id: comanda.id, tenantId, status: "CLOSED" },
+      data: {
+        status: "OPEN",
+        closedAt: null,
+        paymentMethod: null,
+      },
+    });
+    if (claimed.count === 0) {
+      return { error: "Esta comanda já foi reaberta." } as const;
+    }
+
+    if (comanda.packageUsages.length > 0) {
+      const restoreByItemId = new Map<string, { totalQty: number; remainingQty: number; addQty: number; clientPackageId: string }>();
+      const affectedPackageIds = new Set<string>();
+      for (const usage of comanda.packageUsages) {
+        affectedPackageIds.add(usage.clientPackageId);
+        const item = usage.clientPackageItem;
+        if (!item) continue;
+        const prev = restoreByItemId.get(item.id);
+        restoreByItemId.set(item.id, {
+          totalQty: item.totalQty,
+          remainingQty: item.remainingQty,
+          addQty: (prev?.addQty ?? 0) + usage.quantity,
+          clientPackageId: item.clientPackageId,
+        });
+      }
+
+      for (const [pkgItemId, info] of restoreByItemId.entries()) {
+        await tx.clientPackageItem.update({
+          where: { id: pkgItemId },
+          data: { remainingQty: Math.min(info.totalQty, info.remainingQty + info.addQty) },
+        });
+      }
+
+      await tx.clientPackageUsage.deleteMany({
+        where: { tenantId, comandaId: comanda.id },
+      });
+
+      for (const pkgId of affectedPackageIds) {
+        const pkg = await tx.clientPackage.findFirst({
+          where: { id: pkgId, tenantId },
+          include: { items: { select: { remainingQty: true } } },
+        });
+        if (!pkg) continue;
+        const nextRemaining = pkg.items.reduce((sum, item) => sum + item.remainingQty, 0);
+        const nextStatus = pkg.status === "CANCELLED" ? "CANCELLED" : nextRemaining > 0 ? "ACTIVE" : "CONSUMED";
+        await tx.clientPackage.update({
+          where: { id: pkg.id },
+          data: { remaining: nextRemaining, status: nextStatus },
+        });
+      }
+    }
+
+    const cashbackMovements = await tx.cashbackMovement.findMany({
+      where: { tenantId, comandaId: comanda.id },
+      select: { id: true, amountCents: true },
+    });
+    if (comanda.client && (comanda.creditCents > 0 || cashbackMovements.length > 0)) {
+      const nextBalances = computeReopenedBalances({
+        clientCreditCents: comanda.client.creditCents,
+        clientCashbackCents: comanda.client.cashbackCents,
+        comandaCreditCents: comanda.creditCents,
+        cashbackMovements,
+      });
+      await tx.client.update({
+        where: { id: comanda.client.id },
+        data: nextBalances,
+      });
+      if (cashbackMovements.length > 0) {
+        await tx.cashbackMovement.deleteMany({
+          where: { tenantId, comandaId: comanda.id },
+        });
+      }
+    }
+
+    await tx.transaction.deleteMany({
+      where: { tenantId, comandaId: comanda.id },
+    });
+
+    await tx.commission.deleteMany({
+      where: { tenantId, comandaId: comanda.id, status: { not: "PAID" } },
+    });
+
+    if (comanda.stockMoves.length > 0) {
+      const stockDeltas = aggregateStockReversal(comanda.stockMoves);
+      for (const [productId, delta] of stockDeltas.entries()) {
+        if (delta === 0) continue;
+        const product = await tx.product.findFirst({
+          where: { id: productId, tenantId },
+          select: { id: true, stock: true },
+        });
+        if (!product) continue;
+        await tx.product.update({
+          where: { id: product.id },
+          data: { stock: product.stock + delta },
+        });
+      }
+      await tx.stockMovement.deleteMany({
+        where: { tenantId, comandaId: comanda.id },
+      });
+    }
+
+    if (comanda.appointmentId && comanda.appointment?.status === "COMPLETED") {
+      await tx.appointment.update({
+        where: { id: comanda.appointmentId },
+        data: { status: "CONFIRMED" },
+      });
+    }
+
+    return { ok: true as const, id: comanda.id, clientId: comanda.clientId };
+  });
+
+  if ("error" in result) return { error: result.error };
+
+  revalidateComandas();
+  revalidatePath(`/comandas/${result.id}`);
+  revalidatePath(`/clientes/${result.clientId}`);
+  revalidatePath("/notas");
+  return { ok: true as const, id: result.id };
 }

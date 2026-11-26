@@ -2,14 +2,17 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { PrismaClient } from "@prisma/client";
+import { fileURLToPath } from "node:url";
 
 const cwd = process.cwd();
 const envFilePath = path.resolve(cwd, ".env");
+const schemaFilePath = path.resolve(cwd, "prisma/schema.prisma");
 const defaultDbPath = path.resolve(cwd, "prisma/dev.db");
 const defaultDbUrl = `file:${defaultDbPath}`;
+const prismaClientEntryPath = path.resolve(cwd, "node_modules/.prisma/client/index.js");
+const stampFilePath = path.resolve(cwd, ".next/.ensure-db-stamp");
 
-function readEnvFile(filePath) {
+export function readEnvFile(filePath = envFilePath) {
   if (!fs.existsSync(filePath)) return {};
   const out = {};
   const lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/);
@@ -20,7 +23,10 @@ function readEnvFile(filePath) {
     if (eq === -1) continue;
     const key = trimmed.slice(0, eq).trim();
     let val = trimmed.slice(eq + 1).trim();
-    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+    if (
+      (val.startsWith('"') && val.endsWith('"')) ||
+      (val.startsWith("'") && val.endsWith("'"))
+    ) {
       val = val.slice(1, -1);
     }
     out[key] = val;
@@ -28,7 +34,7 @@ function readEnvFile(filePath) {
   return out;
 }
 
-function ensureLocalDevEnv() {
+export function ensureLocalDevEnv() {
   if (process.env.NODE_ENV === "production") return;
   const existing = readEnvFile(envFilePath);
   const additions = [];
@@ -44,7 +50,7 @@ function ensureLocalDevEnv() {
   fs.appendFileSync(envFilePath, `${prefix}${additions.join("\n")}\n`, "utf8");
 }
 
-function resolveDatabaseUrl() {
+export function resolveDatabaseUrl() {
   const fileEnv = readEnvFile(envFilePath);
   const raw = (process.env.DATABASE_URL || fileEnv.DATABASE_URL || "").trim();
   if (!raw) return defaultDbUrl;
@@ -56,21 +62,102 @@ function resolveDatabaseUrl() {
   return raw;
 }
 
-async function hasTenantTable(databaseUrl) {
-  const client = new PrismaClient({ datasourceUrl: databaseUrl, log: [] });
+export function resolveLocalBin(binName) {
+  const suffix = process.platform === "win32" ? ".cmd" : "";
+  const localPath = path.resolve(cwd, "node_modules/.bin", `${binName}${suffix}`);
+  if (fs.existsSync(localPath)) {
+    return { cmd: localPath, prefixArgs: [] };
+  }
+  const npxCmd = process.platform === "win32" ? "npx.cmd" : "npx";
+  return { cmd: npxCmd, prefixArgs: [binName] };
+}
+
+function runLocalBin(binName, args, env) {
+  const { cmd, prefixArgs } = resolveLocalBin(binName);
+  execFileSync(cmd, [...prefixArgs, ...args], {
+    cwd,
+    env,
+    stdio: "inherit",
+  });
+}
+
+function computeSchemaHash() {
+  if (!fs.existsSync(schemaFilePath)) return "";
+  return crypto
+    .createHash("sha256")
+    .update(fs.readFileSync(schemaFilePath))
+    .digest("hex")
+    .slice(0, 16);
+}
+
+function expectedStamp(dbFilePath) {
+  return `${dbFilePath}\n${computeSchemaHash()}`;
+}
+
+function hasCurrentStamp(dbFilePath) {
   try {
-    const rows = await client.$queryRawUnsafe(
-      "SELECT name FROM sqlite_master WHERE type='table' AND name='Tenant'",
-    );
-    return Array.isArray(rows) && rows.length > 0;
+    if (!fs.existsSync(stampFilePath)) return false;
+    return fs.readFileSync(stampFilePath, "utf8").trim() === expectedStamp(dbFilePath);
   } catch {
     return false;
-  } finally {
-    await client.$disconnect().catch(() => null);
   }
 }
 
+function writeStamp(dbFilePath) {
+  try {
+    fs.mkdirSync(path.dirname(stampFilePath), { recursive: true });
+    fs.writeFileSync(stampFilePath, `${expectedStamp(dbFilePath)}\n`, "utf8");
+  } catch {
+    // Non-fatal: .next may not be writable in some environments
+  }
+}
+
+export function getDbSetupPlan() {
+  const needsGenerate = !fs.existsSync(prismaClientEntryPath);
+  const databaseUrl = resolveDatabaseUrl();
+  if (!databaseUrl.startsWith("file:")) {
+    return {
+      databaseUrl,
+      dbFilePath: null,
+      needsGenerate,
+      needsPush: false,
+      isFreshDb: false,
+    };
+  }
+
+  const dbFilePath = databaseUrl.slice("file:".length);
+  const dbExists = fs.existsSync(dbFilePath) && fs.statSync(dbFilePath).size > 0;
+  if (!dbExists) {
+    return {
+      databaseUrl,
+      dbFilePath,
+      needsGenerate,
+      needsPush: true,
+      isFreshDb: true,
+    };
+  }
+
+  if (!needsGenerate && hasCurrentStamp(dbFilePath)) {
+    return {
+      databaseUrl,
+      dbFilePath,
+      needsGenerate: false,
+      needsPush: false,
+      isFreshDb: false,
+    };
+  }
+
+  return {
+    databaseUrl,
+    dbFilePath,
+    needsGenerate,
+    needsPush: true,
+    isFreshDb: false,
+  };
+}
+
 async function countTenants(databaseUrl) {
+  const { PrismaClient } = await import("@prisma/client");
   const client = new PrismaClient({ datasourceUrl: databaseUrl, log: [] });
   try {
     return await client.tenant.count();
@@ -81,46 +168,41 @@ async function countTenants(databaseUrl) {
   }
 }
 
-async function main() {
+export async function ensureDb() {
   ensureLocalDevEnv();
 
-  const databaseUrl = resolveDatabaseUrl();
-  if (!databaseUrl.startsWith("file:")) {
+  const plan = getDbSetupPlan();
+  const env = { ...process.env, DATABASE_URL: plan.databaseUrl };
+
+  if (plan.needsGenerate) {
+    console.log("[ensure-db] Generating Prisma client...");
+    runLocalBin("prisma", ["generate"], env);
+  }
+
+  if (!plan.dbFilePath || !plan.needsPush) {
     return;
   }
 
-  const dbFilePath = databaseUrl.slice("file:".length);
-  const needsPush =
-    !fs.existsSync(dbFilePath) ||
-    fs.statSync(dbFilePath).size === 0 ||
-    !(await hasTenantTable(databaseUrl));
+  fs.mkdirSync(path.dirname(plan.dbFilePath), { recursive: true });
 
-  if (!needsPush) {
-    return;
-  }
+  console.log("[ensure-db] Syncing SQLite database schema...");
+  runLocalBin("prisma", ["db", "push", "--skip-generate"], env);
 
-  const env = { ...process.env, DATABASE_URL: databaseUrl };
-  const npxCmd = process.platform === "win32" ? "npx.cmd" : "npx";
-
-  console.log("[ensure-db] Initializing SQLite database schema...");
-  execFileSync(npxCmd, ["prisma", "db", "push", "--skip-generate"], {
-    cwd,
-    env,
-    stdio: "inherit",
-  });
-
-  const existingTenants = await countTenants(databaseUrl);
-  if (existingTenants === 0) {
+  const shouldSeed = plan.isFreshDb || (await countTenants(plan.databaseUrl)) === 0;
+  if (shouldSeed) {
     console.log("[ensure-db] Seeding initial MegaBeauty data...");
-    execFileSync(npxCmd, ["tsx", "prisma/seed.ts"], {
-      cwd,
-      env,
-      stdio: "inherit",
-    });
+    runLocalBin("tsx", ["prisma/seed.ts"], env);
   }
+
+  writeStamp(plan.dbFilePath);
 }
 
-main().catch((err) => {
-  console.error("[ensure-db] Failed to prepare database:", err);
-  process.exit(1);
-});
+const isDirectExecution =
+  process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (isDirectExecution) {
+  ensureDb().catch((err) => {
+    console.error("[ensure-db] Failed to prepare database:", err);
+    process.exit(1);
+  });
+}

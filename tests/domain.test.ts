@@ -16,7 +16,14 @@ import {
 } from "@/lib/assistant";
 import { formatBRL, parseBRLToCents } from "@/lib/money";
 import { slugify, formatPhoneBR, displayPhoneBR, HIDDEN_PHONE_LABEL } from "@/lib/utils";
-import { allocatePayments, comandaTotal, paymentChange } from "@/lib/comandas";
+import {
+  aggregateStockReversal,
+  allocatePayments,
+  comandaTotal,
+  computeReopenedBalances,
+  paymentChange,
+  reopenComandaGuards,
+} from "@/lib/comandas";
 import { centsToPoints, defaultCashbackConfig, earnCashbackCents, maxRedeemCents, pointsToCents } from "@/lib/cashback";
 import { parseSettingsTab, settingsPath } from "@/lib/settings";
 import {
@@ -257,6 +264,7 @@ import {
   allowedNavHrefs,
   canAccess,
   canManageCommissions,
+  canReopenComandas,
   canViewAllAgenda,
   canViewAllAnamnesis,
   canViewAllCommissions,
@@ -2976,4 +2984,80 @@ describe("pacotes de serviços e produtos", () => {
     expect(moduleFromPath("/pacotes")).toBe("comandas");
   });
 });
+
+describe("reabertura de comanda fechada (somente admin)", () => {
+  it("libera reabertura apenas para perfis administradores", () => {
+    const owner = resolveAccess({ role: "OWNER" });
+    const superAdmin = resolveAccess({ role: "SUPER_ADMIN" });
+    const manager = resolveAccess({ role: "MANAGER" });
+    const reception = resolveAccess({ role: "RECEPTIONIST" });
+    const professional = resolveAccess({ role: "PROFESSIONAL" });
+    const adminProfile = resolveAccess({
+      role: "MANAGER",
+      profile: { id: "adm-1", name: "Administrador", isAdmin: true, grants: "{}" },
+    });
+
+    expect(canReopenComandas(owner)).toBe(true);
+    expect(canReopenComandas(superAdmin)).toBe(true);
+    expect(canReopenComandas(adminProfile)).toBe(true);
+    expect(canReopenComandas(manager)).toBe(false);
+    expect(canReopenComandas(reception)).toBe(false);
+    expect(canReopenComandas(professional)).toBe(false);
+  });
+
+  it("valida regras de bloqueio ao reabrir comanda", () => {
+    expect(reopenComandaGuards({ status: "OPEN", commissions: [], invoices: [] })).toEqual({
+      ok: false,
+      error: "Somente comandas fechadas podem ser reabertas.",
+    });
+    expect(
+      reopenComandaGuards({
+        status: "CLOSED",
+        commissions: [{ status: "PAID" }],
+        invoices: [],
+      }),
+    ).toEqual({
+      ok: false,
+      error: "Não é possível reabrir: há comissão já paga para esta comanda.",
+    });
+    expect(
+      reopenComandaGuards({
+        status: "CLOSED",
+        commissions: [{ status: "PENDING" }],
+        invoices: [{ status: "AUTHORIZED" }],
+      }),
+    ).toEqual({
+      ok: false,
+      error: "Cancele a nota fiscal emitida antes de reabrir esta comanda.",
+    });
+    expect(
+      reopenComandaGuards({
+        status: "CLOSED",
+        commissions: [{ status: "PENDING" }],
+        invoices: [{ status: "CANCELLED" }, { status: "REJECTED" }],
+      }),
+    ).toEqual({ ok: true });
+  });
+
+  it("estorna crédito, cashback e estoque ao reabrir comanda", () => {
+    // Cliente tinha R$ 20 de cashback, resgatou R$ 10 (-1000) e ganhou R$ 5 (+500) -> ficou com R$ 15 (1500)
+    // Também usou R$ 30 (3000) de crédito (ficou com 0). Ao reabrir, volta para R$ 30 crédito e R$ 20 cashback.
+    const balances = computeReopenedBalances({
+      clientCreditCents: 0,
+      clientCashbackCents: 1500,
+      comandaCreditCents: 3000,
+      cashbackMovements: [{ amountCents: -1000 }, { amountCents: 500 }],
+    });
+    expect(balances).toEqual({ creditCents: 3000, cashbackCents: 2000 });
+
+    const stockDeltas = aggregateStockReversal([
+      { productId: "prod-1", type: "OUT", quantity: 2 },
+      { productId: "prod-1", type: "OUT", quantity: 0.5 },
+      { productId: "prod-2", type: "OUT", quantity: 1 },
+    ]);
+    expect(stockDeltas.get("prod-1")).toBe(2.5);
+    expect(stockDeltas.get("prod-2")).toBe(1);
+  });
+});
+
 

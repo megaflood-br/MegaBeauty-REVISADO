@@ -6,7 +6,7 @@ import { comandaTotal } from "@/lib/comandas";
 import { loadFinanceCatalog } from "@/lib/finance-catalog";
 import { decorateCatalogItem } from "@/lib/promotions";
 import { loadPromoRules } from "@/lib/promo-load";
-import { canAccess, shouldHidePhones } from "@/lib/permissions";
+import { canAccess, canReopenComandas, shouldHidePhones } from "@/lib/permissions";
 import { loadClientActivePackageBalances, loadClientSidebarSummaries } from "@/lib/packages";
 
 export default async function ComandasPage() {
@@ -65,6 +65,7 @@ export default async function ComandasPage() {
       nextNumber={(last?.number ?? 0) + 1}
       canCreate={canAccess(access, "comandas", "create")}
       canEdit={canAccess(access, "comandas", "edit")}
+      canReopen={canReopenComandas(access)}
       hidePhones={hidePhones}
       clients={clients}
       clientPackagesByClient={clientPackagesByClient}
