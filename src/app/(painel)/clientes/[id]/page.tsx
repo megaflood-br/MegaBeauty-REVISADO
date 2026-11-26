@@ -6,6 +6,7 @@ import { buildClientMetrics } from "@/lib/client-metrics";
 import { anamnesisAreasForAccess, ensureAnamnesisForms, formAllowedByAreas, mapAnamnesisRow, mapFormRow } from "@/lib/anamnesis";
 import { canAccess, shouldHidePhones } from "@/lib/permissions";
 import { redactPhone } from "@/lib/utils";
+import { loadClientPackagesForProfile } from "@/lib/packages";
 
 export default async function ClientePage({
   params,
@@ -49,7 +50,7 @@ export default async function ClientePage({
   const hidePhones = shouldHidePhones(access);
   const areas = await anamnesisAreasForAccess(session.tenantId, access);
   const ownOnly = Boolean(access.professionalId && !canAccess(access, "anamnesis", "viewAll"));
-  const [forms, professionals] = await Promise.all([
+  const [forms, professionals, packageData] = await Promise.all([
     prisma.anamnesisForm.findMany({
       where: { tenantId: session.tenantId },
       include: { _count: { select: { records: true } } },
@@ -64,6 +65,7 @@ export default async function ClientePage({
       orderBy: { name: "asc" },
       select: { id: true, name: true },
     }),
+    loadClientPackagesForProfile(session.tenantId, client.id, hidePhones),
   ]);
   const visibleForms = forms.map(mapFormRow).filter((form) => formAllowedByAreas(areas, form.area));
   const visibleIds = new Set(visibleForms.map((form) => form.id));
@@ -73,7 +75,9 @@ export default async function ClientePage({
     creditCents: client.creditCents,
     cashbackCents: client.cashbackCents,
     appointments: client.appointments,
-    packages: client.packages,
+    packages: packageData.clientPackages.map((p) => ({
+      remaining: p.effectiveStatus === "ACTIVE" ? p.remaining : 0,
+    })),
     comandas: client.comandas,
   });
 
@@ -87,7 +91,16 @@ export default async function ClientePage({
       metrics={metrics}
       appointments={client.appointments}
       comandas={client.comandas}
-      packages={client.packages}
+      packages={packageData.clientPackages}
+      packageTemplates={packageData.templates}
+      packageClients={packageData.clients}
+      packageBalancesByClient={packageData.balancesByClient}
+      packageServices={packageData.services}
+      packageProducts={packageData.products}
+      packagePaymentMethods={packageData.paymentMethods}
+      canCreatePackage={canAccess(access, "comandas", "create")}
+      canEditPackage={canAccess(access, "comandas", "edit")}
+      canRemovePackage={canAccess(access, "comandas", "remove")}
       messages={messages}
       anamneses={client.anamneses
         .map(mapAnamnesisRow)

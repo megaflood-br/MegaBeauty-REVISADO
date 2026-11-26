@@ -39,7 +39,10 @@ async function main() {
   await prisma.message.deleteMany();
   await prisma.conversation.deleteMany();
   await prisma.automation.deleteMany();
+  await prisma.clientPackageUsage.deleteMany();
+  await prisma.clientPackageItem.deleteMany();
   await prisma.clientPackage.deleteMany();
+  await prisma.packageItem.deleteMany();
   await prisma.package.deleteMany();
   await prisma.commission.deleteMany();
   await prisma.stockMovement.deleteMany();
@@ -894,17 +897,49 @@ async function main() {
     data: {
       tenantId: aurora.id,
       name: "Combo hidratação (4 sessões)",
+      description: "Quatro sessões de hidratação profunda com valor promocional.",
       priceCents: 30000,
       sessions: 4,
+      validityDays: 90,
       serviceId: hidratacao.id,
+      items: {
+        create: [
+          {
+            type: "SERVICE",
+            serviceId: hidratacao.id,
+            description: hidratacao.name,
+            quantity: 4,
+            unitPriceCents: 7500,
+          },
+        ],
+      },
     },
   });
   await prisma.clientPackage.create({
     data: {
       tenantId: aurora.id,
+      number: 1,
+      name: pack.name,
       clientId: renata.id,
       packageId: pack.id,
+      sellerId: rafaela.id,
       remaining: 3,
+      status: "ACTIVE",
+      totalCents: 30000,
+      paymentMethod: "PIX",
+      expiresAt: addDays(new Date(), 60),
+      items: {
+        create: [
+          {
+            type: "SERVICE",
+            serviceId: hidratacao.id,
+            description: hidratacao.name,
+            totalQty: 4,
+            remainingQty: 3,
+            unitPriceCents: 7500,
+          },
+        ],
+      },
     },
   });
 

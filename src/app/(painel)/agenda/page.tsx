@@ -6,6 +6,7 @@ import type { AgendaAppointment, AgendaClient } from "@/components/agenda/types"
 import type { AppointmentStatus } from "@/lib/constants";
 import { canAccess, canViewAllAgenda, shouldHidePhones } from "@/lib/permissions";
 import { redactPhone } from "@/lib/utils";
+import { isClientPackageExpired } from "@/lib/packages-shared";
 
 export default async function AgendaPage({
   searchParams,
@@ -40,7 +41,13 @@ export default async function AgendaPage({
       where: { tenantId: session.tenantId },
       orderBy: { name: "asc" },
       include: {
-        packages: { include: { package: true } },
+        packages: {
+          where: { status: "ACTIVE", remaining: { gt: 0 } },
+          include: {
+            package: true,
+            items: { where: { remainingQty: { gt: 0 } } },
+          },
+        },
         comandas: { where: { status: "OPEN" }, select: { id: true } },
       },
     }),
@@ -58,11 +65,24 @@ export default async function AgendaPage({
     creditCents: c.creditCents,
     cashbackCents: c.cashbackCents,
     openComandas: c.comandas.length,
-    packages: c.packages.map((p) => ({
-      name: p.package.name,
-      remaining: p.remaining,
-      priceCents: p.package.priceCents,
-    })),
+    packages: c.packages
+      .filter((p) => !isClientPackageExpired(p.expiresAt))
+      .flatMap((p) => {
+        if (p.items.length > 0) {
+          return p.items.map((item) => ({
+            name: `${item.description}${p.number ? ` (#${p.number})` : ""}`,
+            remaining: item.remainingQty,
+            priceCents: item.unitPriceCents,
+          }));
+        }
+        return [
+          {
+            name: p.name || p.package?.name || `Pacote${p.number ? ` #${p.number}` : ""}`,
+            remaining: p.remaining,
+            priceCents: p.totalCents || p.package?.priceCents || 0,
+          },
+        ];
+      }),
   }));
 
   const mapped: AgendaAppointment[] = appointments.map((a) => ({

@@ -7,6 +7,8 @@ export type ComandaItemDraft = {
   priceCents: number;
   discount: string;
   discountType: "money" | "percent";
+  clientPackageItemId?: string | null;
+  packageLabel?: string | null;
 };
 
 export type PaymentDraft = {

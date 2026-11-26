@@ -23,6 +23,8 @@ import { loadPromoRules } from "@/lib/promo-load";
 import { moneyVar, safeDispatch } from "@/lib/dispatch-whatsapp-campaign";
 import { safeNotifyAppointmentStatusChange } from "@/lib/appointment-status-notify";
 import { canAccess } from "@/lib/permissions";
+import { loadClientActivePackageBalances } from "@/lib/packages";
+import { isClientPackageExpired, matchAvailablePackageItem } from "@/lib/packages-shared";
 
 async function nextNumber(tenantId: string) {
   const last = await prisma.comanda.findFirst({
@@ -35,6 +37,7 @@ async function nextNumber(tenantId: string) {
 
 function revalidateComandas() {
   revalidatePath("/comandas");
+  revalidatePath("/pacotes");
   revalidatePath("/agenda");
   revalidatePath("/dashboard");
   revalidatePath("/financeiro");
@@ -56,6 +59,10 @@ export async function createComandaFromAppointment(appointmentId: string) {
   }
   if (!canAccess(access, "comandas", "create")) return { error: "Sem permissão para abrir comanda." };
 
+  const balancesMap = await loadClientActivePackageBalances(session.tenantId, appointment.clientId);
+  const clientBalances = balancesMap[appointment.clientId] ?? [];
+  const allocatedByPkgItem: Record<string, number> = {};
+
   const comanda = await prisma.comanda.create({
     data: {
       tenantId: session.tenantId,
@@ -65,15 +72,22 @@ export async function createComandaFromAppointment(appointmentId: string) {
       professionalId: appointment.professionalId,
       status: "OPEN",
       items: {
-        create: appointment.items.map((item) => ({
-          type: "SERVICE",
-          serviceId: item.serviceId,
-          professionalId: item.professionalId ?? appointment.professionalId,
-          description: item.service.name,
-          quantity: 1,
-          priceCents: item.priceCents,
-          durationMin: item.durationMin,
-        })),
+        create: appointment.items.map((item) => {
+          const matched = matchAvailablePackageItem(clientBalances, "SERVICE", item.serviceId, 1, allocatedByPkgItem);
+          if (matched) {
+            allocatedByPkgItem[matched.id] = (allocatedByPkgItem[matched.id] ?? 0) + 1;
+          }
+          return {
+            type: "SERVICE",
+            serviceId: item.serviceId,
+            professionalId: item.professionalId ?? appointment.professionalId,
+            clientPackageItemId: matched?.id ?? null,
+            description: item.service.name,
+            quantity: 1,
+            priceCents: matched ? 0 : item.priceCents,
+            durationMin: item.durationMin,
+          };
+        }),
       },
     },
   });
@@ -122,14 +136,22 @@ export async function upsertComanda(formData: FormData) {
   const discounts = formData.getAll("itemDiscount").map(String);
   const discountTypes = formData.getAll("itemDiscountType").map(String);
   const itemProfessionals = formData.getAll("itemProfessionalId").map(String);
+  const itemPackageIds = formData.getAll("itemPackageItemId").map(String);
 
-  const promos = await loadPromoRules(session.tenantId);
+  const [promos, balancesMap] = await Promise.all([
+    loadPromoRules(session.tenantId),
+    loadClientActivePackageBalances(session.tenantId, clientId),
+  ]);
+  const clientBalances = balancesMap[clientId] ?? [];
+  const balanceById = new Map(clientBalances.map((b) => [b.id, b]));
+  const allocatedByPkgItem: Record<string, number> = {};
 
   const parsedItems: {
     type: string;
     serviceId: string | null;
     productId: string | null;
     professionalId: string | null;
+    clientPackageItemId: string | null;
     description: string;
     quantity: number;
     priceCents: number;
@@ -145,41 +167,105 @@ export async function upsertComanda(formData: FormData) {
     const priceCents = parseBRLToCents(prices[i] ?? "0");
     const discountInput = discounts[i] ?? "0";
     const discountType = discountTypes[i] === "percent" ? "percent" : "money";
+    const requestedPkgItemId = (itemPackageIds[i] ?? "").trim() || null;
+
+    let validatedPkgItemId: string | null = null;
+    if (requestedPkgItemId) {
+      const pkgBalance = balanceById.get(requestedPkgItemId);
+      const unitsNeeded = Math.max(1, Math.ceil(quantity));
+      if (!pkgBalance || pkgBalance.type !== kind || pkgBalance.catalogId !== entityId) {
+        return { error: "Um dos itens vinculados ao pacote não corresponde ao saldo ativo do cliente." };
+      }
+      const alreadyUsed = allocatedByPkgItem[pkgBalance.id] ?? 0;
+      if (pkgBalance.remainingQty - alreadyUsed < unitsNeeded) {
+        return { error: `Saldo insuficiente no pacote #${pkgBalance.packageNumber} para ${pkgBalance.description}.` };
+      }
+      allocatedByPkgItem[pkgBalance.id] = alreadyUsed + unitsNeeded;
+      validatedPkgItemId = pkgBalance.id;
+    }
+
     const gross = Math.round(quantity * priceCents);
     const discountCentsItem =
       discountType === "percent"
         ? Math.round(gross * ((Number(String(discountInput).replace(",", ".")) || 0) / 100))
         : parseBRLToCents(discountInput);
+
     if (kind === "SERVICE") {
       const service = await prisma.service.findFirst({ where: { id: entityId, tenantId: session.tenantId } });
       if (!service) continue;
-      const priced = applyCatalogPrice(promos, dateRaw && /^\d{4}-\d{2}-\d{2}$/.test(dateRaw) ? dateRaw : calendarDate(), "SERVICE", service.id, service.priceCents, priceCents || undefined);
-      parsedItems.push({
-        type: "SERVICE",
-        serviceId: service.id,
-        productId: null,
-        professionalId: itemProfessionals[i] || professionalId,
-        description: priced.promoName ? `${service.name} (${priced.promoName})` : service.name,
-        quantity,
-        priceCents: priced.priceCents,
-        discountCents: Math.min(Math.round(quantity * priced.priceCents), Math.max(0, discountCentsItem)),
-        durationMin: service.durationMin,
-      });
+      if (validatedPkgItemId) {
+        parsedItems.push({
+          type: "SERVICE",
+          serviceId: service.id,
+          productId: null,
+          professionalId: itemProfessionals[i] || professionalId,
+          clientPackageItemId: validatedPkgItemId,
+          description: service.name,
+          quantity,
+          priceCents: 0,
+          discountCents: 0,
+          durationMin: service.durationMin,
+        });
+      } else {
+        const priced = applyCatalogPrice(
+          promos,
+          dateRaw && /^\d{4}-\d{2}-\d{2}$/.test(dateRaw) ? dateRaw : calendarDate(),
+          "SERVICE",
+          service.id,
+          service.priceCents,
+          priceCents || undefined,
+        );
+        parsedItems.push({
+          type: "SERVICE",
+          serviceId: service.id,
+          productId: null,
+          professionalId: itemProfessionals[i] || professionalId,
+          clientPackageItemId: null,
+          description: priced.promoName ? `${service.name} (${priced.promoName})` : service.name,
+          quantity,
+          priceCents: priced.priceCents,
+          discountCents: Math.min(Math.round(quantity * priced.priceCents), Math.max(0, discountCentsItem)),
+          durationMin: service.durationMin,
+        });
+      }
     } else if (kind === "PRODUCT") {
       const product = await prisma.product.findFirst({ where: { id: entityId, tenantId: session.tenantId } });
       if (!product) continue;
-      const priced = applyCatalogPrice(promos, dateRaw && /^\d{4}-\d{2}-\d{2}$/.test(dateRaw) ? dateRaw : calendarDate(), "PRODUCT", product.id, product.saleCents, priceCents || undefined);
-      parsedItems.push({
-        type: "PRODUCT",
-        serviceId: null,
-        productId: product.id,
-        professionalId: itemProfessionals[i] || professionalId,
-        description: priced.promoName ? `${product.name} (${priced.promoName})` : product.name,
-        quantity,
-        priceCents: priced.priceCents,
-        discountCents: Math.min(Math.round(quantity * priced.priceCents), Math.max(0, discountCentsItem)),
-        durationMin: 0,
-      });
+      if (validatedPkgItemId) {
+        parsedItems.push({
+          type: "PRODUCT",
+          serviceId: null,
+          productId: product.id,
+          professionalId: itemProfessionals[i] || professionalId,
+          clientPackageItemId: validatedPkgItemId,
+          description: product.name,
+          quantity,
+          priceCents: 0,
+          discountCents: 0,
+          durationMin: 0,
+        });
+      } else {
+        const priced = applyCatalogPrice(
+          promos,
+          dateRaw && /^\d{4}-\d{2}-\d{2}$/.test(dateRaw) ? dateRaw : calendarDate(),
+          "PRODUCT",
+          product.id,
+          product.saleCents,
+          priceCents || undefined,
+        );
+        parsedItems.push({
+          type: "PRODUCT",
+          serviceId: null,
+          productId: product.id,
+          professionalId: itemProfessionals[i] || professionalId,
+          clientPackageItemId: null,
+          description: priced.promoName ? `${product.name} (${priced.promoName})` : product.name,
+          quantity,
+          priceCents: priced.priceCents,
+          discountCents: Math.min(Math.round(quantity * priced.priceCents), Math.max(0, discountCentsItem)),
+          durationMin: 0,
+        });
+      }
     }
   }
 
@@ -283,10 +369,22 @@ export async function addComandaItem(formData: FormData) {
 
   const comanda = await prisma.comanda.findFirst({
     where: { id: comandaId, tenantId: session.tenantId, status: "OPEN" },
+    include: { items: true },
   });
   if (!comanda) return { error: "Comanda não encontrada ou já fechada." };
 
-  const promos = await loadPromoRules(session.tenantId);
+  const [promos, balancesMap] = await Promise.all([
+    loadPromoRules(session.tenantId),
+    loadClientActivePackageBalances(session.tenantId, comanda.clientId),
+  ]);
+  const clientBalances = balancesMap[comanda.clientId] ?? [];
+  const allocatedByPkgItem: Record<string, number> = {};
+  for (const existingItem of comanda.items) {
+    if (existingItem.clientPackageItemId) {
+      allocatedByPkgItem[existingItem.clientPackageItemId] =
+        (allocatedByPkgItem[existingItem.clientPackageItemId] ?? 0) + Math.max(1, Math.ceil(existingItem.quantity));
+    }
+  }
   const onDate = calendarDate(comanda.occurredAt);
 
   if (type === "SERVICE") {
@@ -294,6 +392,7 @@ export async function addComandaItem(formData: FormData) {
       where: { id: serviceId ?? "", tenantId: session.tenantId },
     });
     if (!service) return { error: "Selecione um serviço." };
+    const matched = matchAvailablePackageItem(clientBalances, "SERVICE", service.id, quantity, allocatedByPkgItem);
     const priced = applyCatalogPrice(promos, onDate, "SERVICE", service.id, service.priceCents);
     await prisma.comandaItem.create({
       data: {
@@ -301,9 +400,10 @@ export async function addComandaItem(formData: FormData) {
         type: "SERVICE",
         serviceId: service.id,
         professionalId: professionalId ?? comanda.professionalId,
-        description: priced.promoName ? `${service.name} (${priced.promoName})` : service.name,
+        clientPackageItemId: matched?.id ?? null,
+        description: matched ? service.name : priced.promoName ? `${service.name} (${priced.promoName})` : service.name,
         quantity,
-        priceCents: priced.priceCents,
+        priceCents: matched ? 0 : priced.priceCents,
         durationMin: service.durationMin,
       },
     });
@@ -312,15 +412,17 @@ export async function addComandaItem(formData: FormData) {
       where: { id: productId ?? "", tenantId: session.tenantId },
     });
     if (!product) return { error: "Selecione um produto." };
+    const matched = matchAvailablePackageItem(clientBalances, "PRODUCT", product.id, quantity, allocatedByPkgItem);
     const priced = applyCatalogPrice(promos, onDate, "PRODUCT", product.id, product.saleCents);
     await prisma.comandaItem.create({
       data: {
         comandaId,
         type: "PRODUCT",
         productId: product.id,
-        description: priced.promoName ? `${product.name} (${priced.promoName})` : product.name,
+        clientPackageItemId: matched?.id ?? null,
+        description: matched ? product.name : priced.promoName ? `${product.name} (${priced.promoName})` : product.name,
         quantity,
-        priceCents: priced.priceCents,
+        priceCents: matched ? 0 : priced.priceCents,
       },
     });
   }
@@ -387,14 +489,40 @@ async function finalizeOpenComanda(
   const comanda = await prisma.comanda.findFirst({
     where: { id: comandaId, tenantId },
     include: {
-      items: { include: { service: { include: { products: true } }, product: true } },
+      items: {
+        include: {
+          service: { include: { products: true } },
+          product: true,
+          clientPackageItem: { include: { clientPackage: true } },
+        },
+      },
       appointment: { include: { commissions: true } },
     },
   });
   if (!comanda) return { error: "Comanda não encontrada." };
   if (comanda.status !== "OPEN") return { error: "Esta comanda já foi encerrada." };
   if (comanda.items.length === 0) return { error: "Inclua itens antes de fechar." };
-  if (!payments.length) return { error: "Adicione um pagamento." };
+
+  const packageUnitsByItemId = new Map<string, number>();
+  for (const item of comanda.items) {
+    if (!item.clientPackageItemId) continue;
+    const pkgItem = item.clientPackageItem;
+    if (!pkgItem || pkgItem.clientPackage.tenantId !== tenantId || pkgItem.clientPackage.clientId !== comanda.clientId) {
+      return { error: `Pacote inválido para o item "${item.description}".` };
+    }
+    if (pkgItem.clientPackage.status !== "ACTIVE") {
+      return { error: `O pacote #${pkgItem.clientPackage.number} não está mais ativo.` };
+    }
+    if (isClientPackageExpired(pkgItem.clientPackage.expiresAt)) {
+      return { error: `O pacote #${pkgItem.clientPackage.number} já venceu.` };
+    }
+    const units = Math.max(1, Math.ceil(item.quantity));
+    const totalNeeded = (packageUnitsByItemId.get(pkgItem.id) ?? 0) + units;
+    if (pkgItem.remainingQty < totalNeeded) {
+      return { error: `Saldo insuficiente no pacote #${pkgItem.clientPackage.number} para "${item.description}".` };
+    }
+    packageUnitsByItemId.set(pkgItem.id, totalNeeded);
+  }
 
   const discountCents = discountOverride ?? comanda.discountCents;
   const tenant = await prisma.tenant.findUnique({ where: { id: tenantId } });
@@ -414,20 +542,63 @@ async function finalizeOpenComanda(
     cashbackCents: comanda.cashbackCents,
   });
   const paidCents = payments.reduce((sum, p) => sum + p.amountCents, 0);
+  if (total > 0 && !payments.length) return { error: "Adicione um pagamento." };
   if (paidCents < total) return { error: "O total pago é menor que o valor da comanda." };
 
-  const allocated = allocatePayments(total, payments);
+  const hasPackageItems = packageUnitsByItemId.size > 0;
+  const allocated = total > 0 ? allocatePayments(total, payments) : [];
   const primary = allocated.find((p) => p.appliedCents > 0) ?? allocated[0];
+  const resolvedPaymentMethod = primary?.method ?? (hasPackageItems ? "PACKAGE" : "CASH");
 
   await prisma.comanda.update({
     where: { id: comanda.id },
     data: {
       status: "CLOSED",
       closedAt: new Date(),
-      paymentMethod: primary.method,
+      paymentMethod: resolvedPaymentMethod,
       discountCents,
     },
   });
+
+  if (packageUnitsByItemId.size > 0) {
+    const affectedPackageIds = new Set<string>();
+    for (const [pkgItemId, units] of packageUnitsByItemId.entries()) {
+      const pkgItem = await prisma.clientPackageItem.findUnique({
+        where: { id: pkgItemId },
+        select: { id: true, clientPackageId: true, remainingQty: true },
+      });
+      if (!pkgItem) continue;
+      affectedPackageIds.add(pkgItem.clientPackageId);
+      await prisma.clientPackageItem.update({
+        where: { id: pkgItem.id },
+        data: { remainingQty: Math.max(0, pkgItem.remainingQty - units) },
+      });
+      await prisma.clientPackageUsage.create({
+        data: {
+          tenantId,
+          clientPackageId: pkgItem.clientPackageId,
+          clientPackageItemId: pkgItem.id,
+          comandaId: comanda.id,
+          quantity: units,
+          notes: `Baixa automática na comanda #${comanda.number}`,
+        },
+      });
+    }
+    for (const pkgId of affectedPackageIds) {
+      const siblingItems = await prisma.clientPackageItem.findMany({
+        where: { clientPackageId: pkgId },
+        select: { remainingQty: true },
+      });
+      const nextRemaining = siblingItems.reduce((sum, r) => sum + r.remainingQty, 0);
+      await prisma.clientPackage.update({
+        where: { id: pkgId },
+        data: {
+          remaining: nextRemaining,
+          status: nextRemaining <= 0 ? "CONSUMED" : "ACTIVE",
+        },
+      });
+    }
+  }
 
   if (client && (comanda.creditCents > 0 || comanda.cashbackCents > 0 || cashback.enabled)) {
     let nextCashback = client.cashbackCents;
@@ -525,8 +696,12 @@ async function finalizeOpenComanda(
       where: { id: professionalId, tenantId },
     });
     if (!professional) continue;
+    const commissionUnitPriceCents =
+      item.clientPackageItemId && item.priceCents === 0 && item.clientPackageItem
+        ? item.clientPackageItem.unitPriceCents
+        : item.priceCents;
     const { percent, amountCents } = calculateCommission({
-      priceCents: Math.round(item.priceCents * item.quantity),
+      priceCents: Math.round(commissionUnitPriceCents * item.quantity),
       professionalPct: professional.commissionPct,
       servicePct: item.service?.commissionPct,
     });
@@ -625,6 +800,7 @@ async function finalizeOpenComanda(
 
   revalidateComandas();
   revalidatePath(`/comandas/${comanda.id}`);
+  revalidatePath(`/clientes/${comanda.clientId}`);
   revalidatePath("/notas");
   return { ok: true as const, id: comanda.id };
 }
@@ -645,7 +821,6 @@ export async function closeComanda(formData: FormData) {
   const method = String(formData.get("method") ?? "PIX");
   const discountCents = parseBRLToCents(String(formData.get("discount") ?? "0"));
   const allowed = new Set<string>(PAYMENT_METHODS);
-  if (!paymentMethodId && !allowed.has(method)) return { error: "Forma de pagamento inválida." };
 
   const comanda = await prisma.comanda.findFirst({
     where: { id: comandaId, tenantId: session.tenantId },
@@ -658,11 +833,14 @@ export async function closeComanda(formData: FormData) {
     creditCents: comanda.creditCents,
     cashbackCents: comanda.cashbackCents,
   });
+  if (total > 0 && !paymentMethodId && !allowed.has(method)) return { error: "Forma de pagamento inválida." };
 
   return finalizeOpenComanda(
     session.tenantId,
     comandaId,
-    [{ method, paymentMethodId: paymentMethodId || undefined, amountCents: total, installments: 1, occurredAt: new Date() }],
+    total > 0
+      ? [{ method, paymentMethodId: paymentMethodId || undefined, amountCents: total, installments: 1, occurredAt: new Date() }]
+      : [],
     discountCents,
   );
 }

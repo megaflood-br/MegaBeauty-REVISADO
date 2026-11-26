@@ -111,7 +111,7 @@ export async function runDueCampaigns(tenantId: string) {
   }
 
   const packs = await prisma.clientPackage.findMany({
-    where: { tenantId, remaining: { lte: 1 } },
+    where: { tenantId, status: "ACTIVE", remaining: { gt: 0, lte: 1 } },
     include: { client: { select: { id: true, name: true, phone: true } }, package: { select: { name: true } } },
     take: LIMIT,
   });
@@ -121,7 +121,7 @@ export async function runDueCampaigns(tenantId: string) {
       trigger: "PACKAGE_EXPIRING",
       client: row.client,
       sentOn: today,
-      vars: { servico: row.package.name },
+      vars: { servico: row.name || row.package?.name || "Pacote" },
     }).catch(() => null);
     if (result && "ok" in result) sent += 1;
   }

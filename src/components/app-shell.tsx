@@ -25,6 +25,7 @@ import {
   MessageCircle,
   Bot,
   Shield,
+  Package,
 } from "lucide-react";
 import Link from "next/link";
 import { stopImpersonation } from "@/app/actions/platform";
@@ -40,6 +41,7 @@ const NAV: SidebarNavItem[] = [
   { href: "/recepcionista", label: "Recepcionista", icon: Bot },
   { href: "/agenda", label: "Agenda", icon: CalendarDays },
   { href: "/comandas", label: "Comandas", icon: Receipt },
+  { href: "/pacotes", label: "Pacotes", icon: Package },
   { href: "/clientes", label: "Clientes", icon: Users },
   { href: "/anamneses", label: "Anamnese", icon: ClipboardList },
   { href: "/documentacao", label: "Documentação", icon: FolderOpen },

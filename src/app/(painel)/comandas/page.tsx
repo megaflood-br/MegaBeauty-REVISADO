@@ -7,45 +7,53 @@ import { loadFinanceCatalog } from "@/lib/finance-catalog";
 import { decorateCatalogItem } from "@/lib/promotions";
 import { loadPromoRules } from "@/lib/promo-load";
 import { canAccess, shouldHidePhones } from "@/lib/permissions";
-import { redactPhone } from "@/lib/utils";
+import { loadClientActivePackageBalances, loadClientSidebarSummaries } from "@/lib/packages";
 
 export default async function ComandasPage() {
   const { session, access } = await requireTenant();
   const hidePhones = shouldHidePhones(access);
-  const [comandas, clients, professionals, services, products, last, catalog, promos] = await Promise.all([
-    prisma.comanda.findMany({
-      where: { tenantId: session.tenantId },
-      include: { client: true, professional: true, items: true },
-      orderBy: { occurredAt: "desc" },
-    }),
-    prisma.client.findMany({
-      where: { tenantId: session.tenantId, active: true },
-      orderBy: { name: "asc" },
-      select: { id: true, name: true, phone: true, creditCents: true, cashbackCents: true },
-    }),
-    prisma.professional.findMany({
-      where: { tenantId: session.tenantId, active: true },
-      orderBy: { name: "asc" },
-      select: { id: true, name: true },
-    }),
-    prisma.service.findMany({
-      where: { tenantId: session.tenantId, active: true },
-      orderBy: { name: "asc" },
-      select: { id: true, name: true, priceCents: true },
-    }),
-    prisma.product.findMany({
-      where: { tenantId: session.tenantId, active: true },
-      orderBy: { name: "asc" },
-      select: { id: true, name: true, saleCents: true },
-    }),
-    prisma.comanda.findFirst({
-      where: { tenantId: session.tenantId },
-      orderBy: { number: "desc" },
-      select: { number: true },
-    }),
-    loadFinanceCatalog(session.tenantId),
-    loadPromoRules(session.tenantId),
-  ]);
+  const [comandas, clients, clientPackagesByClient, professionals, services, products, last, catalog, promos] =
+    await Promise.all([
+      prisma.comanda.findMany({
+        where: { tenantId: session.tenantId },
+        include: {
+          client: true,
+          professional: true,
+          items: {
+            include: {
+              clientPackageItem: {
+                include: { clientPackage: { select: { number: true } } },
+              },
+            },
+          },
+        },
+        orderBy: { occurredAt: "desc" },
+      }),
+      loadClientSidebarSummaries(session.tenantId, hidePhones),
+      loadClientActivePackageBalances(session.tenantId),
+      prisma.professional.findMany({
+        where: { tenantId: session.tenantId, active: true },
+        orderBy: { name: "asc" },
+        select: { id: true, name: true },
+      }),
+      prisma.service.findMany({
+        where: { tenantId: session.tenantId, active: true },
+        orderBy: { name: "asc" },
+        select: { id: true, name: true, priceCents: true },
+      }),
+      prisma.product.findMany({
+        where: { tenantId: session.tenantId, active: true },
+        orderBy: { name: "asc" },
+        select: { id: true, name: true, saleCents: true },
+      }),
+      prisma.comanda.findFirst({
+        where: { tenantId: session.tenantId },
+        orderBy: { number: "desc" },
+        select: { number: true },
+      }),
+      loadFinanceCatalog(session.tenantId),
+      loadPromoRules(session.tenantId),
+    ]);
   const today = calendarDate();
   const pricedServices = services.map((service) => decorateCatalogItem(promos, today, "SERVICE", service));
   const pricedProducts = products.map((product) =>
@@ -58,7 +66,8 @@ export default async function ComandasPage() {
       canCreate={canAccess(access, "comandas", "create")}
       canEdit={canAccess(access, "comandas", "edit")}
       hidePhones={hidePhones}
-      clients={clients.map((client) => ({ ...client, phone: redactPhone(client.phone, hidePhones) }))}
+      clients={clients}
+      clientPackagesByClient={clientPackagesByClient}
       professionals={professionals}
       services={pricedServices}
       products={pricedProducts}
@@ -91,6 +100,8 @@ export default async function ComandasPage() {
           priceCents: item.priceCents,
           discount: (item.discountCents / 100).toFixed(2).replace(".", ","),
           discountType: "money" as const,
+          clientPackageItemId: item.clientPackageItemId ?? null,
+          packageLabel: item.clientPackageItem ? `#${item.clientPackageItem.clientPackage.number}` : null,
         })),
       }))}
     />

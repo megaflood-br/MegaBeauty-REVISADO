@@ -17,7 +17,8 @@ import { decorateCatalogItem } from "@/lib/promotions";
 import { loadPromoRules } from "@/lib/promo-load";
 import { financeMethodLabel } from "@/lib/finance";
 import { canAccess, shouldHidePhones } from "@/lib/permissions";
-import { Trash2 } from "lucide-react";
+import { loadClientActivePackageBalances } from "@/lib/packages";
+import { Package, Trash2 } from "lucide-react";
 
 export default async function ComandaPage({ params }: { params: Promise<{ id: string }> }) {
   const { session, access } = await requireTenant();
@@ -25,7 +26,17 @@ export default async function ComandaPage({ params }: { params: Promise<{ id: st
   const [comanda, services, products, professionals, catalog, promos] = await Promise.all([
     prisma.comanda.findFirst({
       where: { id, tenantId: session.tenantId },
-      include: { client: true, professional: true, appointment: true, items: { include: { professional: true } } },
+      include: {
+        client: true,
+        professional: true,
+        appointment: true,
+        items: {
+          include: {
+            professional: true,
+            clientPackageItem: { include: { clientPackage: { select: { number: true, name: true } } } },
+          },
+        },
+      },
     }),
     prisma.service.findMany({ where: { tenantId: session.tenantId, active: true }, orderBy: { name: "asc" } }),
     prisma.product.findMany({ where: { tenantId: session.tenantId, active: true }, orderBy: { name: "asc" } }),
@@ -34,6 +45,8 @@ export default async function ComandaPage({ params }: { params: Promise<{ id: st
     loadPromoRules(session.tenantId),
   ]);
   if (!comanda) notFound();
+  const balancesMap = await loadClientActivePackageBalances(session.tenantId, comanda.clientId);
+  const clientBalances = balancesMap[comanda.clientId] ?? [];
   const onDate = calendarDate(comanda.occurredAt);
   const pricedServices = services.map((service) => decorateCatalogItem(promos, onDate, "SERVICE", service));
   const pricedProducts = products.map((product) =>
@@ -73,6 +86,18 @@ export default async function ComandaPage({ params }: { params: Promise<{ id: st
         </Badge>
       </div>
 
+      {open && clientBalances.length > 0 ? (
+        <div className="flex flex-wrap items-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
+          <Package size={16} className="shrink-0 text-blue-600" />
+          <span className="font-medium">Pacotes disponíveis deste cliente:</span>
+          {clientBalances.map((b) => (
+            <span key={b.id} className="rounded-md bg-white px-2 py-0.5 text-xs font-medium text-blue-700">
+              {b.description} (#{b.packageNumber}) · Saldo: {b.remainingQty}
+            </span>
+          ))}
+        </div>
+      ) : null}
+
       <Card className="overflow-hidden p-0">
         <table className="w-full text-sm">
           <thead className="bg-sand text-left">
@@ -88,7 +113,17 @@ export default async function ComandaPage({ params }: { params: Promise<{ id: st
           <tbody>
             {comanda.items.map((item) => (
               <tr key={item.id} className="border-t border-line">
-                <td className="px-4 py-2">{item.description}</td>
+                <td className="px-4 py-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span>{item.description}</span>
+                    {item.clientPackageItem ? (
+                      <span className="inline-flex items-center gap-1 rounded-md bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700">
+                        <Package size={12} />
+                        Pacote #{item.clientPackageItem.clientPackage.number}
+                      </span>
+                    ) : null}
+                  </div>
+                </td>
                 <td>{item.type === "SERVICE" ? "Serviço" : "Produto"}</td>
                 <td>{item.professional?.name ?? "—"}</td>
                 <td>{item.quantity}</td>
@@ -184,21 +219,34 @@ export default async function ComandaPage({ params }: { params: Promise<{ id: st
           {open && canEdit ? (
             <form action={formAction(closeComanda)} className="flex flex-wrap items-end gap-3">
               <input type="hidden" name="comandaId" value={comanda.id} />
-              <Field label="Desconto">
-                <Input name="discount" defaultValue={(comanda.discountCents / 100).toFixed(2).replace(".", ",")} />
-              </Field>
-              <Field label="Pagamento">
-                <Select name="paymentMethodId" defaultValue={catalog.methods.find((m) => m.code === "PIX" && m.active)?.id ?? catalog.methods.find((m) => m.active)?.id ?? ""}>
-                  {catalog.methods
-                    .filter((m) => m.active)
-                    .map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.name} · {m.accountName}
-                      </option>
-                    ))}
-                </Select>
-              </Field>
-              <Button variant="success">Fechar comanda</Button>
+              {total > 0 ? (
+                <>
+                  <Field label="Desconto">
+                    <Input name="discount" defaultValue={(comanda.discountCents / 100).toFixed(2).replace(".", ",")} />
+                  </Field>
+                  <Field label="Pagamento">
+                    <Select
+                      name="paymentMethodId"
+                      defaultValue={
+                        catalog.methods.find((m) => m.code === "PIX" && m.active)?.id ??
+                        catalog.methods.find((m) => m.active)?.id ??
+                        ""
+                      }
+                    >
+                      {catalog.methods
+                        .filter((m) => m.active)
+                        .map((m) => (
+                          <option key={m.id} value={m.id}>
+                            {m.name} · {m.accountName}
+                          </option>
+                        ))}
+                    </Select>
+                  </Field>
+                </>
+              ) : (
+                <input type="hidden" name="method" value="PACKAGE" />
+              )}
+              <Button variant="success">{total === 0 ? "Fechar e dar baixa no pacote" : "Fechar comanda"}</Button>
             </form>
           ) : null}
           {!open ? (

@@ -120,9 +120,10 @@ model Tenant {
   stockMoves         StockMovement[]
   commissions    Commission[]
   transactions   Transaction[]
-  packages       Package[]
-  clientPackages ClientPackage[]
-  conversations  Conversation[]
+  packages            Package[]
+  clientPackages      ClientPackage[]
+  clientPackageUsages ClientPackageUsage[]
+  conversations       Conversation[]
   automations    Automation[]
   campaignSends  CampaignSend[]
   comandas       Comanda[]
@@ -246,6 +247,7 @@ model Professional {
   anamneses        Anamnesis[]
   goals            ProfessionalGoal[]
   documents        SalonDocument[]
+  soldPackages     ClientPackage[]
 
   @@index([tenantId])
 }
@@ -369,10 +371,12 @@ model Service {
   items          AppointmentItem[]
   products       ServiceProduct[]
   professionals  ProfessionalService[]
-  packages       Package[]
-  comandaItems   ComandaItem[]
-  promotions     PromotionItem[]
-  salonPops      SalonPop[]
+  packages           Package[]
+  packageItems       PackageItem[]
+  clientPackageItems ClientPackageItem[]
+  comandaItems       ComandaItem[]
+  promotions         PromotionItem[]
+  salonPops          SalonPop[]
 
   @@index([tenantId])
 }
@@ -508,32 +512,35 @@ model Comanda {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
-  items        ComandaItem[]
-  transactions Transaction[]
-  commissions  Commission[]
-  stockMoves   StockMovement[]
-  invoices     FiscalInvoice[]
+  items         ComandaItem[]
+  transactions  Transaction[]
+  commissions   Commission[]
+  stockMoves    StockMovement[]
+  invoices      FiscalInvoice[]
+  packageUsages ClientPackageUsage[]
 
   @@unique([tenantId, number])
   @@index([tenantId, status])
 }
 
 model ComandaItem {
-  id             String       @id @default(cuid())
-  comandaId      String
-  comanda        Comanda      @relation(fields: [comandaId], references: [id], onDelete: Cascade)
-  type           String       @default("SERVICE")
-  serviceId      String?
-  service        Service?     @relation(fields: [serviceId], references: [id])
-  productId      String?
-  product        Product?     @relation(fields: [productId], references: [id])
-  professionalId String?
-  professional   Professional? @relation(fields: [professionalId], references: [id])
-  description    String
-  quantity       Float        @default(1)
-  priceCents     Int
-  discountCents  Int          @default(0)
-  durationMin    Int          @default(0)
+  id                  String             @id @default(cuid())
+  comandaId           String
+  comanda             Comanda            @relation(fields: [comandaId], references: [id], onDelete: Cascade)
+  type                String             @default("SERVICE")
+  serviceId           String?
+  service             Service?           @relation(fields: [serviceId], references: [id])
+  productId           String?
+  product             Product?           @relation(fields: [productId], references: [id])
+  professionalId      String?
+  professional        Professional?      @relation(fields: [professionalId], references: [id])
+  clientPackageItemId String?
+  clientPackageItem   ClientPackageItem? @relation(fields: [clientPackageItemId], references: [id], onDelete: SetNull)
+  description         String
+  quantity            Float              @default(1)
+  priceCents          Int
+  discountCents       Int                @default(0)
+  durationMin         Int                @default(0)
 }
 
 model ProductCategory {
@@ -577,12 +584,14 @@ model Product {
   createdAt              DateTime @default(now())
   updatedAt              DateTime @updatedAt
 
-  moves        StockMovement[]
-  services     ServiceProduct[]
-  comandaItems ComandaItem[]
-  lots         ProductLot[]
-  requests     ProductRequest[]
-  promotions   PromotionItem[]
+  moves              StockMovement[]
+  services           ServiceProduct[]
+  comandaItems       ComandaItem[]
+  lots               ProductLot[]
+  requests           ProductRequest[]
+  promotions         PromotionItem[]
+  packageItems       PackageItem[]
+  clientPackageItems ClientPackageItem[]
 
   @@index([tenantId])
 }
@@ -753,29 +762,111 @@ model Transaction {
 }
 
 model Package {
-  id          String  @id @default(cuid())
-  tenantId    String
-  tenant      Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  name        String
-  priceCents  Int
-  sessions    Int
-  serviceId   String?
-  service     Service? @relation(fields: [serviceId], references: [id])
-  active      Boolean @default(true)
+  id           String   @id @default(cuid())
+  tenantId     String
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name         String
+  description  String?
+  priceCents   Int      @default(0)
+  sessions     Int      @default(1)
+  validityDays Int?
+  serviceId    String?
+  service      Service? @relation(fields: [serviceId], references: [id])
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
 
+  items   PackageItem[]
   clients ClientPackage[]
+
+  @@index([tenantId])
+}
+
+model PackageItem {
+  id             String   @id @default(cuid())
+  packageId      String
+  package        Package  @relation(fields: [packageId], references: [id], onDelete: Cascade)
+  type           String   @default("SERVICE")
+  serviceId      String?
+  service        Service? @relation(fields: [serviceId], references: [id], onDelete: SetNull)
+  productId      String?
+  product        Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+  description    String
+  quantity       Int      @default(1)
+  unitPriceCents Int      @default(0)
+  discountCents  Int      @default(0)
+
+  @@index([packageId])
 }
 
 model ClientPackage {
-  id         String   @id @default(cuid())
-  tenantId   String
-  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  clientId   String
-  client     Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
-  packageId  String
-  package    Package  @relation(fields: [packageId], references: [id])
-  remaining  Int
-  purchasedAt DateTime @default(now())
+  id            String        @id @default(cuid())
+  tenantId      String
+  tenant        Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  number        Int           @default(0)
+  name          String        @default("")
+  clientId      String
+  client        Client        @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  packageId     String?
+  package       Package?      @relation(fields: [packageId], references: [id], onDelete: SetNull)
+  sellerId      String?
+  seller        Professional? @relation(fields: [sellerId], references: [id], onDelete: SetNull)
+  remaining     Int           @default(0)
+  status        String        @default("ACTIVE")
+  discountCents Int           @default(0)
+  creditCents   Int           @default(0)
+  cashbackCents Int           @default(0)
+  totalCents    Int           @default(0)
+  paymentMethod String?
+  notes         String?
+  purchasedAt   DateTime      @default(now())
+  expiresAt     DateTime?
+
+  items  ClientPackageItem[]
+  usages ClientPackageUsage[]
+
+  @@index([tenantId, clientId])
+  @@index([tenantId, status])
+}
+
+model ClientPackageItem {
+  id              String        @id @default(cuid())
+  clientPackageId String
+  clientPackage   ClientPackage @relation(fields: [clientPackageId], references: [id], onDelete: Cascade)
+  type            String        @default("SERVICE")
+  serviceId       String?
+  service         Service?      @relation(fields: [serviceId], references: [id], onDelete: SetNull)
+  productId       String?
+  product         Product?      @relation(fields: [productId], references: [id], onDelete: SetNull)
+  description     String
+  totalQty        Int           @default(1)
+  remainingQty    Int           @default(1)
+  unitPriceCents  Int           @default(0)
+  discountCents   Int           @default(0)
+
+  comandaItems ComandaItem[]
+  usages       ClientPackageUsage[]
+
+  @@index([clientPackageId])
+  @@index([serviceId])
+  @@index([productId])
+}
+
+model ClientPackageUsage {
+  id                  String            @id @default(cuid())
+  tenantId            String
+  tenant              Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  clientPackageId     String
+  clientPackage       ClientPackage     @relation(fields: [clientPackageId], references: [id], onDelete: Cascade)
+  clientPackageItemId String
+  clientPackageItem   ClientPackageItem @relation(fields: [clientPackageItemId], references: [id], onDelete: Cascade)
+  comandaId           String?
+  comanda             Comanda?          @relation(fields: [comandaId], references: [id], onDelete: SetNull)
+  quantity            Int               @default(1)
+  usedAt              DateTime          @default(now())
+  notes               String?
+
+  @@index([tenantId, clientPackageId])
+  @@index([comandaId])
 }
 
 model Conversation {

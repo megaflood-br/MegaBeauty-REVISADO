@@ -369,6 +369,7 @@ export function moduleFromPath(pathname: string): PermissionModuleId | null {
   if (path === "/ia" || path === "/avisos" || path === "/") return "dashboard";
   if (path === "/permissoes" || path.startsWith("/permissoes/")) return "users";
   if (path === "/cadastros" || path.startsWith("/cadastros/")) return "finance";
+  if (path === "/pacotes" || path.startsWith("/pacotes/")) return "comandas";
   const match = PERMISSION_MODULES.find((item) => path === item.href || path.startsWith(`${item.href}/`));
   return match?.id ?? null;
 }

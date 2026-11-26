@@ -37,6 +37,7 @@ export const CORE_TENANT_SCOPED_MODELS = new Set<string>([
   "Transaction",
   "Package",
   "ClientPackage",
+  "ClientPackageUsage",
   "Conversation",
   "Receptionist",
   "Automation",

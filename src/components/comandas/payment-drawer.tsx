@@ -39,8 +39,10 @@ const FALLBACK_CASH: PaymentMethodOption = {
 
 type PaymentDrawerProps = {
   open: boolean;
+  subtotalCents?: number;
   totalCents: number;
   discountCents: number;
+  packageItemsCount?: number;
   pending?: boolean;
   error?: string | null;
   methods?: PaymentMethodOption[];
@@ -54,8 +56,10 @@ export function PaymentDrawer(props: PaymentDrawerProps) {
 }
 
 function PaymentDrawerBody({
+  subtotalCents,
   totalCents,
   discountCents,
+  packageItemsCount = 0,
   pending,
   error,
   methods = [],
@@ -114,6 +118,10 @@ function PaymentDrawerBody({
   }
 
   function handleInvoice() {
+    if (totalCents === 0) {
+      onInvoice(payments);
+      return;
+    }
     if (!payments.length) {
       setLocalError("Adicione um pagamento.");
       return;
@@ -246,8 +254,18 @@ function PaymentDrawerBody({
             )}
           </div>
 
+          {totalCents === 0 && packageItemsCount > 0 ? (
+            <div className="mt-4 rounded-xl border border-blue-200 bg-blue-50 px-3.5 py-3 text-sm text-blue-900">
+              <div className="font-medium">Comanda coberta por pacote</div>
+              <p className="mt-0.5 text-xs text-blue-700">
+                Ao finalizar, {packageItemsCount === 1 ? "o item vinculado terá baixa automática" : `os ${packageItemsCount} itens vinculados terão baixa automática`} no saldo do pacote do cliente.
+              </p>
+            </div>
+          ) : null}
+
           <div className="mt-6 space-y-2 text-sm">
             <h3 className="font-semibold">Resumo da compra</h3>
+            <SummaryLine label="Subtotal" value={subtotalCents ?? totalCents + discountCents} />
             <SummaryLine label="Descontos" value={discountCents} />
             <SummaryLine label="Total" value={totalCents} />
             <SummaryLine label="Total pago" value={paidCents} strong />

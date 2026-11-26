@@ -12,6 +12,7 @@ const NAV_HREFS = [
   "/recepcionista",
   "/agenda",
   "/comandas",
+  "/pacotes",
   "/clientes",
   "/anamneses",
   "/documentacao",

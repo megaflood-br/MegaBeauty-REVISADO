@@ -44,6 +44,9 @@ function isCurrentClient(client: PrismaClient | undefined): client is PrismaClie
   if (typeof (client as { receptionist?: { findUnique?: unknown } }).receptionist?.findUnique !== "function") {
     return false;
   }
+  if (typeof (client as { clientPackageItem?: { findMany?: unknown } }).clientPackageItem?.findMany !== "function") {
+    return false;
+  }
   const models = (
     client as unknown as {
       _runtimeDataModel?: { models?: Record<string, { fields?: { name?: string }[] }> };
@@ -56,6 +59,7 @@ function isCurrentClient(client: PrismaClient | undefined): client is PrismaClie
   const documentFields = models?.SalonDocument?.fields;
   const conversationFields = models?.Conversation?.fields;
   const messageFields = models?.Message?.fields;
+  const comandaItemFields = models?.ComandaItem?.fields;
   return Boolean(
     productFields?.some((field) => field.name === "imageUrl") &&
       tenantFields?.some((field) => field.name === "servedCities") &&
@@ -70,6 +74,7 @@ function isCurrentClient(client: PrismaClient | undefined): client is PrismaClie
       conversationFields?.some((field) => field.name === "botPaused") &&
       conversationFields?.some((field) => field.name === "botPausedUntil") &&
       messageFields?.some((field) => field.name === "source") &&
+      comandaItemFields?.some((field) => field.name === "clientPackageItemId") &&
       tenantFields?.some((field) => field.name === "whatsappProvider") &&
       tenantFields?.some((field) => field.name === "metaPhoneNumberId") &&
       tenantFields?.some((field) => field.name === "evolutionQr"),

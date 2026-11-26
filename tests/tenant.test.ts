@@ -26,6 +26,8 @@ import { handleEvolutionWebhookRequest } from "@/lib/evolution-webhook-http";
 import { evolutionWebhookToken } from "@/lib/evolution-webhook-auth";
 import { ingestOutboundFromDevice } from "@/lib/whatsapp-inbound";
 import { testEvolutionAuthAndWebhook } from "@/lib/whatsapp-live";
+import { loadClientActivePackageBalances } from "@/lib/packages";
+import { matchAvailablePackageItem } from "@/lib/packages-shared";
 
 describe("detecção de tenant por domínio e path", () => {
   it("detecta subdomínio em produção e localhost, rejeitando reservados", () => {
@@ -1177,4 +1179,87 @@ describe("isolamento multi-tenant automático no Prisma", () => {
       }
     }
   });
+
+  it("vincula pacote de serviços e produtos ao cliente, carrega saldos ativos com isolamento por tenant e registra baixa de uso", async () => {
+    const aurora = await unscopedPrisma.tenant.findUnique({ where: { slug: "studio-aurora" } });
+    const norte = await unscopedPrisma.tenant.findUnique({ where: { slug: "barbearia-norte" } });
+    expect(aurora).toBeTruthy();
+    expect(norte).toBeTruthy();
+
+    const [client, service, product] = await Promise.all([
+      unscopedPrisma.client.findFirst({ where: { tenantId: aurora!.id, active: true }, orderBy: { name: "asc" } }),
+      unscopedPrisma.service.findFirst({ where: { tenantId: aurora!.id, active: true }, orderBy: { name: "asc" } }),
+      unscopedPrisma.product.findFirst({ where: { tenantId: aurora!.id, active: true }, orderBy: { name: "asc" } }),
+    ]);
+    expect(client).toBeTruthy();
+    expect(service).toBeTruthy();
+    expect(product).toBeTruthy();
+
+    const pkg = await unscopedPrisma.clientPackage.create({
+      data: {
+        tenantId: aurora!.id,
+        number: 9901,
+        name: "Pacote Teste Integração",
+        clientId: client!.id,
+        remaining: 3,
+        status: "ACTIVE",
+        totalCents: 12000,
+        paymentMethod: "PIX",
+        items: {
+          create: [
+            {
+              type: "SERVICE",
+              serviceId: service!.id,
+              description: service!.name,
+              totalQty: 2,
+              remainingQty: 2,
+              unitPriceCents: 4000,
+            },
+            {
+              type: "PRODUCT",
+              productId: product!.id,
+              description: product!.name,
+              totalQty: 1,
+              remainingQty: 1,
+              unitPriceCents: 4000,
+            },
+          ],
+        },
+      },
+      include: { items: true },
+    });
+
+    try {
+      const auroraBalances = await loadClientActivePackageBalances(aurora!.id, client!.id);
+      const clientItems = auroraBalances[client!.id] ?? [];
+      const svcMatch = matchAvailablePackageItem(clientItems, "SERVICE", service!.id, 1);
+      const prodMatch = matchAvailablePackageItem(clientItems, "PRODUCT", product!.id, 1);
+      expect(svcMatch).toBeTruthy();
+      expect(prodMatch).toBeTruthy();
+      expect(svcMatch?.remainingQty).toBe(2);
+      expect(prodMatch?.remainingQty).toBe(1);
+
+      // Isolamento: outro salão não vê os saldos nem usos do pacote da Aurora
+      const norteBalances = await loadClientActivePackageBalances(norte!.id, client!.id);
+      expect(norteBalances[client!.id]).toBeUndefined();
+
+      const svcItem = pkg.items.find((i) => i.type === "SERVICE")!;
+      await unscopedPrisma.clientPackageUsage.create({
+        data: {
+          tenantId: aurora!.id,
+          clientPackageId: pkg.id,
+          clientPackageItemId: svcItem.id,
+          quantity: 1,
+          notes: "Teste baixa",
+        },
+      });
+      const norteUsageCount = await withTenantContext(norte!.id, () => prisma.clientPackageUsage.count());
+      expect(norteUsageCount).toBe(0);
+    } finally {
+      await unscopedPrisma.clientPackageUsage.deleteMany({ where: { clientPackageId: pkg.id } }).catch(() => null);
+      await unscopedPrisma.clientPackageItem.deleteMany({ where: { clientPackageId: pkg.id } }).catch(() => null);
+      await unscopedPrisma.clientPackage.delete({ where: { id: pkg.id } }).catch(() => null);
+    }
+  });
 });
+

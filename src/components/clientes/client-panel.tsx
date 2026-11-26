@@ -22,8 +22,16 @@ import { STATUS_LABEL, type AppointmentStatus } from "@/lib/constants";
 import { comandaTotal } from "@/lib/comandas";
 import { ClientAnamneses } from "@/components/anamneses/client-anamneses";
 import { CashbackTab, type CashbackMoveRow } from "@/components/clientes/cashback-tab";
+import { ClientPackagesTab } from "@/components/pacotes/client-packages-tab";
 import type { AnamnesisFormRow, AnamnesisRow } from "@/components/anamneses/types";
 import type { buildClientMetrics } from "@/lib/client-metrics";
+import type {
+  ClientPackageBalanceItem,
+  ClientPackageDto,
+  PackageClientSummary,
+  PackageTemplateDto,
+} from "@/lib/packages-shared";
+import type { PaymentMethodOption } from "@/components/comandas/types";
 
 const TABS = [
   { id: "cadastro", label: "Cadastro" },
@@ -82,6 +90,15 @@ export function ClientPanel({
   appointments,
   comandas,
   packages,
+  packageTemplates = [],
+  packageClients = [],
+  packageBalancesByClient = {},
+  packageServices = [],
+  packageProducts = [],
+  packagePaymentMethods = [],
+  canCreatePackage = true,
+  canEditPackage = true,
+  canRemovePackage = true,
   messages,
   anamneses,
   forms,
@@ -111,7 +128,29 @@ export function ClientPanel({
   metrics: ReturnType<typeof buildClientMetrics>;
   appointments: AppointmentRow[];
   comandas: ComandaRow[];
-  packages: { id: string; remaining: number; package: { name: string; sessions: number; priceCents: number } }[];
+  packages: ClientPackageDto[];
+  packageTemplates?: PackageTemplateDto[];
+  packageClients?: PackageClientSummary[];
+  packageBalancesByClient?: Record<string, ClientPackageBalanceItem[]>;
+  packageServices?: {
+    id: string;
+    name: string;
+    priceCents: number;
+    durationMin?: number;
+    promoPriceCents?: number | null;
+    promoName?: string | null;
+  }[];
+  packageProducts?: {
+    id: string;
+    name: string;
+    priceCents: number;
+    promoPriceCents?: number | null;
+    promoName?: string | null;
+  }[];
+  packagePaymentMethods?: PaymentMethodOption[];
+  canCreatePackage?: boolean;
+  canEditPackage?: boolean;
+  canRemovePackage?: boolean;
   messages: { id: string; direction: string; body: string; createdAt: Date }[];
   anamneses: AnamnesisRow[];
   forms: AnamnesisFormRow[];
@@ -124,6 +163,7 @@ export function ClientPanel({
   canCreateAnamnesis?: boolean;
   canEditAnamnesis?: boolean;
 }) {
+  const activePackagesCount = packages.filter((p) => p.effectiveStatus === "ACTIVE").length;
   return (
     <div className="overflow-hidden rounded-2xl border border-line bg-white shadow-sm">
       <header className="flex items-center justify-between border-b border-line px-5 py-4">
@@ -157,6 +197,10 @@ export function ClientPanel({
                 {item.id === "anamneses" && anamneses.length ? (
                   <span className="ml-2 rounded-full bg-slate-200 px-1.5 py-0.5 text-[10px] font-semibold text-slate-700">
                     {anamneses.length}
+                  </span>
+                ) : item.id === "pacotes" && activePackagesCount > 0 ? (
+                  <span className="ml-2 rounded-full bg-blue-100 px-1.5 py-0.5 text-[10px] font-semibold text-blue-700">
+                    {activePackagesCount}
                   </span>
                 ) : "badge" in item && item.badge ? (
                   <span className="ml-2 rounded-full bg-blue-600 px-1.5 py-0.5 text-[10px] font-semibold text-white uppercase">
@@ -200,7 +244,21 @@ export function ClientPanel({
               rows={comandas.filter((c) => c.status === "CLOSED")}
             />
           ) : tab === "pacotes" ? (
-            <PackagesTab packages={packages} />
+            <ClientPackagesTab
+              clientId={client.id}
+              packages={packages}
+              templates={packageTemplates}
+              clients={packageClients}
+              balancesByClient={packageBalancesByClient}
+              professionals={professionals}
+              services={packageServices}
+              products={packageProducts}
+              paymentMethods={packagePaymentMethods}
+              canCreate={canCreatePackage}
+              canEdit={canEditPackage}
+              canRemove={canRemovePackage}
+              hidePhones={hidePhones}
+            />
           ) : tab === "mensagens" ? (
             <MessagesTab messages={messages} />
           ) : tab === "anotacoes" ? (
@@ -535,29 +593,6 @@ function ProductsTab({ comandas }: { comandas: ComandaRow[] }) {
           ))}
         </tbody>
       </table>
-    </div>
-  );
-}
-
-function PackagesTab({
-  packages,
-}: {
-  packages: { id: string; remaining: number; package: { name: string; sessions: number; priceCents: number } }[];
-}) {
-  if (!packages.length) return <EmptyState text="Nenhum pacote vinculado." />;
-  return (
-    <div className="grid gap-3">
-      {packages.map((p) => (
-        <div key={p.id} className="flex items-center justify-between rounded-xl border border-line px-4 py-3">
-          <div>
-            <div className="font-medium">{p.package.name}</div>
-            <div className="text-sm text-ink-soft">
-              {p.remaining} de {p.package.sessions} sessões
-            </div>
-          </div>
-          <div className="font-semibold">{formatBRL(p.package.priceCents)}</div>
-        </div>
-      ))}
     </div>
   );
 }

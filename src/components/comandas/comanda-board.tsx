@@ -9,11 +9,13 @@ import { formatBRL } from "@/lib/money";
 import { formatShortDate } from "@/lib/dates";
 import { COMANDA_STATUS_COLOR, COMANDA_STATUS_LABEL, PAYMENT_LABEL, type ComandaStatus } from "@/lib/constants";
 import type { ComandaFormValue, PaymentMethodOption } from "@/components/comandas/types";
+import type { ClientPackageBalanceItem, PackageClientSummary } from "@/lib/packages-shared";
 
 export function ComandaBoard({
   comandas,
   nextNumber,
   clients,
+  clientPackagesByClient = {},
   professionals,
   services,
   products,
@@ -24,7 +26,8 @@ export function ComandaBoard({
 }: {
   comandas: ComandaFormValue[];
   nextNumber: number;
-  clients: { id: string; name: string; phone: string; creditCents: number; cashbackCents: number }[];
+  clients: PackageClientSummary[];
+  clientPackagesByClient?: Record<string, ClientPackageBalanceItem[]>;
   professionals: { id: string; name: string }[];
   services: { id: string; name: string; priceCents: number; promoPriceCents?: number | null; promoName?: string | null }[];
   products: { id: string; name: string; priceCents: number; promoPriceCents?: number | null; promoName?: string | null }[];
@@ -150,6 +153,7 @@ export function ComandaBoard({
           comanda={editing}
           nextNumber={nextNumber}
           clients={clients}
+          clientPackagesByClient={clientPackagesByClient}
           professionals={professionals}
           services={services}
           products={products}

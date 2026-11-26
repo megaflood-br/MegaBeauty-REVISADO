@@ -296,6 +296,16 @@ import {
   paymentMethodCode,
   taxRegimeFromCrt,
 } from "@/lib/contora";
+import {
+  effectiveClientPackageStatus,
+  formatBirthdayLabel,
+  isClientPackageExpired,
+  matchAvailablePackageItem,
+  packageItemDiscountCents,
+  packageItemLineTotalCents,
+  packageTotalCents,
+  type ClientPackageBalanceItem,
+} from "@/lib/packages-shared";
 
 describe("comissões", () => {
   it("usa percentual do serviço quando existe", () => {
@@ -2835,3 +2845,135 @@ describe("visão geral, receita 7d e profissional do dia", () => {
     expect(result.defaultCriterion).toBe("attendances");
   });
 });
+
+describe("pacotes de serviços e produtos", () => {
+  it("calcula descontos por item e total geral com crédito e cashback", () => {
+    const discMoney = packageItemDiscountCents({
+      quantity: 4,
+      unitPriceCents: 3500,
+      discount: "10,00",
+      discountType: "money",
+    });
+    expect(discMoney).toBe(1000);
+    expect(packageItemLineTotalCents({ quantity: 4, unitPriceCents: 3500, discountCents: discMoney })).toBe(13000);
+
+    const discPct = packageItemDiscountCents({
+      quantity: 2,
+      unitPriceCents: 4000,
+      discount: "25",
+      discountType: "percent",
+    });
+    expect(discPct).toBe(2000);
+
+    expect(
+      packageTotalCents({
+        items: [
+          { quantity: 4, unitPriceCents: 3500, discountCents: 1000 },
+          { quantity: 2, unitPriceCents: 4000, discountCents: 2000 },
+        ],
+        discountCents: 1000,
+        creditCents: 500,
+        cashbackCents: 500,
+      }),
+    ).toBe(17000);
+  });
+
+  it("classifica status efetivo considerando validade e saldo", () => {
+    const now = new Date("2026-11-25T12:00:00Z");
+    expect(isClientPackageExpired("2026-11-24T23:59:00Z", now)).toBe(true);
+    expect(isClientPackageExpired("2026-12-25T23:59:00Z", now)).toBe(false);
+    expect(effectiveClientPackageStatus({ status: "ACTIVE", remaining: 2, expiresAt: "2026-12-25T23:59:00Z" }, now)).toBe("ACTIVE");
+    expect(effectiveClientPackageStatus({ status: "ACTIVE", remaining: 2, expiresAt: "2026-11-20T23:59:00Z" }, now)).toBe("EXPIRED");
+    expect(effectiveClientPackageStatus({ status: "ACTIVE", remaining: 0, expiresAt: null }, now)).toBe("CONSUMED");
+    expect(effectiveClientPackageStatus({ status: "CANCELLED", remaining: 3, expiresAt: null }, now)).toBe("CANCELLED");
+    expect(formatBirthdayLabel("1990-06-25")).toBe("Aniversário em 25, junho");
+    expect(formatBirthdayLabel(null)).toBe("Aniversário não definido");
+  });
+
+  it("reconhece item disponível no pacote respeitando validade, prioridade de vencimento e saldo já alocado", () => {
+    const now = new Date("2026-11-25T12:00:00Z");
+    const balances: ClientPackageBalanceItem[] = [
+      {
+        id: "item-expired",
+        clientPackageId: "pkg-0",
+        packageNumber: 560,
+        packageName: "Vencido",
+        type: "SERVICE",
+        catalogId: "svc-manicure",
+        description: "Manicure",
+        totalQty: 4,
+        remainingQty: 4,
+        unitPriceCents: 3500,
+        purchasedAt: "2026-09-01T12:00:00Z",
+        expiresAt: "2026-11-01T23:59:00Z",
+      },
+      {
+        id: "item-no-exp",
+        clientPackageId: "pkg-2",
+        packageNumber: 566,
+        packageName: "Combo",
+        type: "SERVICE",
+        catalogId: "svc-manicure",
+        description: "Manicure",
+        totalQty: 2,
+        remainingQty: 2,
+        unitPriceCents: 3500,
+        purchasedAt: "2026-11-10T12:00:00Z",
+        expiresAt: null,
+      },
+      {
+        id: "item-exp-soon",
+        clientPackageId: "pkg-1",
+        packageNumber: 565,
+        packageName: "Urgente",
+        type: "SERVICE",
+        catalogId: "svc-manicure",
+        description: "Manicure",
+        totalQty: 2,
+        remainingQty: 1,
+        unitPriceCents: 3500,
+        purchasedAt: "2026-11-15T12:00:00Z",
+        expiresAt: "2026-12-01T23:59:00Z",
+      },
+      {
+        id: "item-prod",
+        clientPackageId: "pkg-2",
+        packageNumber: 566,
+        packageName: "Combo",
+        type: "PRODUCT",
+        catalogId: "prod-acetona",
+        description: "Acetona",
+        totalQty: 1,
+        remainingQty: 1,
+        unitPriceCents: 1500,
+        purchasedAt: "2026-11-10T12:00:00Z",
+        expiresAt: null,
+      },
+    ];
+
+    // Prefere o pacote que vence antes (ignorando o vencido)
+    const first = matchAvailablePackageItem(balances, "SERVICE", "svc-manicure", 1, {}, now);
+    expect(first?.id).toBe("item-exp-soon");
+
+    // Quando o primeiro já foi alocado na mesma comanda, cai para o segundo pacote com saldo
+    const second = matchAvailablePackageItem(balances, "SERVICE", "svc-manicure", 1, { "item-exp-soon": 1 }, now);
+    expect(second?.id).toBe("item-no-exp");
+
+    // Quando todo o saldo já está alocado, retorna null
+    const none = matchAvailablePackageItem(
+      balances,
+      "SERVICE",
+      "svc-manicure",
+      1,
+      { "item-exp-soon": 1, "item-no-exp": 2 },
+      now,
+    );
+    expect(none).toBeNull();
+
+    // Também reconhece produtos
+    const prodMatch = matchAvailablePackageItem(balances, "PRODUCT", "prod-acetona", 1, {}, now);
+    expect(prodMatch?.id).toBe("item-prod");
+    expect(moduleFromPath("/pacotes")).toBe("comandas");
+  });
+});
+
