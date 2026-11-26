@@ -2,9 +2,9 @@ import { prisma } from "@/lib/db";
 import { requireTenant } from "@/lib/tenant";
 import { parseDateParam, rangeOfCalendarDate } from "@/lib/dates";
 import { AgendaBoard } from "@/components/agenda/board";
-import type { AgendaAppointment, AgendaClient } from "@/components/agenda/types";
+import type { AgendaAppointment, AgendaClient, AgendaScheduleBlock } from "@/components/agenda/types";
 import type { AppointmentStatus } from "@/lib/constants";
-import { canAccess, canViewAllAgenda, shouldHidePhones } from "@/lib/permissions";
+import { canAccess, canBlockAgendaSlots, canViewAllAgenda, shouldHidePhones } from "@/lib/permissions";
 import { redactPhone } from "@/lib/utils";
 import { isClientPackageExpired } from "@/lib/packages-shared";
 
@@ -22,7 +22,7 @@ export default async function AgendaPage({
   const scopedProfessionalId = ownOnly ? access.professionalId ?? "__none__" : null;
   const professionalFilter = scopedProfessionalId ? { professionalId: scopedProfessionalId } : {};
 
-  const [professionals, appointments, clients, services] = await Promise.all([
+  const [professionals, appointments, scheduleBlocks, clients, services] = await Promise.all([
     prisma.professional.findMany({
       where: {
         tenantId: session.tenantId,
@@ -35,6 +35,10 @@ export default async function AgendaPage({
     prisma.appointment.findMany({
       where: { tenantId: session.tenantId, startAt: { gte: start, lt: end }, ...professionalFilter },
       include: { client: true, items: { include: { service: true } }, comanda: true },
+      orderBy: { startAt: "asc" },
+    }),
+    prisma.scheduleBlock.findMany({
+      where: { tenantId: session.tenantId, startAt: { lt: end }, endAt: { gt: start }, ...professionalFilter },
       orderBy: { startAt: "asc" },
     }),
     prisma.client.findMany({
@@ -104,6 +108,14 @@ export default async function AgendaPage({
     })),
   }));
 
+  const mappedBlocks: AgendaScheduleBlock[] = scheduleBlocks.map((b) => ({
+    id: b.id,
+    professionalId: b.professionalId,
+    startAt: b.startAt.toISOString(),
+    endAt: b.endAt.toISOString(),
+    reason: b.reason,
+  }));
+
   return (
     <AgendaBoard
       date={date}
@@ -112,11 +124,14 @@ export default async function AgendaPage({
       slotMinutes={tenant.slotMinutes}
       professionals={professionals}
       appointments={mapped}
+      blocks={mappedBlocks}
       clients={mappedClients}
       services={services}
       canCreate={canAccess(access, "agenda", "create")}
       canEdit={canAccess(access, "agenda", "edit")}
       canRemove={canAccess(access, "agenda", "remove")}
+      canBlockSlots={canBlockAgendaSlots(access)}
+      canViewAll={canViewAllAgenda(access)}
       canCreateComanda={canAccess(access, "comandas", "create")}
       canViewComanda={canAccess(access, "comandas")}
       hidePhones={hidePhones}

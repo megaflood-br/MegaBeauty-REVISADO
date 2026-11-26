@@ -45,3 +45,11 @@ export type AgendaAppointment = {
     service: { name: string; color: string };
   }[];
 };
+
+export type AgendaScheduleBlock = {
+  id: string;
+  professionalId: string;
+  startAt: string;
+  endAt: string;
+  reason: string | null;
+};

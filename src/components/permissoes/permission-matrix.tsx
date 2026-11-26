@@ -17,10 +17,12 @@ const ACTION_LABEL: Record<PermissionFlag, string> = {
   remove: "Excluir",
   viewAll: "Ver todos",
   hidePhones: "Esconder telefones",
+  blockSlots: "Bloquear horários",
 };
 
 function extraLabel(moduleId: PermissionModuleId, flag: PermissionFlag, on: boolean) {
   if (flag === "hidePhones") return on ? "Telefones ocultos" : "Esconder telefones";
+  if (flag === "blockSlots") return "Bloquear horários";
   if (flag !== "viewAll") return ACTION_LABEL[flag];
   if (moduleId === "commissions") return on ? "Ver comissões de todos" : "Só as próprias comissões";
   if (moduleId === "anamnesis") return on ? "Ver anamneses de todos" : "Só as próprias áreas";
@@ -49,6 +51,7 @@ export function PermissionMatrix({
       nextRow.create = false;
       nextRow.edit = false;
       nextRow.remove = false;
+      nextRow.blockSlots = false;
     }
     if (flag !== "access" && flag !== "viewAll" && flag !== "hidePhones" && nextValue) nextRow.access = true;
     onChange({ ...grants, [moduleId]: nextRow });

@@ -118,7 +118,7 @@ export async function loadReceptionistCatalog(tenantId: string): Promise<Recepti
   const tomorrowRange = rangeOfCalendarDate(tomorrow);
   const nowHHmm = formatTime(new Date());
 
-  const [services, professionals, appointments] = await Promise.all([
+  const [services, professionals, appointments, scheduleBlocks] = await Promise.all([
     prisma.service.findMany({
       where: { tenantId, active: true },
       orderBy: { name: "asc" },
@@ -151,7 +151,16 @@ export async function loadReceptionistCatalog(tenantId: string): Promise<Recepti
       },
       select: { professionalId: true, startAt: true, endAt: true },
     }),
+    prisma.scheduleBlock.findMany({
+      where: {
+        tenantId,
+        startAt: { lt: tomorrowRange.end },
+        endAt: { gt: todayRange.start },
+      },
+      select: { professionalId: true, startAt: true, endAt: true },
+    }),
   ]);
+  const allBusy = [...appointments, ...scheduleBlocks];
 
   return {
     salon: tenant.name,
@@ -172,8 +181,8 @@ export async function loadReceptionistCatalog(tenantId: string): Promise<Recepti
     professionals: professionals.map((row) => {
       const openTime = row.workStart || tenant.openTime;
       const closeTime = row.workEnd || tenant.closeTime;
-      const todayBusy = busyForDayRange(appointments, row.id, todayRange);
-      const tomorrowBusy = busyForDayRange(appointments, row.id, tomorrowRange);
+      const todayBusy = busyForDayRange(allBusy, row.id, todayRange);
+      const tomorrowBusy = busyForDayRange(allBusy, row.id, tomorrowRange);
       const allowedServices = row.serviceLinks
         .filter((link) => link.service.active)
         .map((link) => link.service.name);
@@ -252,7 +261,7 @@ export async function queryReceptionistAvailability(input: {
   }
 
   const dayRange = rangeOfCalendarDate(targetDate);
-  const [services, professionals, appointments] = await Promise.all([
+  const [services, professionals, appointments, scheduleBlocks] = await Promise.all([
     prisma.service.findMany({
       where: { tenantId: input.tenantId, active: true },
       orderBy: { name: "asc" },
@@ -286,7 +295,16 @@ export async function queryReceptionistAvailability(input: {
       },
       select: { professionalId: true, startAt: true, endAt: true },
     }),
+    prisma.scheduleBlock.findMany({
+      where: {
+        tenantId: input.tenantId,
+        startAt: { lt: dayRange.end },
+        endAt: { gt: dayRange.start },
+      },
+      select: { professionalId: true, startAt: true, endAt: true },
+    }),
   ]);
+  const allBusy = [...appointments, ...scheduleBlocks];
 
   const catalogServices = services.map((service) => ({
     id: service.id,
@@ -345,7 +363,7 @@ export async function queryReceptionistAvailability(input: {
     professionals: eligible.map((row) => {
       const openTime = row.workStart || tenant.openTime;
       const closeTime = row.workEnd || tenant.closeTime;
-      const busy = busyForDayRange(appointments, row.id, dayRange);
+      const busy = busyForDayRange(allBusy, row.id, dayRange);
       const startTimes = contiguousSlotsForDuration({
         openTime,
         closeTime,
@@ -646,7 +664,7 @@ export async function createReceptionistAppointment(input: {
   }
 
   const dayRange = rangeOfCalendarDate(parsedDate.date);
-  const [services, professionals, dayAppointments] = await Promise.all([
+  const [services, professionals, dayAppts, dayBlocks] = await Promise.all([
     prisma.service.findMany({
       where: { tenantId: input.tenantId, active: true },
       orderBy: { name: "asc" },
@@ -685,7 +703,16 @@ export async function createReceptionistAppointment(input: {
       },
       select: { id: true, professionalId: true, startAt: true, endAt: true },
     }),
+    prisma.scheduleBlock.findMany({
+      where: {
+        tenantId: input.tenantId,
+        startAt: { lt: dayRange.end },
+        endAt: { gt: dayRange.start },
+      },
+      select: { id: true, professionalId: true, startAt: true, endAt: true },
+    }),
   ]);
+  const dayAppointments = [...dayAppts, ...dayBlocks];
 
   const catalogServices = services.map((service) => ({
     id: service.id,

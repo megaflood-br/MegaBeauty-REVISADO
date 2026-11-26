@@ -2,10 +2,17 @@
 
 import { useMemo, useState } from "react";
 import Link from "next/link";
-import { Bot, ChevronLeft, ChevronRight } from "lucide-react";
+import { Bot, ChevronLeft, ChevronRight, Lock } from "lucide-react";
 import { AppointmentEditor } from "@/components/agenda/appointment-editor";
-import type { AgendaAppointment, AgendaClient, AgendaProfessional, AgendaService } from "@/components/agenda/types";
-import { Avatar, Badge } from "@/components/ui";
+import { ScheduleBlockEditor } from "@/components/agenda/schedule-block-editor";
+import type {
+  AgendaAppointment,
+  AgendaClient,
+  AgendaProfessional,
+  AgendaScheduleBlock,
+  AgendaService,
+} from "@/components/agenda/types";
+import { Avatar, Badge, Button } from "@/components/ui";
 import { STATUS_COLOR, STATUS_LABEL, type AppointmentStatus } from "@/lib/constants";
 import {
   buildSlots,
@@ -76,6 +83,40 @@ function placeAppointments(
   });
 }
 
+type PlacedBlock = {
+  block: AgendaScheduleBlock;
+  start: Date;
+  end: Date;
+  top: number;
+  height: number;
+};
+
+function placeBlocks(
+  items: AgendaScheduleBlock[],
+  openMin: number,
+  closeMin: number,
+  slotMinutes: number,
+): PlacedBlock[] {
+  const placed: PlacedBlock[] = [];
+  for (const block of items) {
+    const start = new Date(block.startAt);
+    const end = new Date(block.endAt);
+    const startMin = minutesInTz(start);
+    const endMin = Math.max(startMin + slotMinutes, minutesInTz(end));
+    const clippedStart = Math.max(startMin, openMin);
+    const clippedEnd = Math.min(endMin, closeMin);
+    if (clippedEnd <= clippedStart) continue;
+    placed.push({
+      block,
+      start,
+      end,
+      top: ((clippedStart - openMin) / slotMinutes) * SLOT_H,
+      height: Math.max(SLOT_H, ((clippedEnd - clippedStart) / slotMinutes) * SLOT_H),
+    });
+  }
+  return placed;
+}
+
 export function AgendaBoard({
   date,
   openTime,
@@ -83,11 +124,14 @@ export function AgendaBoard({
   slotMinutes,
   professionals,
   appointments,
+  blocks = [],
   clients,
   services,
   canCreate = true,
   canEdit = true,
   canRemove = true,
+  canBlockSlots = false,
+  canViewAll = true,
   canCreateComanda = true,
   canViewComanda = true,
   hidePhones = false,
@@ -98,11 +142,14 @@ export function AgendaBoard({
   slotMinutes: number;
   professionals: AgendaProfessional[];
   appointments: AgendaAppointment[];
+  blocks?: AgendaScheduleBlock[];
   clients: AgendaClient[];
   services: AgendaService[];
   canCreate?: boolean;
   canEdit?: boolean;
   canRemove?: boolean;
+  canBlockSlots?: boolean;
+  canViewAll?: boolean;
   canCreateComanda?: boolean;
   canViewComanda?: boolean;
   hidePhones?: boolean;
@@ -110,9 +157,12 @@ export function AgendaBoard({
   const slots = useMemo(() => buildSlots(openTime, closeTime, slotMinutes), [openTime, closeTime, slotMinutes]);
   const [draft, setDraft] = useState<{ professionalId: string; time: string } | null>(null);
   const [selected, setSelected] = useState<AgendaAppointment | null>(null);
+  const [blockDraft, setBlockDraft] = useState<{ professionalId: string; time: string } | null>(null);
+  const [selectedBlock, setSelectedBlock] = useState<AgendaScheduleBlock | null>(null);
   const openMin = parseHHmm(openTime);
   const closeMin = parseHHmm(closeTime);
   const gridHeight = slots.length * SLOT_H;
+  const defaultBlockStart = slots.includes("12:00") ? "12:00" : slots[0] ?? openTime;
 
   return (
     <div className="space-y-4">
@@ -121,10 +171,24 @@ export function AgendaBoard({
           <h1 className="font-display text-3xl">Agenda</h1>
           <p className="capitalize text-ink-soft">{formatDayLabel(date)}</p>
           {!canCreate && !canEdit ? (
-            <p className="mt-1 text-sm text-ink-soft">Consulta apenas. Marcar horário e abrir comanda ficam com quem tem permissão.</p>
+            <p className="mt-1 text-sm text-ink-soft">
+              {canBlockSlots
+                ? "Você pode bloquear e desbloquear horários clicando em um espaço livre ou no botão Bloquear horário."
+                : "Consulta apenas. Marcar horário e abrir comanda ficam com quem tem permissão."}
+            </p>
           ) : null}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {canBlockSlots && professionals.length > 0 ? (
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setBlockDraft({ professionalId: professionals[0].id, time: defaultBlockStart })}
+            >
+              <Lock size={15} />
+              Bloquear horário
+            </Button>
+          ) : null}
           <Link href={`/agenda?date=${shiftCalendarDate(date, -1)}`} className="rounded-full border border-line p-2">
             <ChevronLeft size={18} />
           </Link>
@@ -143,6 +207,12 @@ export function AgendaBoard({
             {label}
           </Badge>
         ))}
+        {canBlockSlots || blocks.length > 0 ? (
+          <span className="inline-flex items-center gap-1 rounded-full border border-slate-300 bg-slate-100 px-2.5 py-0.5 text-xs font-medium text-slate-700">
+            <Lock size={11} />
+            Bloqueado{blocks.length > 0 ? ` (${blocks.length})` : ""}
+          </span>
+        ) : null}
         {appointments.some((a) => a.status === "AI_BOOKED") ? (
           canEdit ? (
             <button
@@ -194,28 +264,53 @@ export function AgendaBoard({
               closeMin,
               slotMinutes,
             );
+            const placedBlocks = placeBlocks(
+              blocks.filter((b) => b.professionalId === pro.id),
+              openMin,
+              closeMin,
+              slotMinutes,
+            );
+            const slotInteractive = canCreate || canBlockSlots;
             return (
               <div key={pro.id} className="agenda-day-col border-l border-line">
                 <div
-                  className="sticky top-0 z-20 flex items-center gap-3 border-b border-line bg-paper px-3"
+                  className="sticky top-0 z-20 flex items-center justify-between gap-2 border-b border-line bg-paper px-3"
                   style={{ height: HEADER_H }}
                 >
-                  <Avatar name={pro.name} color={pro.color} />
-                  <div className="min-w-0">
-                    <div className="truncate text-sm font-semibold">{pro.name.split(" ")[0]}</div>
-                    <div className="truncate text-xs text-ink-soft">{pro.specialty}</div>
+                  <div className="flex min-w-0 items-center gap-3">
+                    <Avatar name={pro.name} color={pro.color} />
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-semibold">{pro.name.split(" ")[0]}</div>
+                      <div className="truncate text-xs text-ink-soft">{pro.specialty}</div>
+                    </div>
                   </div>
+                  {canBlockSlots ? (
+                    <button
+                      type="button"
+                      onClick={() => setBlockDraft({ professionalId: pro.id, time: defaultBlockStart })}
+                      className="shrink-0 rounded-lg p-1.5 text-ink-soft transition hover:bg-sand hover:text-ink"
+                      title={`Bloquear horário de ${pro.name}`}
+                      aria-label={`Bloquear horário de ${pro.name}`}
+                    >
+                      <Lock size={14} />
+                    </button>
+                  ) : null}
                 </div>
                 <div className="relative overflow-hidden" style={{ height: gridHeight }}>
                   {slots.map((slot) =>
-                    canCreate ? (
+                    slotInteractive ? (
                       <button
                         key={slot}
                         type="button"
-                        onClick={() => setDraft({ professionalId: pro.id, time: slot })}
+                        onClick={() => {
+                          if (canCreate) setDraft({ professionalId: pro.id, time: slot });
+                          else if (canBlockSlots) setBlockDraft({ professionalId: pro.id, time: slot });
+                        }}
                         className="block w-full border-b border-dashed border-line/80 hover:bg-gold-soft/40"
                         style={{ height: SLOT_H }}
-                        aria-label={`Novo horário ${slot} com ${pro.name}`}
+                        aria-label={
+                          canCreate ? `Novo horário ${slot} com ${pro.name}` : `Bloquear horário ${slot} de ${pro.name}`
+                        }
                       />
                     ) : (
                       <div
@@ -226,6 +321,35 @@ export function AgendaBoard({
                       />
                     ),
                   )}
+                  {placedBlocks.map((item) => (
+                    <button
+                      key={item.block.id}
+                      type="button"
+                      disabled={!canBlockSlots}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (!canBlockSlots) return;
+                        setSelectedBlock(item.block);
+                      }}
+                      className={`absolute left-1 right-1 overflow-hidden rounded-lg border border-dashed border-slate-400 bg-slate-100/95 px-2 py-1 text-left text-slate-700 shadow-xs ${
+                        canBlockSlots ? "hover:border-slate-500 hover:bg-slate-200/80" : "cursor-default"
+                      }`}
+                      style={{
+                        top: item.top,
+                        height: item.height,
+                      }}
+                    >
+                      <div className="flex items-center gap-1">
+                        <Lock size={11} className="shrink-0 text-slate-500" />
+                        <span className="truncate text-xs font-semibold leading-tight">
+                          {item.block.reason || "Horário bloqueado"}
+                        </span>
+                      </div>
+                      <div className="text-[10px] text-slate-500">
+                        {formatTime(item.start)}–{formatTime(item.end)}
+                      </div>
+                    </button>
+                  ))}
                   {placed.map((item) => {
                     const service = item.appt.items[0]?.service;
                     const width = `calc((100% - 8px) / ${item.lanes})`;
@@ -313,6 +437,36 @@ export function AgendaBoard({
           canViewComanda={canViewComanda}
           hidePhones={hidePhones}
           onClose={() => setSelected(null)}
+        />
+      ) : null}
+
+      {blockDraft && canBlockSlots ? (
+        <ScheduleBlockEditor
+          mode="create"
+          date={date}
+          openTime={openTime}
+          closeTime={closeTime}
+          defaultProfessionalId={blockDraft.professionalId}
+          defaultStartTime={blockDraft.time}
+          block={null}
+          professionals={professionals}
+          lockProfessional={!canViewAll}
+          onClose={() => setBlockDraft(null)}
+        />
+      ) : null}
+
+      {selectedBlock && canBlockSlots ? (
+        <ScheduleBlockEditor
+          mode="edit"
+          date={date}
+          openTime={openTime}
+          closeTime={closeTime}
+          defaultProfessionalId={selectedBlock.professionalId}
+          defaultStartTime={formatTime(new Date(selectedBlock.startAt))}
+          block={selectedBlock}
+          professionals={professionals}
+          lockProfessional={!canViewAll}
+          onClose={() => setSelectedBlock(null)}
         />
       ) : null}
     </div>

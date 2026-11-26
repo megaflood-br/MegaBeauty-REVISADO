@@ -64,11 +64,15 @@ async function loadAssistantSnapshot(
   const day = shiftCalendarDate(calendarDate(), dayOffset);
   const { start, end } = rangeOfCalendarDate(day);
   const nowHHmm = dayOffset === 0 ? formatTime(new Date()) : undefined;
-  const [appointments, income, products, professionals] = await Promise.all([
+  const [appointments, blocks, income, products, professionals] = await Promise.all([
     prisma.appointment.findMany({
       where: { tenantId, startAt: { gte: start, lt: end } },
       include: { professional: true, client: true },
       orderBy: { startAt: "asc" },
+    }),
+    prisma.scheduleBlock.findMany({
+      where: { tenantId, startAt: { lt: end }, endAt: { gt: start } },
+      select: { professionalId: true, startAt: true, endAt: true },
     }),
     prisma.transaction.aggregate({
       where: { tenantId, type: "INCOME", occurredAt: { gte: start, lt: end } },
@@ -121,9 +125,14 @@ async function loadAssistantSnapshot(
         closeTime: row.workEnd || tenant.closeTime,
         slotMinutes: tenant.slotMinutes,
         nowHHmm,
-        busy: appointments
-          .filter((item) => item.professionalId === row.id && item.status !== "CANCELLED")
-          .map((item) => ({ start: formatTime(item.startAt), end: formatTime(item.endAt) })),
+        busy: [
+          ...appointments
+            .filter((item) => item.professionalId === row.id && item.status !== "CANCELLED")
+            .map((item) => ({ start: formatTime(item.startAt), end: formatTime(item.endAt) })),
+          ...blocks
+            .filter((item) => item.professionalId === row.id)
+            .map((item) => ({ start: formatTime(item.startAt), end: formatTime(item.endAt) })),
+        ],
       }),
     })),
   };

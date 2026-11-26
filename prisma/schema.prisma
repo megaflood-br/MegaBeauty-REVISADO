@@ -113,6 +113,7 @@ model Tenant {
   categories     ServiceCategory[]
   services       Service[]
   appointments   Appointment[]
+  scheduleBlocks ScheduleBlock[]
   products           Product[]
   productCategories  ProductCategory[]
   productLots        ProductLot[]
@@ -238,6 +239,7 @@ model Professional {
   user           User?
   appointments   Appointment[]
   appointmentItems AppointmentItem[]
+  scheduleBlocks ScheduleBlock[]
   commissions    Commission[]
   serviceLinks   ProfessionalService[]
   comandas         Comanda[]
@@ -488,6 +490,23 @@ model AppointmentItem {
   startAt        DateTime?
   priceCents     Int
   durationMin    Int
+}
+
+model ScheduleBlock {
+  id             String       @id @default(cuid())
+  tenantId       String
+  tenant         Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  professionalId String
+  professional   Professional @relation(fields: [professionalId], references: [id], onDelete: Cascade)
+  startAt        DateTime
+  endAt          DateTime
+  reason         String?
+  createdById    String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@index([tenantId, startAt])
+  @@index([professionalId, startAt])
 }
 
 model Comanda {

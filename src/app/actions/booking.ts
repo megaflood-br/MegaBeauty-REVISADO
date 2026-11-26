@@ -34,21 +34,31 @@ export async function getPublicBookingBusySlots(input: {
   if (!tenant) return { error: "Salão não encontrado." };
 
   const dayRange = rangeOfCalendarDate(date);
-  const appointments = await withTenantContext(tenant.id, () =>
-    prisma.appointment.findMany({
-      where: {
-        tenantId: tenant.id,
-        status: { notIn: ["CANCELLED"] },
-        startAt: { lt: dayRange.end },
-        endAt: { gt: dayRange.start },
-      },
-      select: { professionalId: true, startAt: true, endAt: true },
-    }),
+  const [appointments, blocks] = await withTenantContext(tenant.id, () =>
+    Promise.all([
+      prisma.appointment.findMany({
+        where: {
+          tenantId: tenant.id,
+          status: { notIn: ["CANCELLED"] },
+          startAt: { lt: dayRange.end },
+          endAt: { gt: dayRange.start },
+        },
+        select: { professionalId: true, startAt: true, endAt: true },
+      }),
+      prisma.scheduleBlock.findMany({
+        where: {
+          tenantId: tenant.id,
+          startAt: { lt: dayRange.end },
+          endAt: { gt: dayRange.start },
+        },
+        select: { professionalId: true, startAt: true, endAt: true },
+      }),
+    ]),
   );
 
   return {
     date,
-    busy: appointments.map((row) => ({
+    busy: [...appointments, ...blocks].map((row) => ({
       professionalId: row.professionalId,
       startAt: row.startAt.toISOString(),
       endAt: row.endAt.toISOString(),
@@ -134,17 +144,33 @@ export async function publicBook(formData: FormData) {
     }
 
     const endAt = addMinutes(startAt, totalDurationMin);
-    const busy = await prisma.appointment.findMany({
-      where: {
-        tenantId: tenant.id,
-        professionalId: professional.id,
-        status: { notIn: ["CANCELLED"] },
-        startAt: { lt: endAt },
-        endAt: { gt: startAt },
-      },
-      select: { id: true, startAt: true, endAt: true },
-    });
-    if (hasConflict({ start: startAt, end: endAt }, busy.map((b) => ({ id: b.id, start: b.startAt, end: b.endAt })))) {
+    const [busy, blocks] = await Promise.all([
+      prisma.appointment.findMany({
+        where: {
+          tenantId: tenant.id,
+          professionalId: professional.id,
+          status: { notIn: ["CANCELLED"] },
+          startAt: { lt: endAt },
+          endAt: { gt: startAt },
+        },
+        select: { id: true, startAt: true, endAt: true },
+      }),
+      prisma.scheduleBlock.findMany({
+        where: {
+          tenantId: tenant.id,
+          professionalId: professional.id,
+          startAt: { lt: endAt },
+          endAt: { gt: startAt },
+        },
+        select: { id: true, startAt: true, endAt: true },
+      }),
+    ]);
+    if (
+      hasConflict(
+        { start: startAt, end: endAt },
+        [...busy, ...blocks].map((b) => ({ id: b.id, start: b.startAt, end: b.endAt })),
+      )
+    ) {
       return { error: "Não há bloco contíguo livre para toda a duração dos serviços neste horário. Escolha outro." };
     }
 

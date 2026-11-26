@@ -47,6 +47,9 @@ function isCurrentClient(client: PrismaClient | undefined): client is PrismaClie
   if (typeof (client as { clientPackageItem?: { findMany?: unknown } }).clientPackageItem?.findMany !== "function") {
     return false;
   }
+  if (typeof (client as { scheduleBlock?: { findMany?: unknown } }).scheduleBlock?.findMany !== "function") {
+    return false;
+  }
   const models = (
     client as unknown as {
       _runtimeDataModel?: { models?: Record<string, { fields?: { name?: string }[] }> };

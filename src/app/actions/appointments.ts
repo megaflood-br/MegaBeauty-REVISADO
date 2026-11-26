@@ -4,8 +4,8 @@ import { revalidatePath } from "next/cache";
 import { addMinutes } from "date-fns";
 import { prisma } from "@/lib/db";
 import { requireTenant } from "@/lib/tenant";
-import { canAccess, canViewAllAgenda } from "@/lib/permissions";
-import { hasConflict } from "@/lib/appointments";
+import { canAccess, canBlockAgendaSlots, canViewAllAgenda } from "@/lib/permissions";
+import { hasConflict, validateScheduleBlockWindow } from "@/lib/appointments";
 import { calculateCommission } from "@/lib/commissions";
 import { nextStock } from "@/lib/stock";
 import { atTime, calendarDate, formatTime } from "@/lib/dates";
@@ -23,14 +23,26 @@ export type AppointmentItemInput = {
   durationMin: number;
 };
 
-async function loadBusy(professionalId: string, excludeId?: string) {
+async function loadBusy(tenantId: string, professionalId: string, excludeId?: string) {
   return prisma.appointment.findMany({
     where: {
+      tenantId,
       professionalId,
       status: { notIn: ["CANCELLED"] },
       ...(excludeId ? { id: { not: excludeId } } : {}),
     },
     select: { id: true, startAt: true, endAt: true },
+  });
+}
+
+async function loadBlocks(tenantId: string, professionalId: string, excludeId?: string) {
+  return prisma.scheduleBlock.findMany({
+    where: {
+      tenantId,
+      professionalId,
+      ...(excludeId ? { id: { not: excludeId } } : {}),
+    },
+    select: { id: true, startAt: true, endAt: true, reason: true },
   });
 }
 
@@ -93,9 +105,22 @@ export async function saveAppointment(payload: {
   if (resolved.some((item) => !item.service)) return { error: "Serviço inválido." };
 
   for (const item of resolved) {
-    const busy = await loadBusy(item.professionalId, payload.id);
+    const [busy, blocks] = await Promise.all([
+      loadBusy(session.tenantId, item.professionalId, payload.id),
+      loadBlocks(session.tenantId, item.professionalId),
+    ]);
     if (hasConflict({ id: payload.id, start: item.start, end: item.end }, busy.map((b) => ({ id: b.id, start: b.startAt, end: b.endAt })))) {
       return { error: "Este horário conflita com outro agendamento do profissional." };
+    }
+    const matchingBlock = blocks.find((b) =>
+      hasConflict({ start: item.start, end: item.end }, [{ start: b.startAt, end: b.endAt }]),
+    );
+    if (matchingBlock) {
+      return {
+        error: matchingBlock.reason
+          ? `Este horário está bloqueado na agenda (${matchingBlock.reason}).`
+          : "Este horário está bloqueado na agenda da profissional.",
+      };
     }
   }
 
@@ -297,4 +322,119 @@ export async function updateAppointmentStatus(appointmentId: string, status: str
   revalidatePath("/estoque");
   revalidatePath("/financeiro");
   return { ok: true };
+}
+
+export async function saveScheduleBlock(payload: {
+  id?: string;
+  professionalId: string;
+  date: string;
+  startTime: string;
+  endTime: string;
+  reason?: string;
+}) {
+  const { session, access } = await requireTenant();
+  if (!canBlockAgendaSlots(access)) {
+    return { error: "Sem permissão para bloquear horários na agenda." };
+  }
+
+  const professionalId = String(payload.professionalId ?? "").trim();
+  if (!professionalId) return { error: "Selecione a profissional." };
+
+  const canManageAll = canViewAllAgenda(access);
+  if (!canManageAll) {
+    if (!access.professionalId || professionalId !== access.professionalId) {
+      return { error: "Você só pode bloquear horários na sua própria agenda." };
+    }
+  }
+
+  const windowCheck = validateScheduleBlockWindow({
+    date: String(payload.date ?? ""),
+    startTime: String(payload.startTime ?? ""),
+    endTime: String(payload.endTime ?? ""),
+  });
+  if (!windowCheck.ok) return { error: windowCheck.error };
+
+  const professional = await prisma.professional.findFirst({
+    where: { id: professionalId, tenantId: session.tenantId, active: true },
+    select: { id: true },
+  });
+  if (!professional) return { error: "Profissional não encontrada." };
+
+  const startAt = atTime(payload.date.trim(), payload.startTime.trim());
+  const endAt = atTime(payload.date.trim(), payload.endTime.trim());
+  const reason = String(payload.reason ?? "").trim().slice(0, 140) || null;
+  const id = payload.id?.trim() || undefined;
+
+  if (id) {
+    const existing = await prisma.scheduleBlock.findFirst({
+      where: { id, tenantId: session.tenantId },
+      select: { id: true, professionalId: true },
+    });
+    if (!existing) return { error: "Bloqueio não encontrado." };
+    if (!canManageAll && existing.professionalId !== access.professionalId) {
+      return { error: "Você só pode alterar bloqueios da sua própria agenda." };
+    }
+  }
+
+  const [busy, existingBlocks] = await Promise.all([
+    loadBusy(session.tenantId, professionalId),
+    loadBlocks(session.tenantId, professionalId, id),
+  ]);
+
+  if (hasConflict({ start: startAt, end: endAt }, busy.map((b) => ({ id: b.id, start: b.startAt, end: b.endAt })))) {
+    return { error: "Já existe um agendamento neste intervalo. Reagende ou cancele antes de bloquear." };
+  }
+  if (hasConflict({ id, start: startAt, end: endAt }, existingBlocks.map((b) => ({ id: b.id, start: b.startAt, end: b.endAt })))) {
+    return { error: "Já existe um bloqueio neste intervalo para esta profissional." };
+  }
+
+  if (id) {
+    await prisma.scheduleBlock.update({
+      where: { id },
+      data: { professionalId, startAt, endAt, reason },
+    });
+  } else {
+    await prisma.scheduleBlock.create({
+      data: {
+        tenantId: session.tenantId,
+        professionalId,
+        startAt,
+        endAt,
+        reason,
+        createdById: session.userId,
+      },
+    });
+  }
+
+  revalidatePath("/agenda");
+  revalidatePath("/dashboard");
+  revalidatePath("/atendimento");
+  return { ok: true as const };
+}
+
+export async function deleteScheduleBlock(blockId: string) {
+  const { session, access } = await requireTenant();
+  if (!canBlockAgendaSlots(access)) {
+    return { error: "Sem permissão para desbloquear horários na agenda." };
+  }
+  const id = String(blockId ?? "").trim();
+  if (!id) return { error: "Bloqueio inválido." };
+
+  const block = await prisma.scheduleBlock.findFirst({
+    where: { id, tenantId: session.tenantId },
+    select: { id: true, professionalId: true },
+  });
+  if (!block) return { error: "Bloqueio não encontrado." };
+
+  if (!canViewAllAgenda(access)) {
+    if (!access.professionalId || block.professionalId !== access.professionalId) {
+      return { error: "Você só pode remover bloqueios da sua própria agenda." };
+    }
+  }
+
+  await prisma.scheduleBlock.delete({ where: { id: block.id } });
+  revalidatePath("/agenda");
+  revalidatePath("/dashboard");
+  revalidatePath("/atendimento");
+  return { ok: true as const };
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { calculateCommission, consumedProductCents, availableCommission, sumCommissions } from "@/lib/commissions";
-import { hasConflict } from "@/lib/appointments";
+import { hasConflict, validateScheduleBlockWindow } from "@/lib/appointments";
 import { formatStockQty, isLowStock, nextStock } from "@/lib/stock";
 import {
   answerAssistantIntent,
@@ -263,6 +263,7 @@ import {
   agendaScopeLabel,
   allowedNavHrefs,
   canAccess,
+  canBlockAgendaSlots,
   canManageCommissions,
   canReopenComandas,
   canViewAllAgenda,
@@ -273,6 +274,7 @@ import {
   phonesScopeLabel,
   resolveAccess,
   roleDefaultGrants,
+  sanitizeGrants,
   serializeAccess,
   shouldHidePhones,
 } from "@/lib/permissions";
@@ -3059,5 +3061,88 @@ describe("reabertura de comanda fechada (somente admin)", () => {
     expect(stockDeltas.get("prod-2")).toBe(1);
   });
 });
+
+describe("bloqueio de horários na agenda e permissão configurável", () => {
+  it("respeita padrões por perfil e permite habilitar para colaboradores nas permissões", () => {
+    expect(canBlockAgendaSlots(resolveAccess({ role: "OWNER" }))).toBe(true);
+    expect(canBlockAgendaSlots(resolveAccess({ role: "SUPER_ADMIN" }))).toBe(true);
+    expect(canBlockAgendaSlots(resolveAccess({ role: "MANAGER" }))).toBe(true);
+    expect(canBlockAgendaSlots(resolveAccess({ role: "RECEPTIONIST" }))).toBe(true);
+
+    // Por padrão, colaborador (PROFESSIONAL) não pode bloquear horários até ser liberado nas permissões
+    const defaultProfessional = resolveAccess({ role: "PROFESSIONAL", professionalId: "prof-1" });
+    expect(canBlockAgendaSlots(defaultProfessional)).toBe(false);
+    expect(canViewAllAgenda(defaultProfessional)).toBe(false);
+
+    // Perfil de permissão com agenda.blockSlots habilitado libera apenas bloqueio sem exigir agenda.create
+    const customStored = roleDefaultGrants("PROFESSIONAL");
+    customStored.modules = {
+      ...customStored.modules,
+      agenda: { ...customStored.modules?.agenda, blockSlots: true },
+    };
+    const viaProfile = resolveAccess({
+      role: "PROFESSIONAL",
+      professionalId: "prof-1",
+      profile: {
+        id: "prof-bloqueio",
+        name: "Colaborador com bloqueio",
+        isAdmin: false,
+        grants: serializeAccess(customStored),
+      },
+    });
+    expect(canBlockAgendaSlots(viaProfile)).toBe(true);
+    expect(canAccess(viaProfile, "agenda", "create")).toBe(false);
+    expect(canViewAllAgenda(viaProfile)).toBe(false);
+
+    // Permissão individual (accessJson) também funciona
+    const viaUserOverride = resolveAccess({
+      role: "PROFESSIONAL",
+      professionalId: "prof-1",
+      accessJson: serializeAccess(customStored),
+    });
+    expect(canBlockAgendaSlots(viaUserOverride)).toBe(true);
+
+    // Sem acesso ao módulo Agenda, blockSlots não tem efeito
+    const noAgendaAccess = sanitizeGrants({
+      agenda: { access: false, blockSlots: true },
+    });
+    const blockedAccess = resolveAccess({
+      role: "PROFESSIONAL",
+      professionalId: "prof-1",
+      accessJson: serializeAccess({ admin: false, modules: noAgendaAccess }),
+    });
+    expect(canBlockAgendaSlots(blockedAccess)).toBe(false);
+  });
+
+  it("valida janela de bloqueio (ex: ausência de 2h) e detecta conflito com agendamentos", () => {
+    const valid = validateScheduleBlockWindow({
+      date: "2026-11-26",
+      startTime: "14:00",
+      endTime: "16:00",
+    });
+    expect(valid.ok).toBe(true);
+    if (valid.ok) {
+      expect(valid.startMin).toBe(14 * 60);
+      expect(valid.endMin).toBe(16 * 60);
+      expect(valid.durationMin).toBe(120);
+      const blockStart = zonedDateTime("2026-11-26", "14:00");
+      const blockEnd = zonedDateTime("2026-11-26", "16:00");
+      // Agendamento às 15:00-15:45 conflita com bloqueio das 14:00-16:00
+      const apptStart = zonedDateTime("2026-11-26", "15:00");
+      const apptEnd = zonedDateTime("2026-11-26", "15:45");
+      expect(hasConflict({ start: apptStart, end: apptEnd }, [{ start: blockStart, end: blockEnd }])).toBe(true);
+      // Agendamento às 16:00-16:45 (logo após o bloqueio) não conflita
+      const afterStart = zonedDateTime("2026-11-26", "16:00");
+      const afterEnd = zonedDateTime("2026-11-26", "16:45");
+      expect(hasConflict({ start: afterStart, end: afterEnd }, [{ start: blockStart, end: blockEnd }])).toBe(false);
+    }
+
+    expect(validateScheduleBlockWindow({ date: "26/11/2026", startTime: "14:00", endTime: "16:00" }).ok).toBe(false);
+    expect(validateScheduleBlockWindow({ date: "2026-11-26", startTime: "14:00", endTime: "14:00" }).ok).toBe(false);
+    expect(validateScheduleBlockWindow({ date: "2026-11-26", startTime: "16:00", endTime: "14:00" }).ok).toBe(false);
+    expect(validateScheduleBlockWindow({ date: "2026-11-26", startTime: "14:00", endTime: "14:03" }).ok).toBe(false);
+  });
+});
+
 
 

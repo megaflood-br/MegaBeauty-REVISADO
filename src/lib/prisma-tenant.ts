@@ -24,6 +24,7 @@ export const CORE_TENANT_SCOPED_MODELS = new Set<string>([
   "Service",
   "Client",
   "Appointment",
+  "ScheduleBlock",
   "Comanda",
   "ProductCategory",
   "Product",

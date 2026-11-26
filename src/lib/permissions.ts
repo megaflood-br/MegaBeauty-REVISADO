@@ -14,9 +14,9 @@ export const PERMISSION_MODULES = [
   {
     id: "agenda",
     label: "Agenda",
-    description: "Criar e alterar horários. Ver todos libera a agenda das outras profissionais.",
+    description: "Criar e alterar horários. Ver todos libera a agenda das outras profissionais e Bloquear horários permite reservar ausências.",
     href: "/agenda",
-    extras: ["viewAll"] as const,
+    extras: ["viewAll", "blockSlots"] as const,
   },
   {
     id: "atendimento",
@@ -154,7 +154,7 @@ export const PERMISSION_MODULES = [
 ] as const;
 
 export type PermissionModuleId = (typeof PERMISSION_MODULES)[number]["id"];
-export type PermissionExtra = "viewAll" | "hidePhones";
+export type PermissionExtra = "viewAll" | "hidePhones" | "blockSlots";
 export type PermissionFlag = PermissionAction | PermissionExtra;
 
 export type ModuleGrants = Partial<Record<PermissionFlag, boolean>>;
@@ -193,6 +193,7 @@ export function allGrants(): PermissionGrants {
       edit: true,
       remove: true,
       ...((mod.extras as readonly string[]).includes("viewAll") ? { viewAll: true } : {}),
+      ...((mod.extras as readonly string[]).includes("blockSlots") ? { blockSlots: true } : {}),
     };
   }
   return grants;
@@ -214,7 +215,7 @@ export function roleDefaultGrants(role: string): StoredAccess {
       admin: false,
       modules: {
         dashboard: flags(true, false, false, false),
-        agenda: flags(true, true, true, true, { viewAll: true }),
+        agenda: flags(true, true, true, true, { viewAll: true, blockSlots: true }),
         atendimento: flags(true, true, true, false),
         receptionist: flags(true, false, true, false),
         comandas: flags(true, true, true, false),
@@ -231,7 +232,7 @@ export function roleDefaultGrants(role: string): StoredAccess {
     admin: false,
     modules: {
       dashboard: flags(true, false, false, false),
-      agenda: flags(true, false, false, false, { viewAll: false }),
+      agenda: flags(true, false, false, false, { viewAll: false, blockSlots: false }),
       atendimento: flags(true, true, false, false),
       comandas: flags(true, false, false, false),
       clients: flags(true, false, false, false, { hidePhones: true }),
@@ -269,6 +270,7 @@ export function sanitizeGrants(input?: PermissionGrants | null): PermissionGrant
     }
     if (hasExtra(mod, "viewAll") && row.viewAll === true) next.viewAll = true;
     if (hasExtra(mod, "hidePhones") && row.hidePhones === true) next.hidePhones = true;
+    if (hasExtra(mod, "blockSlots") && row.blockSlots === true) next.blockSlots = true;
     if (Object.keys(next).length) grants[mod.id] = next;
   }
   return grants;
@@ -327,6 +329,7 @@ export function canAccess(access: Pick<Access, "isAdmin" | "grants">, module: Pe
   if (!row) return false;
   if (action === "viewAll") return row.viewAll === true;
   if (action === "hidePhones") return row.hidePhones === true;
+  if (action === "blockSlots") return row.access === true && row.blockSlots === true;
   if (action !== "access" && row.access !== true) return false;
   return row[action] === true;
 }
@@ -342,6 +345,10 @@ export function phonesScopeLabel(access: Pick<Access, "isAdmin" | "grants">) {
 
 export function canViewAllAgenda(access: Pick<Access, "isAdmin" | "grants">) {
   return canAccess(access, "agenda", "viewAll");
+}
+
+export function canBlockAgendaSlots(access: Pick<Access, "isAdmin" | "grants">) {
+  return canAccess(access, "agenda", "blockSlots");
 }
 
 export function canViewAllCommissions(access: Pick<Access, "isAdmin" | "grants">) {

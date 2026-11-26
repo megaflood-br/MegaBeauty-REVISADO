@@ -22,7 +22,7 @@ export default async function PublicBookingPage({ params }: { params: Promise<{ 
 
   const horizon = publicBookingRange(undefined, PUBLIC_BOOKING_MAX_DAYS);
 
-  const [promotions, busy] = await withTenantContext(tenant.id, () =>
+  const [promotions, busyAppointments, busyBlocks] = await withTenantContext(tenant.id, () =>
     Promise.all([
       loadPromoRules(tenant.id),
       prisma.appointment.findMany({
@@ -34,8 +34,17 @@ export default async function PublicBookingPage({ params }: { params: Promise<{ 
         },
         select: { professionalId: true, startAt: true, endAt: true },
       }),
+      prisma.scheduleBlock.findMany({
+        where: {
+          tenantId: tenant.id,
+          startAt: { lt: horizon.end },
+          endAt: { gt: horizon.start },
+        },
+        select: { professionalId: true, startAt: true, endAt: true },
+      }),
     ]),
   );
+  const busy = [...busyAppointments, ...busyBlocks];
 
   return (
     <main className="mx-auto min-h-screen max-w-xl px-4 py-10">
