@@ -63,6 +63,7 @@ function isCurrentClient(client: PrismaClient | undefined): client is PrismaClie
   const conversationFields = models?.Conversation?.fields;
   const messageFields = models?.Message?.fields;
   const comandaItemFields = models?.ComandaItem?.fields;
+  const userFields = models?.User?.fields;
   return Boolean(
     productFields?.some((field) => field.name === "imageUrl") &&
       tenantFields?.some((field) => field.name === "servedCities") &&
@@ -78,6 +79,7 @@ function isCurrentClient(client: PrismaClient | undefined): client is PrismaClie
       conversationFields?.some((field) => field.name === "botPausedUntil") &&
       messageFields?.some((field) => field.name === "source") &&
       comandaItemFields?.some((field) => field.name === "clientPackageItemId") &&
+      userFields?.some((field) => field.name === "onboardingTourStatus") &&
       tenantFields?.some((field) => field.name === "whatsappProvider") &&
       tenantFields?.some((field) => field.name === "metaPhoneNumberId") &&
       tenantFields?.some((field) => field.name === "evolutionQr"),

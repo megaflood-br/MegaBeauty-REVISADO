@@ -3,6 +3,7 @@ import { requireTenant } from "@/lib/tenant";
 import { AppShell } from "@/components/app-shell";
 import { listPlatformPlans, planLabel } from "@/lib/plans";
 import { loadSalonNotices } from "@/lib/salon-notices";
+import { loadOnboardingState } from "@/lib/onboarding-server";
 import { allowedNavHrefs, canAccess, moduleFromPath } from "@/lib/permissions";
 
 const NAV_HREFS = [
@@ -35,9 +36,10 @@ const NAV_HREFS = [
 
 export default async function PainelLayout({ children }: { children: React.ReactNode }) {
   const { session, tenant, access } = await requireTenant();
-  const [catalog, notices, headerList] = await Promise.all([
+  const [catalog, notices, onboarding, headerList] = await Promise.all([
     listPlatformPlans(),
     loadSalonNotices(session.tenantId, tenant.city),
+    loadOnboardingState(session, tenant, access),
     headers(),
   ]);
   const pathname = headerList.get("x-pathname") || "";
@@ -51,6 +53,7 @@ export default async function PainelLayout({ children }: { children: React.React
       impersonatorName={session.impersonatorName}
       noticeCount={notices.noticeCount}
       allowedHrefs={allowedNavHrefs(access, NAV_HREFS)}
+      onboarding={onboarding}
     >
       {allowed ? (
         children

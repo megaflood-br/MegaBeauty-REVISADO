@@ -23,6 +23,8 @@ export function SidebarLayout({
   badge,
   banner,
   headerAction,
+  footerAction,
+  highlightedHref,
   children,
 }: {
   plan: string;
@@ -32,6 +34,8 @@ export function SidebarLayout({
   badge?: (href: string) => ReactNode;
   banner?: ReactNode;
   headerAction?: ReactNode;
+  footerAction?: ReactNode;
+  highlightedHref?: string | null;
   children: ReactNode;
 }) {
   const pathname = usePathname();
@@ -53,6 +57,12 @@ export function SidebarLayout({
       window.removeEventListener("keydown", onKey);
     };
   }, [open]);
+
+  useEffect(() => {
+    if (!highlightedHref) return;
+    const el = document.querySelector<HTMLElement>(`aside nav a[data-tour-href="${highlightedHref}"]`);
+    el?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [highlightedHref]);
 
   return (
     <div className="flex h-dvh overflow-hidden bg-cream">
@@ -92,14 +102,20 @@ export function SidebarLayout({
         <nav className="flex-1 space-y-1 overflow-y-auto px-3">
           {items.map((item) => {
             const active = item.exact ? pathname === item.href : pathname === item.href || pathname.startsWith(`${item.href}/`);
+            const highlighted = Boolean(highlightedHref && highlightedHref === item.href);
             const Icon = item.icon;
             return (
               <Link
                 key={item.href}
                 href={item.href}
+                data-tour-href={item.href}
                 className={cn(
                   "flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition",
-                  active ? "bg-wine text-white" : "text-slate-300 hover:bg-white/5 hover:text-white",
+                  active
+                    ? "bg-wine text-white"
+                    : highlighted
+                      ? "bg-white/12 text-white ring-1 ring-rose"
+                      : "text-slate-300 hover:bg-white/5 hover:text-white",
                 )}
               >
                 <Icon size={18} />
@@ -109,6 +125,7 @@ export function SidebarLayout({
             );
           })}
         </nav>
+        {footerAction}
         <form action={logoutAction} className="border-t border-white/10 p-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
           <div className="mb-3 truncate text-sm text-slate-300">{userName}</div>
           <button className="flex items-center gap-2 text-sm text-slate-400 hover:text-white">

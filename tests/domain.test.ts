@@ -279,6 +279,12 @@ import {
   shouldHidePhones,
 } from "@/lib/permissions";
 import {
+  buildOnboardingState,
+  canRunOnboardingTour,
+  isLocationMatchingStep,
+  normalizeTourStatus,
+} from "@/lib/onboarding";
+import {
   applyCatalogPrice,
   bestPromotion,
   parseWeekdays,
@@ -3143,6 +3149,133 @@ describe("bloqueio de horários na agenda e permissão configurável", () => {
     expect(validateScheduleBlockWindow({ date: "2026-11-26", startTime: "14:00", endTime: "14:03" }).ok).toBe(false);
   });
 });
+
+describe("tour guiado de primeiros acessos (onboarding)", () => {
+  it("libera tour apenas para perfis com permissão de configuração da empresa", () => {
+    expect(canRunOnboardingTour(resolveAccess({ role: "OWNER" }))).toBe(true);
+    expect(canRunOnboardingTour(resolveAccess({ role: "MANAGER" }))).toBe(true);
+    expect(canRunOnboardingTour(resolveAccess({ role: "PROFESSIONAL" }))).toBe(false);
+    expect(normalizeTourStatus("IN_PROGRESS")).toBe("IN_PROGRESS");
+    expect(normalizeTourStatus("INVALID")).toBe("PENDING");
+  });
+
+  it("calcula progresso real das etapas essenciais e auto-abertura nos primeiros acessos", () => {
+    const fresh = buildOnboardingState({
+      salonName: "Studio Bela",
+      salonSlug: "studio-bela",
+      phone: "",
+      city: "",
+      address: "",
+      openTime: "08:00",
+      closeTime: "20:00",
+      activeServicesCount: 0,
+      activeProfessionalsCount: 0,
+      linkedProfessionalsCount: 0,
+      clientsCount: 0,
+      appointmentsCount: 0,
+      whatsappConnected: false,
+      canRunTour: true,
+      tourStatus: "PENDING",
+    });
+
+    expect(fresh.completedCount).toBe(0);
+    expect(fresh.totalCount).toBe(6);
+    expect(fresh.percent).toBe(0);
+    expect(fresh.shouldAutoOpen).toBe(true);
+    expect(fresh.shouldResumeDock).toBe(false);
+    expect(fresh.nextStepIndex).toBe(0);
+    expect(fresh.steps[0].statusDetail).toContain("telefone");
+    expect(fresh.steps[0].statusDetail).toContain("cidade/endereço");
+
+    // Empresa preencheu salão, cadastrou serviços e 1 profissional sem vincular serviços
+    const partial = buildOnboardingState({
+      salonName: "Studio Bela",
+      salonSlug: "studio-bela",
+      phone: "11999990000",
+      city: "São Paulo",
+      openTime: "09:00",
+      closeTime: "19:00",
+      activeServicesCount: 4,
+      activeProfessionalsCount: 1,
+      linkedProfessionalsCount: 0,
+      clientsCount: 0,
+      appointmentsCount: 0,
+      whatsappConnected: false,
+      canRunTour: true,
+      tourStatus: "IN_PROGRESS",
+      savedStepIndex: 1,
+    });
+
+    expect(partial.completedCount).toBe(2);
+    expect(partial.nextStepIndex).toBe(2);
+    expect(partial.steps[2].completed).toBe(false);
+    expect(partial.steps[2].statusDetail).toContain("falta vincular serviços");
+    expect(partial.shouldAutoOpen).toBe(false);
+    expect(partial.shouldResumeDock).toBe(true);
+
+    // Tudo preenchido não reabre automaticamente
+    const complete = buildOnboardingState({
+      salonName: "Studio Bela",
+      salonSlug: "studio-bela",
+      phone: "11999990000",
+      city: "São Paulo",
+      openTime: "09:00",
+      closeTime: "19:00",
+      activeServicesCount: 4,
+      activeProfessionalsCount: 2,
+      linkedProfessionalsCount: 2,
+      clientsCount: 10,
+      appointmentsCount: 3,
+      whatsappConnected: true,
+      canRunTour: true,
+      tourStatus: "PENDING",
+    });
+
+    expect(complete.allDone).toBe(true);
+    expect(complete.percent).toBe(100);
+    expect(complete.shouldAutoOpen).toBe(false);
+
+    // Suporte em personificação não dispara tour
+    const impersonated = buildOnboardingState({
+      salonName: "Studio Bela",
+      salonSlug: "studio-bela",
+      activeServicesCount: 0,
+      activeProfessionalsCount: 0,
+      linkedProfessionalsCount: 0,
+      clientsCount: 0,
+      appointmentsCount: 0,
+      whatsappConnected: false,
+      canRunTour: true,
+      isImpersonating: true,
+      tourStatus: "PENDING",
+    });
+    expect(impersonated.canRunTour).toBe(false);
+    expect(impersonated.shouldAutoOpen).toBe(false);
+  });
+
+  it("identifica corretamente se o usuário está na tela e aba da etapa ativa", () => {
+    const state = buildOnboardingState({
+      salonName: "Studio Bela",
+      salonSlug: "studio-bela",
+      activeServicesCount: 0,
+      activeProfessionalsCount: 0,
+      linkedProfessionalsCount: 0,
+      clientsCount: 0,
+      appointmentsCount: 0,
+      whatsappConnected: false,
+      canRunTour: true,
+    });
+    const salonStep = state.steps.find((s) => s.id === "salon_profile")!;
+    const whatsappStep = state.steps.find((s) => s.id === "whatsapp")!;
+
+    expect(isLocationMatchingStep("/configuracoes", "", salonStep)).toBe(true);
+    expect(isLocationMatchingStep("/configuracoes", "tab=salao", salonStep)).toBe(true);
+    expect(isLocationMatchingStep("/configuracoes", "tab=whatsapp", salonStep)).toBe(false);
+    expect(isLocationMatchingStep("/configuracoes", "tab=whatsapp", whatsappStep)).toBe(true);
+    expect(isLocationMatchingStep("/configuracoes", "", whatsappStep)).toBe(false);
+  });
+});
+
 
 
 

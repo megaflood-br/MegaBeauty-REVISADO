@@ -33,6 +33,12 @@ import { SupportCallOverlay } from "@/components/suporte/call-overlay";
 import { SupportLiveProvider, useSupportLive } from "@/components/suporte/live-context";
 import { ConfirmProvider } from "@/components/confirm-dialog";
 import { SidebarLayout, type SidebarNavItem } from "@/components/sidebar-layout";
+import {
+  OnboardingProvider,
+  SidebarTourTrigger,
+  useOnboarding,
+} from "@/components/onboarding/onboarding-provider";
+import type { OnboardingState } from "@/lib/onboarding";
 
 const NAV: SidebarNavItem[] = [
   { href: "/dashboard", label: "Painel", icon: LayoutDashboard },
@@ -92,6 +98,54 @@ function NavBadges({ href }: { href: string }) {
   );
 }
 
+function AppShellLayout({
+  children,
+  salon,
+  userName,
+  plan,
+  impersonatorName,
+  noticeCount,
+  items,
+}: {
+  children: React.ReactNode;
+  salon: string;
+  userName: string;
+  plan: string;
+  impersonatorName?: string | null;
+  noticeCount: number;
+  items: SidebarNavItem[];
+}) {
+  const onboarding = useOnboarding();
+  return (
+    <SidebarLayout
+      plan={plan}
+      title={salon}
+      userName={userName}
+      items={items}
+      badge={(href) => <NavBadges href={href} />}
+      headerAction={<NoticeBell count={noticeCount} />}
+      footerAction={<SidebarTourTrigger />}
+      highlightedHref={onboarding?.highlightedHref ?? null}
+      banner={
+        impersonatorName ? (
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-950">
+            <span>
+              Você entrou como suporte no salão <strong>{salon}</strong> ({impersonatorName}).
+            </span>
+            <form action={stopImpersonation}>
+              <button type="submit" className="font-medium underline">
+                Voltar à plataforma
+              </button>
+            </form>
+          </div>
+        ) : null
+      }
+    >
+      {children}
+    </SidebarLayout>
+  );
+}
+
 export function AppShell({
   children,
   salon,
@@ -100,6 +154,7 @@ export function AppShell({
   impersonatorName,
   noticeCount = 0,
   allowedHrefs,
+  onboarding,
 }: {
   children: React.ReactNode;
   salon: string;
@@ -108,36 +163,29 @@ export function AppShell({
   impersonatorName?: string | null;
   noticeCount?: number;
   allowedHrefs?: string[] | null;
+  onboarding?: OnboardingState | null;
 }) {
   const items = allowedHrefs ? NAV.filter((item) => allowedHrefs.includes(item.href)) : NAV;
+  const content = (
+    <>
+      <AppShellLayout
+        plan={plan}
+        salon={salon}
+        userName={userName}
+        impersonatorName={impersonatorName}
+        noticeCount={noticeCount}
+        items={items}
+      >
+        {children}
+      </AppShellLayout>
+      <SupportCallOverlay />
+    </>
+  );
+
   return (
     <ConfirmProvider>
       <SupportLiveProvider>
-        <SidebarLayout
-          plan={plan}
-          title={salon}
-          userName={userName}
-          items={items}
-          badge={(href) => <NavBadges href={href} />}
-          headerAction={<NoticeBell count={noticeCount} />}
-          banner={
-            impersonatorName ? (
-              <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-950">
-                <span>
-                  Você entrou como suporte no salão <strong>{salon}</strong> ({impersonatorName}).
-                </span>
-                <form action={stopImpersonation}>
-                  <button type="submit" className="font-medium underline">
-                    Voltar à plataforma
-                  </button>
-                </form>
-              </div>
-            ) : null
-          }
-        >
-          {children}
-        </SidebarLayout>
-        <SupportCallOverlay />
+        {onboarding ? <OnboardingProvider state={onboarding}>{content}</OnboardingProvider> : content}
       </SupportLiveProvider>
     </ConfirmProvider>
   );

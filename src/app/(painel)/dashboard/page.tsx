@@ -14,6 +14,7 @@ import {
 } from "@/lib/dashboard";
 import { DashboardBoard } from "@/components/painel/dashboard-board";
 import { LowStockAlert, SalonCityHint, SupplierDealStrip } from "@/components/avisos/salon-alerts";
+import { DashboardSetupBanner } from "@/components/onboarding/dashboard-setup-banner";
 import { loadSalonNotices } from "@/lib/salon-notices";
 
 function parseRange(fromRaw?: string, toRaw?: string) {
@@ -253,6 +254,7 @@ export default async function DashboardPage({
       professionalOfTheDay={professionalOfTheDay}
       alerts={
         <div className="space-y-4">
+          <DashboardSetupBanner />
           <SalonCityHint city={notices.city} />
           <LowStockAlert items={notices.restock} always />
           <SupplierDealStrip deals={notices.deals} always salonCity={notices.city} />
