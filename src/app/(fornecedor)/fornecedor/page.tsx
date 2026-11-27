@@ -1,6 +1,7 @@
 import { requireSupplier } from "@/lib/tenant";
 import { prisma } from "@/lib/db";
 import { SupplierProductBoard } from "@/components/fornecedor/product-board";
+import { DashboardSetupBanner } from "@/components/onboarding/dashboard-setup-banner";
 
 export default async function FornecedorProdutosPage() {
   const { session } = await requireSupplier();
@@ -9,21 +10,24 @@ export default async function FornecedorProdutosPage() {
     orderBy: { name: "asc" },
   });
   return (
-    <SupplierProductBoard
-      products={products.map((product) => ({
-        id: product.id,
-        name: product.name,
-        brand: product.brand,
-        sku: product.sku,
-        category: product.category,
-        unit: product.unit,
-        priceCents: product.priceCents,
-        minQty: product.minQty,
-        stock: product.stock,
-        description: product.description,
-        imageUrl: product.imageUrl,
-        active: product.active,
-      }))}
-    />
+    <div className="space-y-5">
+      <DashboardSetupBanner />
+      <SupplierProductBoard
+        products={products.map((product) => ({
+          id: product.id,
+          name: product.name,
+          brand: product.brand,
+          sku: product.sku,
+          category: product.category,
+          unit: product.unit,
+          priceCents: product.priceCents,
+          minQty: product.minQty,
+          stock: product.stock,
+          description: product.description,
+          imageUrl: product.imageUrl,
+          active: product.active,
+        }))}
+      />
+    </div>
   );
 }

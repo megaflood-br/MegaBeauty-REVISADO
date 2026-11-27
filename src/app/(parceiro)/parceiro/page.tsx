@@ -3,6 +3,7 @@ import { requirePartner } from "@/lib/tenant";
 import { formatBRL } from "@/lib/money";
 import { conversionRate, monthKey, summarizePartnerLedger } from "@/lib/partners";
 import { Card } from "@/components/ui";
+import { DashboardSetupBanner } from "@/components/onboarding/dashboard-setup-banner";
 
 export default async function ParceiroPage() {
   const { partner } = await requirePartner();
@@ -42,6 +43,7 @@ export default async function ParceiroPage() {
           Comissão de {partner.commissionBps / 100}% em toda fatura paga dos salões que entraram pelo seu link.
         </p>
       </div>
+      <DashboardSetupBanner />
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <Card>
           <div className="text-xs text-ink-soft">Total ganho</div>

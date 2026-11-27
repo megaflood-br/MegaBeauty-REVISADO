@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowRight, Check, Compass, X } from "lucide-react";
+import { ArrowRight, Check, Compass, Layers, X } from "lucide-react";
 import { useOnboarding } from "@/components/onboarding/onboarding-provider";
 import { cn } from "@/lib/utils";
 
@@ -15,7 +15,7 @@ export function DashboardSetupBanner() {
 
   return (
     <section
-      aria-label="Configuração inicial da empresa"
+      aria-label="Configuração inicial"
       className="rounded-xl border border-line bg-paper p-5"
     >
       <div className="flex flex-wrap items-start justify-between gap-4">
@@ -33,17 +33,25 @@ export function DashboardSetupBanner() {
             <span>{state.percent}%</span>
           </div>
           <h2 className="mt-1 font-display text-lg font-semibold text-ink [text-wrap:balance]">
-            Complete os dados essenciais de {state.salonName}
+            {state.bannerHeadline}
           </h2>
-          <p className="mt-1 text-sm text-ink-soft">
-            Preencha os itens abaixo para liberar agenda, agendamento online, comandas e mensagens automáticas sem erros.
-          </p>
+          <p className="mt-1 text-sm text-ink-soft">{state.bannerSubtitle}</p>
         </div>
 
-        <div className="flex shrink-0 items-center gap-2">
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
+          {state.features.length > 0 ? (
+            <button
+              type="button"
+              onClick={() => openModal(state.nextStepIndex, "features")}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-paper px-3.5 py-2 text-sm font-medium text-ink transition hover:bg-sand whitespace-nowrap"
+            >
+              <Layers size={15} className="text-ink-soft" />
+              Recursos do sistema
+            </button>
+          ) : null}
           <button
             type="button"
-            onClick={() => openModal(state.nextStepIndex)}
+            onClick={() => openModal(state.nextStepIndex, "setup")}
             className="inline-flex items-center gap-2 rounded-lg bg-wine px-4 py-2 text-sm font-medium text-white transition hover:bg-wine-deep whitespace-nowrap"
           >
             Continuar tour guiado

@@ -280,6 +280,8 @@ import {
 } from "@/lib/permissions";
 import {
   buildOnboardingState,
+  buildPartnerOnboardingState,
+  buildSupplierOnboardingState,
   canRunOnboardingTour,
   isLocationMatchingStep,
   normalizeTourStatus,
@@ -3274,7 +3276,103 @@ describe("tour guiado de primeiros acessos (onboarding)", () => {
     expect(isLocationMatchingStep("/configuracoes", "tab=whatsapp", whatsappStep)).toBe(true);
     expect(isLocationMatchingStep("/configuracoes", "", whatsappStep)).toBe(false);
   });
+
+  it("monta tour de Fornecedor com cobertura, catálogo, promoções, pedidos e recursos do portal", () => {
+    const fresh = buildSupplierOnboardingState({
+      companyName: "Beleza Atacado",
+      companySlug: "beleza-atacado",
+      phone: "",
+      city: "",
+      address: "",
+      servedCitiesCount: 0,
+      payMethodsCount: 2,
+      deliveryMinCents: 0,
+      deliveryFeeCents: 0,
+      activeProductsCount: 0,
+      activePromotionsCount: 0,
+      ordersCount: 0,
+      tourStatus: "PENDING",
+    });
+
+    expect(fresh.portal).toBe("SUPPLIER");
+    expect(fresh.homeHref).toBe("/fornecedor");
+    expect(fresh.shouldAutoOpen).toBe(true);
+    expect(fresh.steps.length).toBe(4);
+    expect(fresh.features.length).toBeGreaterThanOrEqual(5);
+    expect(fresh.steps[0].statusDetail).toContain("cidades atendidas");
+
+    // Exact path: `/fornecedor` não pode casar com `/fornecedor/empresa`
+    const productsStep = fresh.steps.find((s) => s.id === "supplier_products")!;
+    expect(isLocationMatchingStep("/fornecedor", "", productsStep)).toBe(true);
+    expect(isLocationMatchingStep("/fornecedor/empresa", "", productsStep)).toBe(false);
+
+    const ready = buildSupplierOnboardingState({
+      companyName: "Beleza Atacado",
+      companySlug: "beleza-atacado",
+      phone: "11988887777",
+      city: "São Paulo",
+      address: "Rua Central, 100",
+      servedCitiesCount: 5,
+      payMethodsCount: 3,
+      deliveryMinCents: 15000,
+      deliveryFeeCents: 1200,
+      activeProductsCount: 12,
+      activePromotionsCount: 2,
+      ordersCount: 4,
+      tourStatus: "PENDING",
+    });
+    expect(ready.allDone).toBe(true);
+    expect(ready.shouldAutoOpen).toBe(false);
+  });
+
+  it("monta tour de Parceiro com white-label, landing, Pix, links, clientes e painel de comissões", () => {
+    const fresh = buildPartnerOnboardingState({
+      brandName: "Studio Pro CRM",
+      slug: "studiopro",
+      commissionBps: 2500,
+      holdDays: 30,
+      hasLogo: false,
+      hasCustomHost: false,
+      hasLandingCopy: false,
+      hasPayoutInfo: false,
+      referredCount: 0,
+      paidInvoicesCount: 0,
+      tourStatus: "PENDING",
+    });
+
+    expect(fresh.portal).toBe("PARTNER");
+    expect(fresh.homeHref).toBe("/parceiro");
+    expect(fresh.shouldAutoOpen).toBe(true);
+    expect(fresh.steps.length).toBe(6);
+    expect(fresh.essentialTotalCount).toBe(3);
+    expect(fresh.features.length).toBeGreaterThanOrEqual(6);
+    expect(fresh.features.some((f) => f.title.includes("25%"))).toBe(true);
+
+    // Exact path: `/parceiro` não casa com `/parceiro/links`
+    const dashboardStep = fresh.steps.find((s) => s.id === "partner_dashboard")!;
+    expect(isLocationMatchingStep("/parceiro", "", dashboardStep)).toBe(true);
+    expect(isLocationMatchingStep("/parceiro/links", "", dashboardStep)).toBe(false);
+
+    const configured = buildPartnerOnboardingState({
+      brandName: "Studio Pro CRM",
+      slug: "studiopro",
+      commissionBps: 2500,
+      holdDays: 30,
+      hasLogo: true,
+      hasCustomHost: true,
+      customHost: "crm.studiopro.com.br",
+      hasLandingCopy: true,
+      hasPayoutInfo: true,
+      referredCount: 3,
+      paidInvoicesCount: 2,
+      tourStatus: "PENDING",
+    });
+    expect(configured.allEssentialDone).toBe(true);
+    expect(configured.allDone).toBe(true);
+    expect(configured.shouldAutoOpen).toBe(false);
+  });
 });
+
 
 
 
