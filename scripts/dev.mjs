@@ -28,12 +28,19 @@ if (plan.needsGenerate) {
 
 // Start Next.js immediately so port 3000 binds without waiting on DB push/seed.
 const nextBin = resolveLocalBin("next");
+const nextEnv = {
+  ...process.env,
+  NODE_OPTIONS: process.env.NODE_OPTIONS
+    ? process.env.NODE_OPTIONS
+    : "--max-old-space-size=1024",
+};
+
 const nextChild = spawn(
   nextBin.cmd,
   [...nextBin.prefixArgs, "dev", "--turbopack", "-p", "3000", "-H", "0.0.0.0"],
   {
     cwd,
-    env: process.env,
+    env: nextEnv,
     stdio: "inherit",
   },
 );

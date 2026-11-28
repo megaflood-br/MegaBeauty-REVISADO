@@ -330,6 +330,15 @@ import {
   isPrivateOrReservedIp,
   parseSafePublicHttpsUrl,
 } from "@/lib/web-image-search";
+import {
+  buildSupplierTemplateCsv,
+  detectSupplierColumnMapping,
+  mapSupplierTableRows,
+  mergeSupplierImportDrafts,
+  parseNfeXml,
+  parseSupplierPriceCents,
+  supplierProductMatchKey,
+} from "@/lib/supplier-import";
 
 describe("comissões", () => {
   it("usa percentual do serviço quando existe", () => {
@@ -3436,3 +3445,140 @@ describe("busca direta de fotos na internet", () => {
     expect(detectSafeRasterImageMime(new Uint8Array([1, 2, 3]))).toBeNull();
   });
 });
+
+describe("importação em massa do fornecedor (planilha universal e XML de NF-e)", () => {
+  it("detecta colunas de ERPs brasileiros automaticamente", () => {
+    const mapping = detectSupplierColumnMapping([
+      "Código Interno",
+      "Descrição do Produto",
+      "Fabricante",
+      "Grupo",
+      "UN",
+      "Preço Venda",
+      "Saldo Estoque",
+      "Coluna Extra",
+    ]);
+    expect(mapping[0]).toBe("sku");
+    expect(mapping[1]).toBe("name");
+    expect(mapping[2]).toBe("brand");
+    expect(mapping[3]).toBe("category");
+    expect(mapping[4]).toBe("unit");
+    expect(mapping[5]).toBe("price");
+    expect(mapping[6]).toBe("stock");
+    expect(mapping[7]).toBe("ignore");
+  });
+
+  it("interpreta preços em formato brasileiro e formato decimal XML", () => {
+    expect(parseSupplierPriceCents("R$ 1.230,50")).toBe(123050);
+    expect(parseSupplierPriceCents("29,90")).toBe(2990);
+    expect(parseSupplierPriceCents("18.5000000000")).toBe(1850);
+    expect(parseSupplierPriceCents("49.90")).toBe(4990);
+    expect(parseSupplierPriceCents("1.200")).toBe(120000);
+    expect(parseSupplierPriceCents("-10")).toBe(0);
+    expect(parseSupplierPriceCents("")).toBe(0);
+  });
+
+  it("mapeia linhas de planilha aplicando margem, padrões e validação segura de URL de foto", () => {
+    const mapping = detectSupplierColumnMapping([
+      "Produto",
+      "SKU",
+      "Valor",
+      "Saldo",
+      "URL Imagem",
+      "Situação",
+    ]);
+    const { drafts, errors } = mapSupplierTableRows(
+      [
+        ["Esmalte Branco 8ml", "RSQ-01", "10,00", "24", "https://cdn.example.com/esmalte.jpg", "Ativo"],
+        ["Shampoo 1L", "SH-01", "50,00", "5", "javascript:alert(1)", "Inativo"],
+        ["", "SEM-NOME", "15,00", "2", "", "Ativo"],
+        ["Sem Preço", "SP-01", "0", "3", "", "Ativo"],
+      ],
+      mapping,
+      { markupPct: 20, defaultBrand: "Risqué", defaultCategory: "Unhas" },
+    );
+
+    expect(errors).toHaveLength(2);
+    expect(drafts).toHaveLength(2);
+    expect(drafts[0]).toMatchObject({
+      name: "Esmalte Branco 8ml",
+      sku: "RSQ-01",
+      brand: "Risqué",
+      category: "Unhas",
+      priceCents: 1200,
+      stock: 24,
+      imageUrl: "https://cdn.example.com/esmalte.jpg",
+      active: true,
+    });
+    expect(drafts[1]).toMatchObject({
+      name: "Shampoo 1L",
+      priceCents: 6000,
+      imageUrl: null,
+      active: false,
+    });
+    expect(buildSupplierTemplateCsv()).toContain("Esmalte Branco");
+  });
+
+  it("lê XML de NF-e SEFAZ com entidades, aplica margem, mescla lotes e bloqueia DOCTYPE/XXE", () => {
+    const sampleXml = `<?xml version="1.0" encoding="UTF-8"?>
+      <nfeProc xmlns="http://www.portalfiscal.inf.br/nfe">
+        <NFe>
+          <infNFe Id="NFe123">
+            <ide><nNF>4589</nNF></ide>
+            <emit><xFant>Distribuidora Beleza &amp; Cia</xFant></emit>
+            <det nItem="1">
+              <prod>
+                <cProd>RSQ-BR</cProd>
+                <cEAN>7891350001234</cEAN>
+                <xProd>Esmalte Risque Branco &amp; Cremoso</xProd>
+                <NCM>33043000</NCM>
+                <uCom>UN</uCom>
+                <qCom>12.0000</qCom>
+                <vUnCom>5.0000</vUnCom>
+              </prod>
+            </det>
+            <det nItem="2">
+              <prod>
+                <cProd>MASK-500</cProd>
+                <cEAN>SEM GTIN</cEAN>
+                <xProd>Mascara Capilar 500ml</xProd>
+                <uCom>ML</uCom>
+                <qCom>6.0000</qCom>
+                <vUnCom>25.5000</vUnCom>
+              </prod>
+            </det>
+          </infNFe>
+        </NFe>
+      </nfeProc>`;
+
+    const parsed = parseNfeXml(sampleXml, { markupPct: 50, sourceFile: "nfe-4589.xml" });
+    expect(parsed.invoiceNumber).toBe("4589");
+    expect(parsed.issuerName).toBe("Distribuidora Beleza & Cia");
+    expect(parsed.errors).toEqual([]);
+    expect(parsed.drafts).toHaveLength(2);
+    expect(parsed.drafts[0]).toMatchObject({
+      name: "Esmalte Risque Branco & Cremoso",
+      sku: "RSQ-BR",
+      unit: "un",
+      stock: 12,
+      priceCents: 750,
+    });
+    expect(parsed.drafts[0]?.description).toContain("EAN: 7891350001234");
+    expect(parsed.drafts[1]).toMatchObject({
+      sku: "MASK-500",
+      unit: "ml",
+      stock: 6,
+      priceCents: 3825,
+    });
+
+    const merged = mergeSupplierImportDrafts([...parsed.drafts, { ...parsed.drafts[0], stock: 8 }]);
+    expect(merged.find((d) => d.sku === "RSQ-BR")?.stock).toBe(20);
+    expect(supplierProductMatchKey({ sku: " RSQ-BR ", name: "Qualquer", brand: null })).toBe("sku:rsq-br");
+
+    const xxePayload = `<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><NFe><det><prod><xProd>&xxe;</xProd></prod></det></NFe>`;
+    const blocked = parseNfeXml(xxePayload, { sourceFile: "malicious.xml" });
+    expect(blocked.drafts).toEqual([]);
+    expect(blocked.errors[0]?.message).toMatch(/DOCTYPE\/ENTITY/i);
+  });
+});
+

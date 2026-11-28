@@ -26,6 +26,8 @@ const nextConfig: NextConfig = {
   serverExternalPackages: ["@prisma/client", "bcryptjs", "xlsx"],
   allowedDevOrigins: buildAllowedDevOrigins(),
   experimental: {
+    cpus: 2,
+    webpackMemoryOptimizations: true,
     serverActions: {
       bodySizeLimit: "8mb",
     },

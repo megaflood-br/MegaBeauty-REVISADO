@@ -1,9 +1,10 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Plus } from "lucide-react";
+import { Plus, Upload } from "lucide-react";
 import { Button, Card } from "@/components/ui";
 import { SupplierProductDrawer } from "@/components/fornecedor/product-drawer";
+import { SupplierProductImportDrawer } from "@/components/fornecedor/product-import-drawer";
 import { ProductPhoto } from "@/components/fornecedores/product-photo";
 import { formatBRL } from "@/lib/money";
 import { formatStockQty } from "@/lib/stock";
@@ -11,6 +12,7 @@ import type { SupplierProductRow } from "@/components/fornecedor/types";
 
 export function SupplierProductBoard({ products }: { products: SupplierProductRow[] }) {
   const [editing, setEditing] = useState<SupplierProductRow | null | undefined>(undefined);
+  const [importing, setImporting] = useState(false);
   const visible = useMemo(() => products, [products]);
 
   return (
@@ -20,15 +22,27 @@ export function SupplierProductBoard({ products }: { products: SupplierProductRo
           <h1 className="font-display text-3xl">Produtos</h1>
           <p className="mt-1 text-sm text-ink-soft">O que os salões podem pedir na plataforma.</p>
         </div>
-        <Button type="button" onClick={() => setEditing(null)}>
-          <Plus size={16} />
-          Novo produto
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button type="button" variant="outline" onClick={() => setImporting(true)}>
+            <Upload size={16} />
+            Importar em massa
+          </Button>
+          <Button type="button" onClick={() => setEditing(null)}>
+            <Plus size={16} />
+            Novo produto
+          </Button>
+        </div>
       </div>
 
       {visible.length === 0 ? (
-        <Card>
-          <p className="text-sm text-ink-soft">Nenhum produto ainda. Cadastre o primeiro para aparecer no catálogo dos salões.</p>
+        <Card className="flex flex-wrap items-center justify-between gap-3">
+          <p className="text-sm text-ink-soft">
+            Nenhum produto ainda. Cadastre manualmente ou importe em massa por planilha (Excel/CSV) ou XML de NF-e.
+          </p>
+          <Button type="button" variant="outline" onClick={() => setImporting(true)}>
+            <Upload size={15} />
+            Importar planilha ou XML
+          </Button>
         </Card>
       ) : (
         <div className="overflow-hidden rounded-2xl border border-line bg-white">
@@ -71,6 +85,9 @@ export function SupplierProductBoard({ products }: { products: SupplierProductRo
       )}
 
       {editing !== undefined ? <SupplierProductDrawer product={editing} onClose={() => setEditing(undefined)} /> : null}
+      {importing ? (
+        <SupplierProductImportDrawer existingProducts={products} onClose={() => setImporting(false)} />
+      ) : null}
     </div>
   );
 }

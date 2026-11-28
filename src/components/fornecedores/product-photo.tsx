@@ -16,7 +16,7 @@ export function ProductPhoto({
     <div className={cn("flex items-center justify-center overflow-hidden bg-white", className)}>
       {src ? (
         // eslint-disable-next-line @next/next/no-img-element
-        <img src={src} alt={alt} className="h-full w-full object-contain" />
+        <img src={src} alt={alt} referrerPolicy="no-referrer" className="h-full w-full object-contain" />
       ) : (
         <Package size={iconSize} className="text-slate-300" aria-hidden />
       )}
