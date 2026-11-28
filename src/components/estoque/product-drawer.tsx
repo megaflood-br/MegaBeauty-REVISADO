@@ -5,8 +5,10 @@ import { useRouter } from "next/navigation";
 import { ImageIcon, Info, X } from "lucide-react";
 import { Button, Field, Input, Select, Textarea } from "@/components/ui";
 import { SearchSelect } from "@/components/search-select";
+import { WebImagePicker } from "@/components/web-image-picker";
 import { saveProductCategory, upsertProduct } from "@/app/actions/inventory";
 import { STOCK_UNITS } from "@/lib/constants";
+import { readProductPhoto } from "@/lib/product-photo";
 import { stockUnitLabel } from "@/lib/stock";
 import { cn, initials } from "@/lib/utils";
 import type { ProductFormValue } from "@/components/estoque/types";
@@ -45,7 +47,9 @@ export function ProductDrawer({
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [imageUrl, setImageUrl] = useState(product?.imageUrl ?? "");
+  const [userHasCustomImage, setUserHasCustomImage] = useState(Boolean(product?.imageUrl));
   const [name, setName] = useState(product?.name ?? "");
+  const [brand, setBrand] = useState(product?.brand ?? "");
   const [unit, setUnit] = useState(product?.unit ?? "un");
   const [active, setActive] = useState(product?.active ?? true);
   const [requestAvailable, setRequestAvailable] = useState(product?.requestAvailable ?? true);
@@ -139,23 +143,46 @@ export function ProductDrawer({
                     className="hidden"
                     onChange={(e) => {
                       const file = e.target.files?.[0];
+                      e.target.value = "";
                       if (!file) return;
-                      const reader = new FileReader();
-                      reader.onload = () => {
-                        const url = String(reader.result ?? "");
-                        if (url.length > 400_000) {
-                          setError("Imagem muito grande. Use uma foto menor.");
-                          return;
-                        }
-                        setError(null);
-                        setImageUrl(url);
-                      };
-                      reader.readAsDataURL(file);
+                      void readProductPhoto(file)
+                        .then((url) => {
+                          setError(null);
+                          setImageUrl(url);
+                          setUserHasCustomImage(true);
+                        })
+                        .catch((err: Error) => setError(err.message));
                     }}
                   />
-                  <Button type="button" className="h-8 px-4 text-xs" onClick={() => fileRef.current?.click()}>
-                    Alterar
-                  </Button>
+                  <div className="flex flex-wrap items-center justify-center gap-2">
+                    <Button type="button" className="h-8 px-4 text-xs" onClick={() => fileRef.current?.click()}>
+                      {imageUrl ? "Alterar" : "Enviar foto"}
+                    </Button>
+                    {imageUrl ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        className="h-8 px-3 text-xs"
+                        onClick={() => {
+                          setImageUrl("");
+                          setUserHasCustomImage(true);
+                        }}
+                      >
+                        Remover
+                      </Button>
+                    ) : null}
+                  </div>
+                  <WebImagePicker
+                    kind="product"
+                    name={name}
+                    brand={brand}
+                    imageUrl={imageUrl}
+                    autoFetch={!product}
+                    userHasCustomImage={userHasCustomImage}
+                    onSelectImage={setImageUrl}
+                    onManualOverride={() => setUserHasCustomImage(true)}
+                    onError={setError}
+                  />
                 </div>
 
                 <Field label="Nome" required>
@@ -223,7 +250,13 @@ export function ProductDrawer({
                     ) : null}
                   </Field>
                   <Field label="Marca">
-                    <Input name="brand" list="product-brands" placeholder="Marca" defaultValue={product?.brand ?? ""} />
+                    <Input
+                      name="brand"
+                      list="product-brands"
+                      placeholder="Marca"
+                      value={brand}
+                      onChange={(e) => setBrand(e.target.value)}
+                    />
                     <datalist id="product-brands">
                       {brands.map((b) => (
                         <option key={b} value={b} />

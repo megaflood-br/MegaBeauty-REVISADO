@@ -324,6 +324,12 @@ import {
   packageTotalCents,
   type ClientPackageBalanceItem,
 } from "@/lib/packages-shared";
+import {
+  buildImageSearchQuery,
+  detectSafeRasterImageMime,
+  isPrivateOrReservedIp,
+  parseSafePublicHttpsUrl,
+} from "@/lib/web-image-search";
 
 describe("comissões", () => {
   it("usa percentual do serviço quando existe", () => {
@@ -3373,7 +3379,60 @@ describe("tour guiado de primeiros acessos (onboarding)", () => {
   });
 });
 
+describe("busca direta de fotos na internet", () => {
+  it("monta consulta de produto combinando marca sem duplicar", () => {
+    expect(buildImageSearchQuery("Esmalte Branco", "product", "Risqué")).toBe("Esmalte Branco Risqué");
+    expect(buildImageSearchQuery("Esmalte Risqué Branco", "product", "risqué")).toBe("Esmalte Risqué Branco");
+    expect(buildImageSearchQuery("   ", "product", "")).toBe("");
+  });
 
+  it("enriquece serviço genérico com contexto de salão sem alterar termos explícitos", () => {
+    expect(buildImageSearchQuery("Corte Masculino", "service")).toBe("Corte Masculino salão de beleza");
+    expect(buildImageSearchQuery("Manicure em gel", "service")).toBe("Manicure em gel");
+    expect(buildImageSearchQuery("Escova progressiva", "service")).toBe("Escova progressiva");
+  });
 
+  it("bloqueia IPs privados, loopback, link-local e metadados de nuvem (SSRF)", () => {
+    expect(isPrivateOrReservedIp("127.0.0.1")).toBe(true);
+    expect(isPrivateOrReservedIp("10.0.0.5")).toBe(true);
+    expect(isPrivateOrReservedIp("172.16.0.1")).toBe(true);
+    expect(isPrivateOrReservedIp("192.168.1.10")).toBe(true);
+    expect(isPrivateOrReservedIp("169.254.169.254")).toBe(true);
+    expect(isPrivateOrReservedIp("100.64.0.1")).toBe(true);
+    expect(isPrivateOrReservedIp("::1")).toBe(true);
+    expect(isPrivateOrReservedIp("::ffff:127.0.0.1")).toBe(true);
+    expect(isPrivateOrReservedIp("fc00::1")).toBe(true);
+    expect(isPrivateOrReservedIp("fe80::1")).toBe(true);
 
+    expect(isPrivateOrReservedIp("8.8.8.8")).toBe(false);
+    expect(isPrivateOrReservedIp("151.101.1.69")).toBe(false);
+  });
 
+  it("aceita apenas URLs HTTPS públicas na porta padrão e rejeita hosts locais ou literais de IP", () => {
+    expect(parseSafePublicHttpsUrl("https://images.example.com/esmalte.jpg")?.hostname).toBe("images.example.com");
+    expect(parseSafePublicHttpsUrl("http://images.example.com/esmalte.jpg")).toBeNull();
+    expect(parseSafePublicHttpsUrl("file:///etc/passwd")).toBeNull();
+    expect(parseSafePublicHttpsUrl("https://127.0.0.1/img.jpg")).toBeNull();
+    expect(parseSafePublicHttpsUrl("https://localhost/img.jpg")).toBeNull();
+    expect(parseSafePublicHttpsUrl("https://metadata.internal/latest")).toBeNull();
+    expect(parseSafePublicHttpsUrl("https://user:pass@images.example.com/a.jpg")).toBeNull();
+    expect(parseSafePublicHttpsUrl("https://images.example.com:8443/a.jpg")).toBeNull();
+  });
+
+  it("valida assinatura binária de imagens raster e rejeita SVG ou HTML", () => {
+    const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+    const webp = new Uint8Array([0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50]);
+    const gif = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0, 0, 0, 0, 0, 0]);
+    const svg = new TextEncoder().encode("<svg xmlns='http://www.w3.org/2000/svg'><script>alert(1)</script></svg>");
+    const html = new TextEncoder().encode("<!doctype html><html><body>blocked</body></html>");
+
+    expect(detectSafeRasterImageMime(jpeg)).toBe("image/jpeg");
+    expect(detectSafeRasterImageMime(png)).toBe("image/png");
+    expect(detectSafeRasterImageMime(webp)).toBe("image/webp");
+    expect(detectSafeRasterImageMime(gif)).toBe("image/gif");
+    expect(detectSafeRasterImageMime(svg)).toBeNull();
+    expect(detectSafeRasterImageMime(html)).toBeNull();
+    expect(detectSafeRasterImageMime(new Uint8Array([1, 2, 3]))).toBeNull();
+  });
+});

@@ -6,6 +6,7 @@ import { ImageIcon, X } from "lucide-react";
 import { Button, Field, Input, Select, Textarea } from "@/components/ui";
 import { saveSupplierProduct } from "@/app/actions/supplier-catalog";
 import { ProductPhoto } from "@/components/fornecedores/product-photo";
+import { WebImagePicker } from "@/components/web-image-picker";
 import { formatBRL } from "@/lib/money";
 import { STOCK_UNITS } from "@/lib/constants";
 import { readProductPhoto } from "@/lib/product-photo";
@@ -23,7 +24,10 @@ export function SupplierProductDrawer({
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [active, setActive] = useState(product?.active ?? true);
+  const [name, setName] = useState(product?.name ?? "");
+  const [brand, setBrand] = useState(product?.brand ?? "");
   const [imageUrl, setImageUrl] = useState(product?.imageUrl ?? "");
+  const [userHasCustomImage, setUserHasCustomImage] = useState(Boolean(product?.imageUrl));
 
   async function handleAction(formData: FormData) {
     setError(null);
@@ -72,35 +76,62 @@ export function SupplierProductDrawer({
                   type="file"
                   accept="image/*"
                   className="hidden"
-                  onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (!file) return;
-                    void readProductPhoto(file)
-                      .then((url) => {
-                        setError(null);
-                        setImageUrl(url);
-                      })
-                      .catch((err: Error) => setError(err.message));
-                  }}
-                />
-                <div className="flex gap-2">
-                  <Button type="button" className="h-8 px-4 text-xs" onClick={() => fileRef.current?.click()}>
-                    {imageUrl ? "Trocar foto" : "Adicionar foto"}
-                  </Button>
-                  {imageUrl ? (
-                    <Button type="button" variant="ghost" className="h-8 px-3 text-xs" onClick={() => setImageUrl("")}>
-                      Remover
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      e.target.value = "";
+                      if (!file) return;
+                      void readProductPhoto(file)
+                        .then((url) => {
+                          setError(null);
+                          setImageUrl(url);
+                          setUserHasCustomImage(true);
+                        })
+                        .catch((err: Error) => setError(err.message));
+                    }}
+                  />
+                  <div className="flex gap-2">
+                    <Button type="button" className="h-8 px-4 text-xs" onClick={() => fileRef.current?.click()}>
+                      {imageUrl ? "Trocar foto" : "Adicionar foto"}
                     </Button>
-                  ) : null}
+                    {imageUrl ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        className="h-8 px-3 text-xs"
+                        onClick={() => {
+                          setImageUrl("");
+                          setUserHasCustomImage(true);
+                        }}
+                      >
+                        Remover
+                      </Button>
+                    ) : null}
+                  </div>
+                  <WebImagePicker
+                    kind="product"
+                    name={name}
+                    brand={brand}
+                    imageUrl={imageUrl}
+                    autoFetch={!product?.id}
+                    userHasCustomImage={userHasCustomImage}
+                    onSelectImage={setImageUrl}
+                    onManualOverride={() => setUserHasCustomImage(true)}
+                    onError={setError}
+                  />
                 </div>
-              </div>
-              <Field label="Nome" required>
-                <Input name="name" required defaultValue={product?.name ?? ""} placeholder="Ex.: Máscara hidratação 500ml" />
-              </Field>
-              <div className="grid grid-cols-2 gap-3">
-                <Field label="Marca">
-                  <Input name="brand" defaultValue={product?.brand ?? ""} />
+                <Field label="Nome" required>
+                  <Input
+                    name="name"
+                    required
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    placeholder="Ex.: Máscara hidratação 500ml"
+                  />
                 </Field>
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label="Marca">
+                    <Input name="brand" value={brand} onChange={(e) => setBrand(e.target.value)} />
+                  </Field>
                 <Field label="SKU">
                   <Input name="sku" defaultValue={product?.sku ?? ""} />
                 </Field>

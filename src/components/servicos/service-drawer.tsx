@@ -5,9 +5,11 @@ import { useRouter } from "next/navigation";
 import { ImageIcon, Info, X } from "lucide-react";
 import { Button, Field, Input, Select, Textarea } from "@/components/ui";
 import { SearchSelect } from "@/components/search-select";
+import { WebImagePicker } from "@/components/web-image-picker";
 import { upsertService } from "@/app/actions/services";
 import { DURATION_OPTIONS } from "@/lib/constants";
 import { minutesToLabel } from "@/lib/dates";
+import { readProductPhoto } from "@/lib/product-photo";
 import { cn, initials } from "@/lib/utils";
 import type { ServiceFormValue } from "@/components/servicos/types";
 
@@ -46,6 +48,7 @@ export function ServiceDrawer({
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [imageUrl, setImageUrl] = useState(service?.imageUrl ?? "");
+  const [userHasCustomImage, setUserHasCustomImage] = useState(Boolean(service?.imageUrl));
   const [color, setColor] = useState(service?.color ?? "#6366F1");
   const [name, setName] = useState(service?.name ?? "");
   const [active, setActive] = useState(service?.active ?? true);
@@ -139,23 +142,45 @@ export function ServiceDrawer({
                     className="hidden"
                     onChange={(e) => {
                       const file = e.target.files?.[0];
+                      e.target.value = "";
                       if (!file) return;
-                      const reader = new FileReader();
-                      reader.onload = () => {
-                        const url = String(reader.result ?? "");
-                        if (url.length > 400_000) {
-                          setError("Imagem muito grande. Use uma foto menor.");
-                          return;
-                        }
-                        setError(null);
-                        setImageUrl(url);
-                      };
-                      reader.readAsDataURL(file);
+                      void readProductPhoto(file)
+                        .then((url) => {
+                          setError(null);
+                          setImageUrl(url);
+                          setUserHasCustomImage(true);
+                        })
+                        .catch((err: Error) => setError(err.message));
                     }}
                   />
-                  <Button type="button" className="h-8 px-4 text-xs" onClick={() => fileRef.current?.click()}>
-                    Alterar
-                  </Button>
+                  <div className="flex flex-wrap items-center justify-center gap-2">
+                    <Button type="button" className="h-8 px-4 text-xs" onClick={() => fileRef.current?.click()}>
+                      {imageUrl ? "Alterar" : "Enviar foto"}
+                    </Button>
+                    {imageUrl ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        className="h-8 px-3 text-xs"
+                        onClick={() => {
+                          setImageUrl("");
+                          setUserHasCustomImage(true);
+                        }}
+                      >
+                        Remover
+                      </Button>
+                    ) : null}
+                  </div>
+                  <WebImagePicker
+                    kind="service"
+                    name={name}
+                    imageUrl={imageUrl}
+                    autoFetch={!service}
+                    userHasCustomImage={userHasCustomImage}
+                    onSelectImage={setImageUrl}
+                    onManualOverride={() => setUserHasCustomImage(true)}
+                    onError={setError}
+                  />
                 </div>
 
                 <Field label="Nome" required>
