@@ -1,6 +1,8 @@
 import { requireTenant } from "@/lib/tenant";
 import { canAccess, shouldHidePhones } from "@/lib/permissions";
 import { loadPackagesWorkspace } from "@/lib/packages";
+import { loadPlatformModules } from "@/lib/platform-modules-server";
+import { moduleDisabledMessage } from "@/lib/platform-modules";
 import { PackagesBoard } from "@/components/pacotes/packages-board";
 
 export default async function PacotesPage({
@@ -9,6 +11,14 @@ export default async function PacotesPage({
   searchParams: Promise<{ novo?: string; cliente?: string }>;
 }) {
   const { session, access } = await requireTenant();
+  const modules = await loadPlatformModules();
+  if (!modules.packages) {
+    return (
+      <div className="rounded-xl border border-line bg-white p-8 text-sm text-ink-soft">
+        {moduleDisabledMessage("packages")}
+      </div>
+    );
+  }
   const hidePhones = shouldHidePhones(access);
   const [workspace, params] = await Promise.all([
     loadPackagesWorkspace(session.tenantId, hidePhones),

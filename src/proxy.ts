@@ -23,6 +23,7 @@ const PUBLIC_PREFIXES = [
   "/pop",
   "/apresentacao",
   "/api/webhooks",
+  "/api/instagram/oauth/callback",
   "/api/health",
   "/uploads",
 ];

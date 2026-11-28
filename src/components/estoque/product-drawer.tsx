@@ -32,6 +32,7 @@ export function ProductDrawer({
   categories,
   brands,
   services,
+  enableWebImageSearch = true,
   onClose,
 }: {
   open: boolean;
@@ -39,6 +40,7 @@ export function ProductDrawer({
   categories: { id: string; name: string }[];
   brands: string[];
   services: { id: string; name: string }[];
+  enableWebImageSearch?: boolean;
   onClose: () => void;
 }) {
   const router = useRouter();
@@ -172,17 +174,19 @@ export function ProductDrawer({
                       </Button>
                     ) : null}
                   </div>
-                  <WebImagePicker
-                    kind="product"
-                    name={name}
-                    brand={brand}
-                    imageUrl={imageUrl}
-                    autoFetch={!product}
-                    userHasCustomImage={userHasCustomImage}
-                    onSelectImage={setImageUrl}
-                    onManualOverride={() => setUserHasCustomImage(true)}
-                    onError={setError}
-                  />
+                  {enableWebImageSearch ? (
+                    <WebImagePicker
+                      kind="product"
+                      name={name}
+                      brand={brand}
+                      imageUrl={imageUrl}
+                      autoFetch={!product}
+                      userHasCustomImage={userHasCustomImage}
+                      onSelectImage={setImageUrl}
+                      onManualOverride={() => setUserHasCustomImage(true)}
+                      onError={setError}
+                    />
+                  ) : null}
                 </div>
 
                 <Field label="Nome" required>

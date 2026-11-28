@@ -6,7 +6,7 @@ export const INTEGRATION_TABS = [
   { id: "openai", label: "OpenAI", description: "Chave usada pelo assistente de todos os salões." },
   { id: "contora", label: "Contora", description: "Token fiscal da software house para NFS-e e NFC-e." },
   { id: "evolution", label: "WhatsApp Evolution", description: "Servidor Evolution (QR Code) usado pelos salões." },
-  { id: "meta", label: "WhatsApp oficial", description: "App Secret da Meta para validar o webhook da Cloud API." },
+  { id: "meta", label: "Meta (WhatsApp & Instagram)", description: "App ID e App Secret da Meta para Cloud API do WhatsApp e publicação direta no Instagram." },
   { id: "asaas", label: "Asaas", description: "Cobrança recorrente dos planos e comissão vitalícia dos parceiros." },
 ] as const;
 
@@ -26,12 +26,14 @@ export type PlatformIntegrations = {
   evolutionUrl: string;
   evolutionApiKey: string;
   publicAppUrl: string;
+  metaAppId: string;
   metaAppSecret: string;
   metaGraphVersion: string;
   hasOpenAi: boolean;
   hasContora: boolean;
   hasEvolution: boolean;
   hasMeta: boolean;
+  hasMetaInstagram: boolean;
   hasAsaas: boolean;
 };
 
@@ -45,6 +47,7 @@ export async function resolvePlatformIntegrations(): Promise<PlatformIntegration
       evolutionApiKey: true,
       publicAppUrl: true,
       asaasApiKey: true,
+      metaAppId: true,
       metaAppSecret: true,
       metaGraphVersion: true,
     },
@@ -55,6 +58,7 @@ export async function resolvePlatformIntegrations(): Promise<PlatformIntegration
   const evolutionApiKey = hq?.evolutionApiKey || process.env.EVOLUTION_API_KEY || "";
   const publicAppUrl = publicAppOrigin(hq?.publicAppUrl || process.env.APP_URL || "");
   const asaasApiKey = hq?.asaasApiKey || process.env.ASAAS_API_KEY || "";
+  const metaAppId = hq?.metaAppId || process.env.META_APP_ID || "";
   const metaAppSecret = hq?.metaAppSecret || process.env.META_APP_SECRET || "";
   const metaGraphVersion = hq?.metaGraphVersion || process.env.META_GRAPH_VERSION || DEFAULT_META_GRAPH_VERSION;
   return {
@@ -63,12 +67,14 @@ export async function resolvePlatformIntegrations(): Promise<PlatformIntegration
     evolutionUrl,
     evolutionApiKey,
     publicAppUrl,
+    metaAppId,
     metaAppSecret,
     metaGraphVersion,
     hasOpenAi: Boolean(openaiApiKey),
     hasContora: Boolean(contoraApiToken),
     hasEvolution: Boolean(evolutionUrl && evolutionApiKey),
     hasMeta: Boolean(metaAppSecret),
+    hasMetaInstagram: Boolean(metaAppId && metaAppSecret),
     hasAsaas: Boolean(asaasApiKey),
   };
 }
@@ -89,6 +95,12 @@ export function metaWebhookUrl(publicAppUrl: string, slug: string) {
   const origin = publicAppOrigin(publicAppUrl, false);
   if (!origin) return "";
   return `${origin}/api/webhooks/meta?tenant=${encodeURIComponent(slug)}`;
+}
+
+export function instagramOAuthCallbackUrl(publicAppUrl: string) {
+  const origin = publicAppOrigin(publicAppUrl, false);
+  if (!origin) return "";
+  return `${origin}/api/instagram/oauth/callback`;
 }
 
 export function maskSecret(value: string | null | undefined) {

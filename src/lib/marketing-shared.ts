@@ -3,6 +3,7 @@ import { normalizeWhatsAppPhone, whatsappPhoneCandidates } from "@/lib/whatsapp-
 export const MARKETING_TABS = [
   { id: "listas", label: "Listas", description: "Segmente quem já fez um serviço, escolha os clientes e envie. Pendente, enviado, respondido e resolvido no Kanban." },
   { id: "campanhas", label: "Campanhas", description: "Mensagens automáticas de agendamento, confirmação, remarcação, cancelamento, lembrete, retorno e cobrança." },
+  { id: "estudio", label: "Estúdio IA & Instagram", description: "Gere artes promocionais prontas com IA usando seus serviços, valores e datas, e publique direto no Feed ou Stories." },
 ] as const;
 
 export type MarketingTab = (typeof MARKETING_TABS)[number]["id"];

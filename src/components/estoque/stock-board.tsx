@@ -29,6 +29,7 @@ export function StockBoard({
   requests,
   professionals,
   restock = [],
+  enableWebImageSearch = true,
 }: {
   products: ProductFormValue[];
   categories: ProductCategoryRow[];
@@ -38,6 +39,7 @@ export function StockBoard({
   requests: ProductRequestValue[];
   professionals: { id: string; name: string }[];
   restock?: LowStockAlertItem[];
+  enableWebImageSearch?: boolean;
 }) {
   const router = useRouter();
   const confirm = useConfirm();
@@ -158,6 +160,7 @@ export function StockBoard({
           categories={categories}
           brands={brands}
           services={services}
+          enableWebImageSearch={enableWebImageSearch}
           onClose={() => setEditing(undefined)}
         />
       ) : null}

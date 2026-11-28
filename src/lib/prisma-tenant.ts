@@ -45,6 +45,7 @@ export const CORE_TENANT_SCOPED_MODELS = new Set<string>([
   "CampaignSend",
   "MarketingCampaign",
   "MarketingRecipient",
+  "SalonMarketingPost",
   "SalonPop",
   "SalonDocument",
   "AnamnesisForm",

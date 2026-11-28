@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { addMinutes } from "date-fns";
 import { prisma } from "@/lib/db";
+import { checkPlatformModule } from "@/lib/platform-modules-server";
 import { requireTenant } from "@/lib/tenant";
 import { canAccess, canBlockAgendaSlots, canViewAllAgenda } from "@/lib/permissions";
 import { hasConflict, validateScheduleBlockWindow } from "@/lib/appointments";
@@ -333,6 +334,8 @@ export async function saveScheduleBlock(payload: {
   reason?: string;
 }) {
   const { session, access } = await requireTenant();
+  const mod = await checkPlatformModule("agendaBlocks");
+  if (!mod.ok) return { error: mod.error };
   if (!canBlockAgendaSlots(access)) {
     return { error: "Sem permissão para bloquear horários na agenda." };
   }
@@ -414,6 +417,8 @@ export async function saveScheduleBlock(payload: {
 
 export async function deleteScheduleBlock(blockId: string) {
   const { session, access } = await requireTenant();
+  const mod = await checkPlatformModule("agendaBlocks");
+  if (!mod.ok) return { error: mod.error };
   if (!canBlockAgendaSlots(access)) {
     return { error: "Sem permissão para desbloquear horários na agenda." };
   }

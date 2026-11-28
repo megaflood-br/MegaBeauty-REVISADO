@@ -8,12 +8,14 @@ import { decorateCatalogItem } from "@/lib/promotions";
 import { loadPromoRules } from "@/lib/promo-load";
 import { canAccess, canReopenComandas, shouldHidePhones } from "@/lib/permissions";
 import { loadClientActivePackageBalances, loadClientSidebarSummaries } from "@/lib/packages";
+import { loadPlatformModules } from "@/lib/platform-modules-server";
 
 export default async function ComandasPage() {
   const { session, access } = await requireTenant();
   const hidePhones = shouldHidePhones(access);
-  const [comandas, clients, clientPackagesByClient, professionals, services, products, last, catalog, promos] =
+  const [modules, comandas, clients, clientPackagesByClient, professionals, services, products, last, catalog, promos] =
     await Promise.all([
+      loadPlatformModules(),
       prisma.comanda.findMany({
         where: { tenantId: session.tenantId },
         include: {
@@ -65,10 +67,10 @@ export default async function ComandasPage() {
       nextNumber={(last?.number ?? 0) + 1}
       canCreate={canAccess(access, "comandas", "create")}
       canEdit={canAccess(access, "comandas", "edit")}
-      canReopen={canReopenComandas(access)}
+      canReopen={canReopenComandas(access) && modules.reopenComandas}
       hidePhones={hidePhones}
       clients={clients}
-      clientPackagesByClient={clientPackagesByClient}
+      clientPackagesByClient={modules.packages ? clientPackagesByClient : {}}
       professionals={professionals}
       services={pricedServices}
       products={pricedProducts}

@@ -339,6 +339,13 @@ import {
   parseSupplierPriceCents,
   supplierProductMatchKey,
 } from "@/lib/supplier-import";
+import {
+  choosePartnerLogoUrl,
+  computeLogoPlacementRect,
+  detectAllowedMarketingMedia,
+  renderMarketingCaption,
+  sanitizeDownloadFilename,
+} from "@/lib/marketing-drive";
 
 describe("comissões", () => {
   it("usa percentual do serviço quando existe", () => {
@@ -3581,4 +3588,76 @@ describe("importação em massa do fornecedor (planilha universal e XML de NF-e)
     expect(blocked.errors[0]?.message).toMatch(/DOCTYPE\/ENTITY/i);
   });
 });
+
+describe("drive de marketing para parceiros", () => {
+  it("valida assinatura binária de imagens, PDF e vídeos e recusa SVG ou HTML", () => {
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+    const pdf = new TextEncoder().encode("%PDF-1.7\n1 0 obj");
+    const mp4 = new Uint8Array([0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70, 0x6d, 0x70, 0x34, 0x32]);
+    const webm = new Uint8Array([0x1a, 0x45, 0xdf, 0xa3, 0, 0, 0, 0, 0, 0, 0, 0]);
+    const svg = new TextEncoder().encode("<svg xmlns='http://www.w3.org/2000/svg'></svg>");
+
+    expect(detectAllowedMarketingMedia(png)).toMatchObject({ mediaKind: "IMAGE", ext: ".png" });
+    expect(detectAllowedMarketingMedia(pdf)).toMatchObject({ mediaKind: "PDF", ext: ".pdf" });
+    expect(detectAllowedMarketingMedia(mp4)).toMatchObject({ mediaKind: "VIDEO", ext: ".mp4" });
+    expect(detectAllowedMarketingMedia(webm)).toMatchObject({ mediaKind: "VIDEO", ext: ".webm" });
+    expect(detectAllowedMarketingMedia(svg)).toBeNull();
+  });
+
+  it("calcula posicionamento do logo dentro dos limites da arte para presets e posição livre", () => {
+    const bottomRight = computeLogoPlacementRect({
+      artworkWidth: 1080,
+      artworkHeight: 1080,
+      logoNaturalWidth: 400,
+      logoNaturalHeight: 100,
+      config: {
+        logoPosition: "bottom-right",
+        logoX: 88,
+        logoY: 88,
+        logoScale: 25,
+        logoPadding: 4,
+        logoBackdrop: "none",
+      },
+    });
+    expect(bottomRight.logoWidth).toBe(270);
+    expect(bottomRight.boxX + bottomRight.boxWidth).toBeLessThanOrEqual(1080);
+    expect(bottomRight.boxY + bottomRight.boxHeight).toBeLessThanOrEqual(1080);
+
+    const custom = computeLogoPlacementRect({
+      artworkWidth: 1080,
+      artworkHeight: 1920,
+      logoNaturalWidth: 300,
+      logoNaturalHeight: 300,
+      config: {
+        logoPosition: "custom",
+        logoX: 99,
+        logoY: 2,
+        logoScale: 30,
+        logoPadding: 4,
+        logoBackdrop: "light",
+      },
+    });
+    expect(custom.boxX).toBeGreaterThanOrEqual(0);
+    expect(custom.boxY).toBeGreaterThanOrEqual(0);
+    expect(custom.boxX + custom.boxWidth).toBeLessThanOrEqual(1080);
+    expect(custom.boxY + custom.boxHeight).toBeLessThanOrEqual(1920);
+  });
+
+  it("escolhe a variação ideal do logo e personaliza legendas com marca e link do parceiro", () => {
+    const logos = { logoUrl: "/uploads/logo/a.png", logoDarkUrl: "/uploads/logo/a-dark.png" };
+    expect(choosePartnerLogoUrl("auto", "dark", logos)).toBe("/uploads/logo/a-dark.png");
+    expect(choosePartnerLogoUrl("auto", "light", logos)).toBe("/uploads/logo/a.png");
+    expect(choosePartnerLogoUrl("dark", "none", { logoUrl: "/uploads/logo/a.png", logoDarkUrl: null })).toBe(
+      "/uploads/logo/a.png",
+    );
+
+    const copy = renderMarketingCaption("Conheça o {{marca}} agora em {{link}}!", {
+      brandName: "Studio Pro",
+      partnerUrl: "https://crm.studiopro.com.br",
+    });
+    expect(copy).toBe("Conheça o Studio Pro agora em https://crm.studiopro.com.br!");
+    expect(sanitizeDownloadFilename("Post Promoção Verão!", ".png")).toBe("post-promocao-verao.png");
+  });
+});
+
 

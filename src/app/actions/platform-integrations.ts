@@ -60,9 +60,11 @@ export async function saveAsaasIntegration(formData: FormData) {
 export async function saveMetaIntegration(formData: FormData) {
   const { tenant } = await requirePlatformAdmin();
   const version = String(formData.get("metaGraphVersion") ?? "").trim() || tenant.metaGraphVersion || "v21.0";
+  const rawAppId = String(formData.get("metaAppId") ?? "").trim();
   await prisma.tenant.update({
     where: { id: tenant.id },
     data: {
+      metaAppId: rawAppId || null,
       metaAppSecret: keep(tenant.metaAppSecret, String(formData.get("metaAppSecret") ?? "")),
       metaGraphVersion: version.startsWith("v") ? version : `v${version}`,
     },

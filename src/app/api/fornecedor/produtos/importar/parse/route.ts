@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { checkPlatformModule } from "@/lib/platform-modules-server";
 import { parseSupplierSpreadsheetFile, requireSupplierApi } from "@/lib/run-supplier-import";
 import {
   MAX_XML_FILES,
@@ -24,6 +25,8 @@ export async function POST(request: Request) {
   try {
     const auth = await requireSupplierApi(request);
     if (!auth.ok) return json({ error: auth.error }, auth.status);
+    const mod = await checkPlatformModule("supplierBulkImport");
+    if (!mod.ok) return json({ error: mod.error }, 403);
 
     let form: FormData;
     try {

@@ -14,9 +14,11 @@ import type { SupplierProductRow } from "@/components/fornecedor/types";
 
 export function SupplierProductDrawer({
   product,
+  enableWebImageSearch = true,
   onClose,
 }: {
   product?: SupplierProductRow | null;
+  enableWebImageSearch?: boolean;
   onClose: () => void;
 }) {
   const router = useRouter();
@@ -107,17 +109,19 @@ export function SupplierProductDrawer({
                       </Button>
                     ) : null}
                   </div>
-                  <WebImagePicker
-                    kind="product"
-                    name={name}
-                    brand={brand}
-                    imageUrl={imageUrl}
-                    autoFetch={!product?.id}
-                    userHasCustomImage={userHasCustomImage}
-                    onSelectImage={setImageUrl}
-                    onManualOverride={() => setUserHasCustomImage(true)}
-                    onError={setError}
-                  />
+                  {enableWebImageSearch ? (
+                    <WebImagePicker
+                      kind="product"
+                      name={name}
+                      brand={brand}
+                      imageUrl={imageUrl}
+                      autoFetch={!product?.id}
+                      userHasCustomImage={userHasCustomImage}
+                      onSelectImage={setImageUrl}
+                      onManualOverride={() => setUserHasCustomImage(true)}
+                      onError={setError}
+                    />
+                  ) : null}
                 </div>
                 <Field label="Nome" required>
                   <Input

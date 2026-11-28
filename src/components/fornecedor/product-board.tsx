@@ -10,7 +10,15 @@ import { formatBRL } from "@/lib/money";
 import { formatStockQty } from "@/lib/stock";
 import type { SupplierProductRow } from "@/components/fornecedor/types";
 
-export function SupplierProductBoard({ products }: { products: SupplierProductRow[] }) {
+export function SupplierProductBoard({
+  products,
+  enableBulkImport = true,
+  enableWebImageSearch = true,
+}: {
+  products: SupplierProductRow[];
+  enableBulkImport?: boolean;
+  enableWebImageSearch?: boolean;
+}) {
   const [editing, setEditing] = useState<SupplierProductRow | null | undefined>(undefined);
   const [importing, setImporting] = useState(false);
   const visible = useMemo(() => products, [products]);
@@ -23,10 +31,12 @@ export function SupplierProductBoard({ products }: { products: SupplierProductRo
           <p className="mt-1 text-sm text-ink-soft">O que os salões podem pedir na plataforma.</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <Button type="button" variant="outline" onClick={() => setImporting(true)}>
-            <Upload size={16} />
-            Importar em massa
-          </Button>
+          {enableBulkImport ? (
+            <Button type="button" variant="outline" onClick={() => setImporting(true)}>
+              <Upload size={16} />
+              Importar em massa
+            </Button>
+          ) : null}
           <Button type="button" onClick={() => setEditing(null)}>
             <Plus size={16} />
             Novo produto
@@ -37,12 +47,16 @@ export function SupplierProductBoard({ products }: { products: SupplierProductRo
       {visible.length === 0 ? (
         <Card className="flex flex-wrap items-center justify-between gap-3">
           <p className="text-sm text-ink-soft">
-            Nenhum produto ainda. Cadastre manualmente ou importe em massa por planilha (Excel/CSV) ou XML de NF-e.
+            {enableBulkImport
+              ? "Nenhum produto ainda. Cadastre manualmente ou importe em massa por planilha (Excel/CSV) ou XML de NF-e."
+              : "Nenhum produto ainda. Cadastre o primeiro produto do seu catálogo."}
           </p>
-          <Button type="button" variant="outline" onClick={() => setImporting(true)}>
-            <Upload size={15} />
-            Importar planilha ou XML
-          </Button>
+          {enableBulkImport ? (
+            <Button type="button" variant="outline" onClick={() => setImporting(true)}>
+              <Upload size={15} />
+              Importar planilha ou XML
+            </Button>
+          ) : null}
         </Card>
       ) : (
         <div className="overflow-hidden rounded-2xl border border-line bg-white">
@@ -84,8 +98,14 @@ export function SupplierProductBoard({ products }: { products: SupplierProductRo
         </div>
       )}
 
-      {editing !== undefined ? <SupplierProductDrawer product={editing} onClose={() => setEditing(undefined)} /> : null}
-      {importing ? (
+      {editing !== undefined ? (
+        <SupplierProductDrawer
+          product={editing}
+          enableWebImageSearch={enableWebImageSearch}
+          onClose={() => setEditing(undefined)}
+        />
+      ) : null}
+      {enableBulkImport && importing ? (
         <SupplierProductImportDrawer existingProducts={products} onClose={() => setImporting(false)} />
       ) : null}
     </div>

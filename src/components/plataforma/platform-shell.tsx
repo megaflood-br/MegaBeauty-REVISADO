@@ -1,6 +1,19 @@
 "use client";
 
-import { BadgePercent, Building2, Handshake, Headphones, Palette, PieChart, Plug, Shield, Truck, Wallet } from "lucide-react";
+import {
+  BadgePercent,
+  Building2,
+  FolderOpen,
+  Handshake,
+  Headphones,
+  Palette,
+  PieChart,
+  Plug,
+  Shield,
+  SlidersHorizontal,
+  Truck,
+  Wallet,
+} from "lucide-react";
 import { SupportCallOverlay } from "@/components/suporte/call-overlay";
 import { SupportLiveProvider, useSupportLive } from "@/components/suporte/live-context";
 import { ConfirmProvider } from "@/components/confirm-dialog";
@@ -12,8 +25,10 @@ const NAV: SidebarNavItem[] = [
   { href: "/plataforma/usuarios", label: "Usuários", icon: Shield },
   { href: "/plataforma/planos", label: "Planos", icon: BadgePercent },
   { href: "/plataforma/parceiros", label: "Parceiros", icon: Handshake },
+  { href: "/plataforma/materiais", label: "Drive de Marketing", icon: FolderOpen },
   { href: "/plataforma/comissoes", label: "Comissões", icon: Wallet },
   { href: "/plataforma/canais", label: "Canais", icon: PieChart },
+  { href: "/plataforma/modulos", label: "Módulos", icon: SlidersHorizontal },
   { href: "/plataforma/integracoes", label: "Integrações", icon: Plug },
   { href: "/plataforma/aparencia", label: "Aparência", icon: Palette },
   { href: "/plataforma/suporte", label: "Suporte", icon: Headphones },

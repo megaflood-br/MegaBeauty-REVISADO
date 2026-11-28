@@ -54,8 +54,16 @@ model Tenant {
   metaVerifyToken     String?
   metaNumber          String?
   metaStatus          String?
+  metaAppId           String?
   metaAppSecret       String?
   metaGraphVersion    String?
+  platformModulesJson String   @default("{}")
+  instagramUserId     String?
+  instagramUsername   String?
+  instagramPageId     String?
+  instagramPageName   String?
+  instagramAccessToken String?
+  instagramConnectedAt DateTime?
   reminderHours       Int      @default(24)
   cashbackEnabled      Boolean  @default(false)
   cashbackEarnPct      Int      @default(5)
@@ -146,6 +154,7 @@ model Tenant {
   ordersAsSupplier   SupplierOrder[] @relation("OrdersAsSupplier")
   marketingCampaigns MarketingCampaign[]
   marketingRecipients MarketingRecipient[]
+  marketingPosts     SalonMarketingPost[]
   salonPops          SalonPop[]
   salonDocuments     SalonDocument[]
   ownedPartner       Partner? @relation("PartnerTenant")
@@ -1400,4 +1409,63 @@ model PartnerPayout {
   lines       PartnerCommission[]
 
   @@index([partnerId, createdAt])
+}
+
+model PartnerMarketingAsset {
+  id             String   @id @default(cuid())
+  title          String
+  description    String?
+  folder         String   @default("Feed")
+  formatLabel    String?
+  caption        String?
+  filePath       String
+  fileName       String
+  mimeType       String
+  fileSize       Int      @default(0)
+  mediaKind      String   @default("IMAGE")
+  applyLogo      Boolean  @default(true)
+  logoPosition   String   @default("bottom-right")
+  logoX          Float    @default(88)
+  logoY          Float    @default(88)
+  logoScale      Int      @default(22)
+  logoOpacity    Int      @default(100)
+  logoPadding    Int      @default(4)
+  logoBackdrop   String   @default("none")
+  logoVariant    String   @default("auto")
+  downloadsCount Int      @default(0)
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([active, folder, createdAt])
+}
+
+model SalonMarketingPost {
+  id                 String    @id @default(cuid())
+  tenantId           String
+  tenant             Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  serviceId          String?
+  packageId          String?
+  title              String
+  headline           String
+  badgeText          String?
+  priceText          String?
+  promoPriceText     String?
+  dateRangeText      String?
+  ctaText            String?
+  caption            String    @default("")
+  format             String    @default("feed")
+  style              String    @default("editorial")
+  imageUrl           String
+  status             String    @default("DRAFT")
+  publishTarget      String    @default("FEED")
+  instagramMediaId   String?
+  instagramPermalink String?
+  errorMessage       String?
+  publishedAt        DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, status])
 }

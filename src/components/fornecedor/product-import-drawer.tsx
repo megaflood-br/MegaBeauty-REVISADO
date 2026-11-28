@@ -143,8 +143,9 @@ export function SupplierProductImportDrawer({
     let createCount = 0;
     let updateCount = 0;
     let skipCount = 0;
+    const rows: { draft: SupplierImportDraft; action: "create" | "update" | "skip" }[] = [];
 
-    const rows = preview.drafts.map((draft) => {
+    for (const draft of preview.drafts) {
       const skuKey = normalizeSkuKey(draft.sku);
       const exists =
         (skuKey ? existingIndex.bySku.has(skuKey) : false) ||
@@ -167,8 +168,8 @@ export function SupplierProductImportDrawer({
         createCount += 1;
       }
 
-      return { draft, action };
-    });
+      rows.push({ draft, action });
+    }
 
     return { rows, createCount, updateCount, skipCount, actionableCount: createCount + updateCount };
   }, [preview.drafts, existingIndex, mode]);

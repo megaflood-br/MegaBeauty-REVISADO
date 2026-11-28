@@ -1,10 +1,12 @@
 import { prisma } from "@/lib/db";
 import { requireTenant } from "@/lib/tenant";
 import { ServiceBoard } from "@/components/servicos/service-board";
+import { loadPlatformModules } from "@/lib/platform-modules-server";
 
 export default async function ServicosPage() {
   const { session } = await requireTenant();
-  const [services, categories, products] = await Promise.all([
+  const [modules, services, categories, products] = await Promise.all([
+    loadPlatformModules(),
     prisma.service.findMany({
       where: { tenantId: session.tenantId },
       include: { category: true, products: { include: { product: true } } },
@@ -20,6 +22,7 @@ export default async function ServicosPage() {
 
   return (
     <ServiceBoard
+      enableWebImageSearch={modules.webImageSearch}
       categories={categories.map((c) => ({ id: c.id, name: c.name }))}
       products={products}
       services={services.map((s) => ({

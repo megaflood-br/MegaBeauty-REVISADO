@@ -4,6 +4,7 @@ import { AppShell } from "@/components/app-shell";
 import { listPlatformPlans, planLabel } from "@/lib/plans";
 import { loadSalonNotices } from "@/lib/salon-notices";
 import { loadOnboardingState } from "@/lib/onboarding-server";
+import { loadPlatformModules } from "@/lib/platform-modules-server";
 import { allowedNavHrefs, canAccess, moduleFromPath } from "@/lib/permissions";
 
 const NAV_HREFS = [
@@ -36,15 +37,21 @@ const NAV_HREFS = [
 
 export default async function PainelLayout({ children }: { children: React.ReactNode }) {
   const { session, tenant, access } = await requireTenant();
-  const [catalog, notices, onboarding, headerList] = await Promise.all([
+  const [catalog, notices, modules, headerList] = await Promise.all([
     listPlatformPlans(),
     loadSalonNotices(session.tenantId, tenant.city),
-    loadOnboardingState(session, tenant, access),
+    loadPlatformModules(),
     headers(),
   ]);
+  const onboarding = modules.onboardingTours
+    ? await loadOnboardingState(session, tenant, access)
+    : null;
   const pathname = headerList.get("x-pathname") || "";
   const area = moduleFromPath(pathname);
   const allowed = area ? canAccess(access, area) : true;
+  const visibleNavHrefs = modules.packages
+    ? NAV_HREFS
+    : NAV_HREFS.filter((href) => href !== "/pacotes");
   return (
     <AppShell
       salon={tenant.name}
@@ -52,7 +59,7 @@ export default async function PainelLayout({ children }: { children: React.React
       plan={planLabel(tenant.plan, catalog)}
       impersonatorName={session.impersonatorName}
       noticeCount={notices.noticeCount}
-      allowedHrefs={allowedNavHrefs(access, NAV_HREFS)}
+      allowedHrefs={allowedNavHrefs(access, visibleNavHrefs)}
       onboarding={onboarding}
     >
       {allowed ? (

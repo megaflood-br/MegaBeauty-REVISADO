@@ -2,10 +2,12 @@ import { prisma } from "@/lib/db";
 import { requireTenant } from "@/lib/tenant";
 import { StockBoard } from "@/components/estoque/stock-board";
 import { loadSalonNotices } from "@/lib/salon-notices";
+import { loadPlatformModules } from "@/lib/platform-modules-server";
 
 export default async function EstoquePage() {
   const { session, tenant } = await requireTenant();
-  const [products, categories, services, lots, requests, professionals, notices] = await Promise.all([
+  const [modules, products, categories, services, lots, requests, professionals, notices] = await Promise.all([
+    loadPlatformModules(),
     prisma.product.findMany({
       where: { tenantId: session.tenantId },
       include: { category: true, services: { include: { service: true } } },
@@ -43,6 +45,7 @@ export default async function EstoquePage() {
 
   return (
     <StockBoard
+      enableWebImageSearch={modules.webImageSearch}
       restock={notices.restock}
       categories={categories.map((c) => ({ id: c.id, name: c.name, productCount: c._count.products }))}
       brands={brands}

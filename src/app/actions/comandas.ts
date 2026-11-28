@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { prisma } from "@/lib/db";
+import { checkPlatformModule } from "@/lib/platform-modules-server";
 import { requireTenant } from "@/lib/tenant";
 import { calculateCommission } from "@/lib/commissions";
 import { nextStock } from "@/lib/stock";
@@ -854,6 +855,8 @@ export async function closeComanda(formData: FormData) {
 
 export async function reopenComanda(comandaId: string) {
   const { session, access } = await requireTenant();
+  const mod = await checkPlatformModule("reopenComandas");
+  if (!mod.ok) return { error: mod.error };
   if (!canReopenComandas(access)) {
     return { error: "Apenas administradores podem reabrir comandas fechadas." };
   }

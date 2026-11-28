@@ -1,11 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
+import { checkPlatformModule } from "@/lib/platform-modules-server";
 import { checkImageRateLimit, downloadSafeWebImage } from "@/lib/web-image-search-server";
 
 export async function POST(request: NextRequest) {
   const session = await getSession();
   if (!session) {
     return NextResponse.json({ error: "Não autenticado." }, { status: 401 });
+  }
+
+  const mod = await checkPlatformModule("webImageSearch");
+  if (!mod.ok) {
+    return NextResponse.json({ error: mod.error }, { status: 403 });
   }
 
   if (!checkImageRateLimit(session.userId, "fetch", 40)) {

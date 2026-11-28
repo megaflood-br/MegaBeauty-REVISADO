@@ -34,12 +34,14 @@ export function ServiceDrawer({
   service,
   categories,
   products,
+  enableWebImageSearch = true,
   onClose,
 }: {
   open: boolean;
   service: ServiceFormValue | null;
   categories: { id: string; name: string }[];
   products: { id: string; name: string }[];
+  enableWebImageSearch?: boolean;
   onClose: () => void;
 }) {
   const router = useRouter();
@@ -171,16 +173,18 @@ export function ServiceDrawer({
                       </Button>
                     ) : null}
                   </div>
-                  <WebImagePicker
-                    kind="service"
-                    name={name}
-                    imageUrl={imageUrl}
-                    autoFetch={!service}
-                    userHasCustomImage={userHasCustomImage}
-                    onSelectImage={setImageUrl}
-                    onManualOverride={() => setUserHasCustomImage(true)}
-                    onError={setError}
-                  />
+                  {enableWebImageSearch ? (
+                    <WebImagePicker
+                      kind="service"
+                      name={name}
+                      imageUrl={imageUrl}
+                      autoFetch={!service}
+                      userHasCustomImage={userHasCustomImage}
+                      onSelectImage={setImageUrl}
+                      onManualOverride={() => setUserHasCustomImage(true)}
+                      onError={setError}
+                    />
+                  ) : null}
                 </div>
 
                 <Field label="Nome" required>

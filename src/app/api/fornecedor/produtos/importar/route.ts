@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { checkPlatformModule } from "@/lib/platform-modules-server";
 import { commitSupplierProductImport, requireSupplierApi } from "@/lib/run-supplier-import";
 import type { SupplierImportMode, SupplierStockMode } from "@/lib/supplier-import";
 
@@ -26,6 +27,8 @@ export async function POST(request: Request) {
   try {
     const auth = await requireSupplierApi(request);
     if (!auth.ok) return json({ error: auth.error }, auth.status);
+    const mod = await checkPlatformModule("supplierBulkImport");
+    if (!mod.ok) return json({ error: mod.error }, 403);
 
     let body: unknown;
     try {

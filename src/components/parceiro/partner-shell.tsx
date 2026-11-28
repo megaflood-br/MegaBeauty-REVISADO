@@ -1,6 +1,6 @@
 "use client";
 
-import { Handshake, Link2, Palette, LayoutDashboard, Megaphone, Users, Wallet } from "lucide-react";
+import { FolderOpen, Handshake, Link2, Palette, LayoutDashboard, Megaphone, Users, Wallet } from "lucide-react";
 import { stopImpersonation } from "@/app/actions/platform";
 import { ConfirmProvider } from "@/components/confirm-dialog";
 import { SidebarLayout, type SidebarNavItem } from "@/components/sidebar-layout";
@@ -14,6 +14,7 @@ import type { OnboardingState } from "@/lib/onboarding";
 const NAV: SidebarNavItem[] = [
   { href: "/parceiro", label: "Painel", icon: LayoutDashboard, exact: true },
   { href: "/parceiro/links", label: "Meus links", icon: Link2 },
+  { href: "/parceiro/materiais", label: "Materiais", icon: FolderOpen },
   { href: "/parceiro/aparencia", label: "Marca do sistema", icon: Palette },
   { href: "/parceiro/landing", label: "Landing page", icon: Megaphone },
   { href: "/parceiro/clientes", label: "Clientes", icon: Users },
@@ -25,19 +26,22 @@ function PartnerShellLayout({
   brandName,
   userName,
   impersonatorName,
+  marketingDriveEnabled = true,
 }: {
   children: React.ReactNode;
   brandName: string;
   userName: string;
   impersonatorName?: string | null;
+  marketingDriveEnabled?: boolean;
 }) {
   const onboarding = useOnboarding();
+  const items = marketingDriveEnabled ? NAV : NAV.filter((item) => item.href !== "/parceiro/materiais");
   return (
     <SidebarLayout
       plan="Parceiro"
       title={brandName}
       userName={userName}
-      items={NAV}
+      items={items}
       headerAction={<Handshake size={16} className="text-slate-400" />}
       footerAction={<SidebarTourTrigger />}
       highlightedHref={onboarding?.highlightedHref ?? null}
@@ -67,15 +71,22 @@ export function PartnerShell({
   userName,
   impersonatorName,
   onboarding,
+  marketingDriveEnabled = true,
 }: {
   children: React.ReactNode;
   brandName: string;
   userName: string;
   impersonatorName?: string | null;
   onboarding?: OnboardingState | null;
+  marketingDriveEnabled?: boolean;
 }) {
   const content = (
-    <PartnerShellLayout brandName={brandName} userName={userName} impersonatorName={impersonatorName}>
+    <PartnerShellLayout
+      brandName={brandName}
+      userName={userName}
+      impersonatorName={impersonatorName}
+      marketingDriveEnabled={marketingDriveEnabled}
+    >
       {children}
     </PartnerShellLayout>
   );

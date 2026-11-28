@@ -50,6 +50,18 @@ function isCurrentClient(client: PrismaClient | undefined): client is PrismaClie
   if (typeof (client as { scheduleBlock?: { findMany?: unknown } }).scheduleBlock?.findMany !== "function") {
     return false;
   }
+  if (
+    typeof (client as { partnerMarketingAsset?: { findMany?: unknown } }).partnerMarketingAsset?.findMany !==
+    "function"
+  ) {
+    return false;
+  }
+  if (
+    typeof (client as { salonMarketingPost?: { findMany?: unknown } }).salonMarketingPost?.findMany !==
+    "function"
+  ) {
+    return false;
+  }
   const models = (
     client as unknown as {
       _runtimeDataModel?: { models?: Record<string, { fields?: { name?: string }[] }> };
@@ -82,7 +94,10 @@ function isCurrentClient(client: PrismaClient | undefined): client is PrismaClie
       userFields?.some((field) => field.name === "onboardingTourStatus") &&
       tenantFields?.some((field) => field.name === "whatsappProvider") &&
       tenantFields?.some((field) => field.name === "metaPhoneNumberId") &&
-      tenantFields?.some((field) => field.name === "evolutionQr"),
+      tenantFields?.some((field) => field.name === "evolutionQr") &&
+      tenantFields?.some((field) => field.name === "platformModulesJson") &&
+      tenantFields?.some((field) => field.name === "metaAppId") &&
+      tenantFields?.some((field) => field.name === "instagramUserId"),
   );
 }
 

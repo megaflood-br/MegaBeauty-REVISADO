@@ -15,10 +15,12 @@ export function ServiceBoard({
   services,
   categories,
   products,
+  enableWebImageSearch = true,
 }: {
   services: ServiceFormValue[];
   categories: { id: string; name: string }[];
   products: { id: string; name: string }[];
+  enableWebImageSearch?: boolean;
 }) {
   const router = useRouter();
   const [showActive, setShowActive] = useState(true);
@@ -148,6 +150,7 @@ export function ServiceBoard({
           service={editing}
           categories={categories}
           products={products}
+          enableWebImageSearch={enableWebImageSearch}
           onClose={() => setEditing(undefined)}
         />
       ) : null}

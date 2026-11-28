@@ -7,6 +7,7 @@ import type { AppointmentStatus } from "@/lib/constants";
 import { canAccess, canBlockAgendaSlots, canViewAllAgenda, shouldHidePhones } from "@/lib/permissions";
 import { redactPhone } from "@/lib/utils";
 import { isClientPackageExpired } from "@/lib/packages-shared";
+import { loadPlatformModules } from "@/lib/platform-modules-server";
 
 export default async function AgendaPage({
   searchParams,
@@ -22,7 +23,8 @@ export default async function AgendaPage({
   const scopedProfessionalId = ownOnly ? access.professionalId ?? "__none__" : null;
   const professionalFilter = scopedProfessionalId ? { professionalId: scopedProfessionalId } : {};
 
-  const [professionals, appointments, scheduleBlocks, clients, services] = await Promise.all([
+  const [modules, professionals, appointments, scheduleBlocks, clients, services] = await Promise.all([
+    loadPlatformModules(),
     prisma.professional.findMany({
       where: {
         tenantId: session.tenantId,
@@ -124,13 +126,13 @@ export default async function AgendaPage({
       slotMinutes={tenant.slotMinutes}
       professionals={professionals}
       appointments={mapped}
-      blocks={mappedBlocks}
+      blocks={modules.agendaBlocks ? mappedBlocks : []}
       clients={mappedClients}
       services={services}
       canCreate={canAccess(access, "agenda", "create")}
       canEdit={canAccess(access, "agenda", "edit")}
       canRemove={canAccess(access, "agenda", "remove")}
-      canBlockSlots={canBlockAgendaSlots(access)}
+      canBlockSlots={canBlockAgendaSlots(access) && modules.agendaBlocks}
       canViewAll={canViewAllAgenda(access)}
       canCreateComanda={canAccess(access, "comandas", "create")}
       canViewComanda={canAccess(access, "comandas")}

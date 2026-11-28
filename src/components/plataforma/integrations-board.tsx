@@ -14,6 +14,7 @@ export type PlatformIntegrationValue = {
   hasContora: boolean;
   hasEvolution: boolean;
   hasMeta: boolean;
+  metaAppId: string | null;
   metaMasked: string;
   metaGraphVersion: string | null;
   hasAsaas: boolean;
@@ -74,7 +75,12 @@ export function IntegrationsBoard({
           publicAppUrl={value.publicAppUrl}
         />
       ) : tab === "meta" ? (
-        <MetaForm masked={value.metaMasked} graphVersion={value.metaGraphVersion} publicAppUrl={value.publicAppUrl} />
+        <MetaForm
+          appId={value.metaAppId}
+          masked={value.metaMasked}
+          graphVersion={value.metaGraphVersion}
+          publicAppUrl={value.publicAppUrl}
+        />
       ) : tab === "asaas" ? (
         <AsaasForm
           masked={value.asaasMasked}
@@ -153,10 +159,12 @@ function EvolutionForm({
 }
 
 function MetaForm({
+  appId,
   masked,
   graphVersion,
   publicAppUrl,
 }: {
+  appId: string | null;
   masked: string;
   graphVersion: string | null;
   publicAppUrl: string | null;
@@ -164,18 +172,30 @@ function MetaForm({
   return (
     <Card>
       <form action={formAction(saveMetaIntegration)} className="grid gap-3">
+        <Field label="App ID da Meta (OAuth Instagram)">
+          <Input name="metaAppId" defaultValue={appId ?? ""} placeholder="Ex.: 123456789012345" />
+        </Field>
         <Field label="App Secret">
-          <Input name="metaAppSecret" type="password" placeholder={masked || "opcional, valida a assinatura do webhook"} />
+          <Input name="metaAppSecret" type="password" placeholder={masked || "chave secreta do aplicativo na Meta"} />
         </Field>
         <Field label="Versão do Graph">
           <Input name="metaGraphVersion" defaultValue={graphVersion ?? "v21.0"} placeholder="v21.0" />
         </Field>
         <p className="text-xs text-ink-soft">
-          Cada salão cola o Phone Number ID e o token em Configurações → WhatsApp. O webhook da Cloud API é{" "}
+          <strong>WhatsApp Cloud API:</strong> webhook{" "}
           <span className="font-mono">/api/webhooks/meta?tenant=slug</span>
-          {publicAppUrl ? ` (${publicAppUrl})` : ""}. A Evolution continua disponível.
+          {publicAppUrl ? ` (${publicAppUrl})` : ""}.
         </p>
-        <Button>Salvar WhatsApp oficial</Button>
+        <p className="text-xs text-ink-soft">
+          <strong>Instagram (Estúdio IA):</strong> cadastre o URI de redirecionamento OAuth{" "}
+          <span className="font-mono">
+            {publicAppUrl ? `${publicAppUrl}/api/instagram/oauth/callback` : "/api/instagram/oauth/callback"}
+          </span>{" "}
+          no painel Meta for Developers com permissões <span className="font-mono">instagram_basic</span>,{" "}
+          <span className="font-mono">instagram_content_publish</span> e{" "}
+          <span className="font-mono">pages_show_list</span>.
+        </p>
+        <Button>Salvar integração Meta</Button>
       </form>
     </Card>
   );
